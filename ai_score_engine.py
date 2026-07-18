@@ -105,6 +105,12 @@ def get_model_config() -> Dict[str, Any]:
                 weights[key] = max(0.2, min(2.5, float(row["weight"])))
     except Exception:
         pass
+    try:
+        from adaptive_cloud_learning import load_cloud_overlay
+        weights = load_cloud_overlay(weights)
+        model["adaptiveCloud"] = True
+    except Exception:
+        pass
     model["weights"] = weights
     return model
 

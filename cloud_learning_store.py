@@ -192,6 +192,22 @@ class CloudLearningStore:
             )
             return False
 
+    def resolved_rows(self, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return completed observations for adaptive quality learning."""
+        try:
+            response = (
+                self.client.table(self.TABLE_NAME)
+                .select("*")
+                .not_.is_("real_result", "null")
+                .order("created_at", desc=True)
+                .limit(max(1, int(limit)))
+                .execute()
+            )
+            return list(response.data or [])
+        except Exception:
+            logger.exception("Ошибка загрузки resolved-наблюдений.")
+            return []
+
     def resolved(
         self,
         observation_id: str,

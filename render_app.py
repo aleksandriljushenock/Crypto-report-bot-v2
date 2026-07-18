@@ -135,13 +135,27 @@ def health():
     try:
         _ensure_runtime()
         info = get_webhook_info()
+        from telegram_command_bot import trade_monitor, automation_supervisor, runtime_health_monitor
+        trade_status = {
+            "alive": bool(trade_monitor and trade_monitor.is_alive()),
+            "last_run": getattr(trade_monitor, "last_run", None),
+            "last_error": getattr(trade_monitor, "last_error", None),
+            "restart_count": getattr(trade_monitor, "restart_count", 0),
+            "heartbeat_at": getattr(trade_monitor, "heartbeat_at", None),
+        }
+        automation_status = automation_supervisor.status() if automation_supervisor else {}
+        health_status = runtime_health_monitor.snapshot() if runtime_health_monitor else {"alive": False}
+        degraded = not trade_status["alive"] or not health_status.get("alive", False)
         return jsonify(
-            status="healthy",
+            status="degraded" if degraded else "healthy",
             runtime_started=_runtime_started,
             webhook_url=(info or {}).get("url"),
             pending_updates=(info or {}).get("pending_update_count", 0),
+            trade_monitor=trade_status,
+            automation=automation_status,
+            health_monitor=health_status,
             uptime_seconds=int((datetime.now(timezone.utc) - _started_at).total_seconds()),
-        )
+        ), (503 if degraded else 200)
     except Exception as exc:
         log(f"Health check failed: {exc}")
         return jsonify(status="unhealthy", error=str(exc)), 503

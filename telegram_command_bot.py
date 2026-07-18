@@ -81,6 +81,7 @@ trade_scan_thread = None
 trade_scan_lock = threading.Lock()
 trade_monitor = None
 automation_supervisor = None
+runtime_health_monitor = None
 cloud_store = CloudLearningStore()
 
 
@@ -1656,7 +1657,7 @@ def start_runtime_services():
         settings = set_monitor_settings(enabled=True, chat_id=ALLOWED_CHAT_ID)
         log("Trade Monitor автоматически восстановлен после запуска runtime.")
 
-    global trade_monitor, automation_supervisor
+    global trade_monitor, automation_supervisor, runtime_health_monitor
     if trade_monitor is None:
         trade_monitor = TradeMonitor(send_message, log)
         if settings.get("enabled"):
@@ -1666,12 +1667,26 @@ def start_runtime_services():
         automation_supervisor = AutomationSupervisor(send_message, log, ALLOWED_CHAT_ID)
         automation_supervisor.start()
 
+    if runtime_health_monitor is None and os.getenv("HEALTH_MONITOR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        from runtime_health import RuntimeHealthMonitor
+        runtime_health_monitor = RuntimeHealthMonitor(
+            log,
+            lambda: trade_monitor,
+            lambda: automation_supervisor,
+        )
+        runtime_health_monitor.start()
+
     log("Telegram runtime services запущены в webhook-режиме.")
     return automation_supervisor
 
 
 def stop_runtime_services():
-    global trade_monitor, automation_supervisor
+    global trade_monitor, automation_supervisor, runtime_health_monitor
+    if runtime_health_monitor is not None:
+        try:
+            runtime_health_monitor.stop()
+        finally:
+            runtime_health_monitor = None
     if trade_monitor is not None:
         try:
             trade_monitor.stop()

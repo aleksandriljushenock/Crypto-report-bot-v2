@@ -4,7 +4,13 @@ from learning_engine_v14 import diagnostics, train
 
 
 def retrain():
-    return train(DEFAULT_WEIGHTS)
+    result = train(DEFAULT_WEIGHTS)
+    try:
+        from adaptive_cloud_learning import train_cloud_overlay
+        cloud = train_cloud_overlay(DEFAULT_WEIGHTS)
+    except Exception as exc:
+        cloud = {"status": "error", "error": str(exc)}
+    return {"local": result, "cloudAdaptive": cloud, "status": result.get("status") if isinstance(result, dict) else "done"}
 
 
 def build_learning_report():
