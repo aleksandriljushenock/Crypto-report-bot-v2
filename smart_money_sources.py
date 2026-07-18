@@ -24,6 +24,43 @@ BINANCE_SPOT = os.getenv("BINANCE_SPOT_API", "https://api.binance.com")
 BINANCE_FUTURES = os.getenv("BINANCE_FUTURES_API", "https://fapi.binance.com")
 DEFILLAMA_STABLECOINS = os.getenv("DEFILLAMA_STABLECOINS_API", "https://stablecoins.llama.fi")
 FARSIDE_BTC_URL = os.getenv("FARSIDE_BTC_ETF_URL", "https://farside.co.uk/bitcoin-etf-flow-all-data/")
+BYBIT_API = os.getenv("BYBIT_API", "https://api.bybit.com")
+OKX_API = os.getenv("OKX_API", "https://www.okx.com")
+
+
+def _provider_order() -> list[str]:
+    configured = os.getenv("SMART_MONEY_EXCHANGES", "").strip()
+    if configured:
+        return [item.strip().lower() for item in configured.split(",") if item.strip()]
+    # Binance commonly blocks shared cloud IPs with HTTP 418. Prefer Bybit on Render.
+    return ["bybit", "okx", "binance"] if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") else ["binance", "bybit", "okx"]
+
+
+def _base_asset(symbol: str) -> str:
+    value = symbol.upper().replace("-", "").replace("_", "")
+    for quote in ("USDT", "USDC", "USD", "BTC", "ETH"):
+        if value.endswith(quote) and len(value) > len(quote):
+            return value[:-len(quote)]
+    return value
+
+
+def _okx_symbol(symbol: str, futures: bool = False) -> str:
+    base = _base_asset(symbol)
+    return f"{base}-USDT-SWAP" if futures else f"{base}-USDT"
+
+
+def _first_success(action: str, providers: dict[str, Callable[[], Any]]) -> tuple[Any, str]:
+    errors: list[str] = []
+    for name in _provider_order():
+        fn = providers.get(name)
+        if fn is None:
+            continue
+        try:
+            return fn(), name
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            logger.info("Smart Money %s provider %s unavailable: %s", action, name, exc)
+    raise RuntimeError(f"No Smart Money provider succeeded for {action}: {'; '.join(errors)}")
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -68,28 +105,122 @@ class SourceResult:
         return data
 
 
+def _bybit_funding(symbol: str) -> float:
+    payload = http.get_json(
+        f"{BYBIT_API}/v5/market/funding/history",
+        params={"category": "linear", "symbol": symbol.upper(), "limit": 1},
+        cache_ttl=60,
+    )
+    rows = ((payload or {}).get("result") or {}).get("list") or []
+    if not rows:
+        raise ValueError("Bybit returned no funding rows")
+    return _float(rows[0].get("fundingRate"))
+
+
+def _okx_funding(symbol: str) -> float:
+    payload = http.get_json(
+        f"{OKX_API}/api/v5/public/funding-rate",
+        params={"instId": _okx_symbol(symbol, futures=True)},
+        cache_ttl=60,
+    )
+    rows = (payload or {}).get("data") or []
+    if not rows:
+        raise ValueError("OKX returned no funding rows")
+    return _float(rows[0].get("fundingRate"))
+
+
 def collect_funding(symbol: str) -> SourceResult:
-    data = http.get_json(f"{BINANCE_FUTURES}/fapi/v1/premiumIndex", params={"symbol": symbol})
-    rate = _float(data.get("lastFundingRate"))
-    # Negative funding can indicate crowded shorts / accumulation opportunity.
-    return SourceResult("funding", True, _score_signed(-rate, 0.0005), rate * 100, "%", "Binance Futures premiumIndex", "direct", "Negative funding is scored bullish; extreme positive funding is scored bearish.")
+    def binance() -> float:
+        data = http.get_json(f"{BINANCE_FUTURES}/fapi/v1/premiumIndex", params={"symbol": symbol})
+        return _float(data.get("lastFundingRate"))
+
+    rate, provider = _first_success("funding", {
+        "binance": binance,
+        "bybit": lambda: _bybit_funding(symbol),
+        "okx": lambda: _okx_funding(symbol),
+    })
+    label = {"binance": "Binance Futures", "bybit": "Bybit Linear", "okx": "OKX Swap"}[provider]
+    return SourceResult("funding", True, _score_signed(-rate, 0.0005), rate * 100, "%", f"{label} funding", "direct", "Negative funding is scored bullish; extreme positive funding is scored bearish.", metadata={"provider": provider})
+
+
+def _bybit_open_interest(symbol: str) -> tuple[float, float]:
+    payload = http.get_json(
+        f"{BYBIT_API}/v5/market/open-interest",
+        params={"category": "linear", "symbol": symbol.upper(), "intervalTime": "5min", "limit": 24},
+        cache_ttl=90,
+    )
+    rows = ((payload or {}).get("result") or {}).get("list") or []
+    if not rows:
+        raise ValueError("Bybit returned no open-interest rows")
+    values = [_float(row.get("openInterest")) for row in rows if _float(row.get("openInterest")) > 0]
+    if not values:
+        raise ValueError("Bybit open-interest rows were invalid")
+    return values[0], values[-1]
 
 
 def collect_open_interest(symbol: str) -> SourceResult:
-    current = http.get_json(f"{BINANCE_FUTURES}/fapi/v1/openInterest", params={"symbol": symbol})
-    history = http.get_json(
-        f"{BINANCE_FUTURES}/futures/data/openInterestHist",
-        params={"symbol": symbol, "period": "5m", "limit": 24}, cache_ttl=90,
-    )
-    now_oi = _float(current.get("openInterest"))
-    old_oi = _float(history[0].get("sumOpenInterest")) if isinstance(history, list) and history else 0.0
+    def binance() -> tuple[float, float]:
+        current = http.get_json(f"{BINANCE_FUTURES}/fapi/v1/openInterest", params={"symbol": symbol})
+        history = http.get_json(
+            f"{BINANCE_FUTURES}/futures/data/openInterestHist",
+            params={"symbol": symbol, "period": "5m", "limit": 24},
+            cache_ttl=90,
+        )
+        now = _float(current.get("openInterest"))
+        old = _float(history[0].get("sumOpenInterest")) if isinstance(history, list) and history else 0.0
+        return now, old
+
+    (now_oi, old_oi), provider = _first_success("open_interest", {
+        "binance": binance,
+        "bybit": lambda: _bybit_open_interest(symbol),
+    })
     change = ((now_oi - old_oi) / old_oi * 100.0) if old_oi else 0.0
-    return SourceResult("open_interest", True, _score_signed(change, 3.0), change, "% change/2h", "Binance Futures openInterest", "direct", "Rising OI is treated as increasing institutional participation; direction is refined by other components.", metadata={"open_interest": now_oi})
+    label = "Binance Futures" if provider == "binance" else "Bybit Linear"
+    return SourceResult("open_interest", True, _score_signed(change, 3.0), change, "% change/~2h", f"{label} open interest", "direct", "Rising OI is treated as increasing institutional participation; direction is refined by other components.", metadata={"open_interest": now_oi, "provider": provider})
 
 
-def _recent_agg_trades(symbol: str, futures: bool = False, limit: int = 500) -> list[dict[str, Any]]:
-    base = BINANCE_FUTURES if futures else BINANCE_SPOT
-    return http.get_json(f"{base}/api/v3/aggTrades" if not futures else f"{base}/fapi/v1/aggTrades", params={"symbol": symbol, "limit": limit}, cache_ttl=30)
+def _normalize_trade(price: Any, qty: Any, side: str) -> dict[str, Any]:
+    return {"p": str(price), "q": str(qty), "m": side.lower() == "sell"}
+
+
+def _bybit_recent_trades(symbol: str, futures: bool, limit: int) -> list[dict[str, Any]]:
+    payload = http.get_json(
+        f"{BYBIT_API}/v5/market/recent-trade",
+        params={"category": "linear" if futures else "spot", "symbol": symbol.upper(), "limit": min(limit, 1000)},
+        cache_ttl=30,
+    )
+    rows = ((payload or {}).get("result") or {}).get("list") or []
+    if not rows:
+        raise ValueError("Bybit returned no recent trades")
+    return [_normalize_trade(row.get("price"), row.get("size"), str(row.get("side", ""))) for row in rows]
+
+
+def _okx_recent_trades(symbol: str, futures: bool, limit: int) -> list[dict[str, Any]]:
+    payload = http.get_json(
+        f"{OKX_API}/api/v5/market/trades",
+        params={"instId": _okx_symbol(symbol, futures=futures), "limit": min(limit, 500)},
+        cache_ttl=30,
+    )
+    rows = (payload or {}).get("data") or []
+    if not rows:
+        raise ValueError("OKX returned no recent trades")
+    return [_normalize_trade(row.get("px"), row.get("sz"), str(row.get("side", ""))) for row in rows]
+
+
+def _recent_agg_trades(symbol: str, futures: bool = False, limit: int = 500) -> tuple[list[dict[str, Any]], str]:
+    def binance() -> list[dict[str, Any]]:
+        base = BINANCE_FUTURES if futures else BINANCE_SPOT
+        path = "/fapi/v1/aggTrades" if futures else "/api/v3/aggTrades"
+        return http.get_json(f"{base}{path}", params={"symbol": symbol, "limit": limit}, cache_ttl=30)
+
+    return _first_success(
+        "futures_trades" if futures else "spot_trades",
+        {
+            "binance": binance,
+            "bybit": lambda: _bybit_recent_trades(symbol, futures, limit),
+            "okx": lambda: _okx_recent_trades(symbol, futures, limit),
+        },
+    )
 
 
 def _trade_flow(trades: list[dict[str, Any]]) -> tuple[float, float, float, int]:
@@ -102,7 +233,7 @@ def _trade_flow(trades: list[dict[str, Any]]) -> tuple[float, float, float, int]
         notion = qty * price
         if notion <= 0:
             continue
-        parsed.append((notion, bool(row.get("m"))))  # m=True: buyer was maker => aggressive sell
+        parsed.append((notion, bool(row.get("m"))))
         notionals.append(notion)
         total += notion
     threshold = max(100_000.0, (sorted(notionals)[int(len(notionals) * 0.9)] if notionals else 0.0))
@@ -118,13 +249,13 @@ def _trade_flow(trades: list[dict[str, Any]]) -> tuple[float, float, float, int]
 
 
 def collect_exchange_netflow(symbol: str) -> SourceResult:
-    trades = _recent_agg_trades(symbol, futures=False)
+    trades, provider = _recent_agg_trades(symbol, futures=False)
     imbalance, total, _, _ = _trade_flow(trades)
-    return SourceResult("exchange_netflow", True, _score_signed(imbalance, 15.0), imbalance, "% taker imbalance", "Binance Spot aggTrades", "proxy", "Free fallback proxy: taker buy/sell imbalance, not wallet-labelled on-chain exchange netflow.", metadata={"sample_notional_usd": round(total, 2)})
+    return SourceResult("exchange_netflow", True, _score_signed(imbalance, 15.0), imbalance, "% taker imbalance", f"{provider.title()} Spot trades", "proxy", "Free fallback proxy: taker buy/sell imbalance, not wallet-labelled on-chain exchange netflow.", metadata={"sample_notional_usd": round(total, 2), "provider": provider})
 
 
 def collect_whale_activity(symbol: str) -> SourceResult:
-    trades = _recent_agg_trades(symbol, futures=False, limit=1000)
+    trades, provider = _recent_agg_trades(symbol, futures=False, limit=1000)
     imbalance, total, threshold, large_count = _trade_flow(trades)
     large_rows = []
     for row in trades or []:
@@ -135,7 +266,7 @@ def collect_whale_activity(symbol: str) -> SourceResult:
     large_buy = sum(x[0] for x in large_rows if not x[1])
     large_sell = sum(x[0] for x in large_rows if x[1])
     large_imbalance = (large_buy - large_sell) / large_total * 100.0 if large_total else imbalance
-    return SourceResult("whale_alert", True, _score_signed(large_imbalance, 20.0), large_imbalance, "% large-trade imbalance", "Binance Spot aggTrades", "proxy", "Free whale proxy based on unusually large aggressive trades; not labelled blockchain transfers.", metadata={"large_trade_threshold_usd": round(threshold, 2), "large_trade_count": large_count, "sample_notional_usd": round(total, 2)})
+    return SourceResult("whale_alert", True, _score_signed(large_imbalance, 20.0), large_imbalance, "% large-trade imbalance", f"{provider.title()} Spot trades", "proxy", "Free whale proxy based on unusually large aggressive trades; not labelled blockchain transfers.", metadata={"large_trade_threshold_usd": round(threshold, 2), "large_trade_count": large_count, "sample_notional_usd": round(total, 2), "provider": provider})
 
 
 def collect_liquidations(symbol: str) -> SourceResult:
@@ -152,9 +283,9 @@ def collect_liquidations(symbol: str) -> SourceResult:
         imbalance = (short_liq - long_liq) / total * 100.0 if total else 0.0
         return SourceResult("liquidations", True, _score_signed(imbalance, 25.0), imbalance, "% short-vs-long", "CoinGlass", "direct", metadata={"long_liquidation_usd": long_liq, "short_liquidation_usd": short_liq})
 
-    trades = _recent_agg_trades(symbol, futures=True, limit=1000)
+    trades, provider = _recent_agg_trades(symbol, futures=True, limit=1000)
     imbalance, total, threshold, large_count = _trade_flow(trades)
-    return SourceResult("liquidations", True, _score_signed(imbalance, 22.0), imbalance, "% large futures trade imbalance", "Binance Futures aggTrades", "proxy", "No liquidation API key configured; large aggressive futures trades are used as a stress/liquidation proxy.", metadata={"large_trade_threshold_usd": round(threshold, 2), "large_trade_count": large_count, "sample_notional_usd": round(total, 2)})
+    return SourceResult("liquidations", True, _score_signed(imbalance, 22.0), imbalance, "% large futures trade imbalance", f"{provider.title()} Futures trades", "proxy", "No liquidation API key configured; large aggressive futures trades are used as a stress/liquidation proxy.", metadata={"large_trade_threshold_usd": round(threshold, 2), "large_trade_count": large_count, "sample_notional_usd": round(total, 2), "provider": provider})
 
 
 def collect_stablecoin_flow(_: str) -> SourceResult:

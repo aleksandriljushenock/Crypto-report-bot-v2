@@ -20,19 +20,17 @@ def test_score_coverage():
 
 def test_public_collectors_with_mocks():
     def fake_json(url, params=None, **kwargs):
-        if "premiumIndex" in url:
-            return {"lastFundingRate": "-0.0002"}
-        if url.endswith("openInterest"):
-            return {"openInterest": "110"}
-        if "openInterestHist" in url:
-            return [{"sumOpenInterest": "100"}]
+        if "funding/history" in url:
+            return {"result": {"list": [{"fundingRate": "-0.0002"}]}}
+        if "open-interest" in url:
+            return {"result": {"list": [{"openInterest": "110"}, {"openInterest": "100"}]}}
+        if "recent-trade" in url:
+            return {"result": {"list": [{"price": "100", "size": "2000", "side": "Buy"} for _ in range(20)]}}
         if "stablecoincharts" in url:
             return [{"totalCirculatingUSD": {"peggedUSD": 100}}, {"totalCirculatingUSD": {"peggedUSD": 102}}]
-        if "aggTrades" in url:
-            return _trades(True)
         raise AssertionError(url)
 
-    with patch.object(sources.http, "get_json", side_effect=fake_json):
+    with patch.object(sources, "_provider_order", return_value=["bybit"]), patch.object(sources.http, "get_json", side_effect=fake_json):
         assert sources.collect_funding("BTCUSDT").available
         assert sources.collect_open_interest("BTCUSDT").score > 50
         assert sources.collect_stablecoin_flow("BTCUSDT").score > 50
@@ -51,8 +49,23 @@ def test_engine_survives_source_failure():
     assert result["sources"]["etf_flow"]["available"] is False
 
 
+def test_binance_failure_falls_back_to_bybit():
+    def fake_json(url, params=None, **kwargs):
+        if "binance.com" in url:
+            raise RuntimeError("418 blocked")
+        if "recent-trade" in url:
+            return {"result": {"list": [{"price": "100", "size": "2000", "side": "Buy"}]}}
+        raise AssertionError(url)
+
+    with patch.object(sources, "_provider_order", return_value=["binance", "bybit"]), patch.object(sources.http, "get_json", side_effect=fake_json):
+        result = sources.collect_exchange_netflow("BTCUSDT")
+    assert result.available
+    assert result.metadata["provider"] == "bybit"
+
+
 if __name__ == "__main__":
     test_score_coverage()
     test_public_collectors_with_mocks()
     test_engine_survives_source_failure()
+    test_binance_failure_falls_back_to_bybit()
     print("smart money tests: OK")

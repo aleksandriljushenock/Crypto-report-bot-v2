@@ -14,8 +14,7 @@ from analyzer import (
     calculate_score,
     parse_klines,
 )
-from binance_client import BinanceFuturesClient
-from config import BASE_URL, FUTURES_DATA_URL
+from trade_market_client import create_trade_market_client
 from main import collect_symbol_data, select_top_symbols
 from rule_engine import evaluate_rules
 
@@ -43,7 +42,7 @@ def _listing_metadata(symbol):
 
 
 def collect_market_snapshot(extra_symbols=None, top_limit=None):
-    client = BinanceFuturesClient(BASE_URL, FUTURES_DATA_URL)
+    client = create_trade_market_client()
     selected = select_top_symbols(client)
     if top_limit:
         selected = selected[:int(top_limit)]
@@ -72,6 +71,7 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
 
     result = {
         'runTimeUtc': datetime.now(timezone.utc).isoformat(),
+        'marketProvider': os.getenv('TRADE_MARKET_PROVIDER', 'bybit').strip().lower(),
         'selectedSymbols': list(selected_map.values()),
         'symbolsData': {},
     }
@@ -330,6 +330,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
             pass
     return {
         'runTimeUtc': snapshot['runTimeUtc'],
+        'marketProvider': snapshot.get('marketProvider', 'unknown'),
         'signals': signals,
         'rowsAnalyzed': len(rows),
         'prioritySymbols': priority,
