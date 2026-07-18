@@ -2,9 +2,12 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import logging
 
 from binance_client import BinanceFuturesClient
 from config import BASE_URL, FUTURES_DATA_URL
+
+logger = logging.getLogger("trade_outcome_tracker")
 
 DB_PATH = Path('data') / 'trade_outcomes.db'
 HORIZONS = {'1h': 1, '24h': 24, '7d': 24 * 7}
@@ -144,8 +147,18 @@ def update_trade_outcomes():
                     ''', (row['fingerprint'], horizon, now.isoformat(), price, signed_ret, _label(row, price)))
                     updated += 1
                 except Exception as exc:
-                    errors.append(f"{row['symbol']} {horizon}: {exc}")
-    return {'updated': updated, 'errors': errors[:10]}
+                    error_text = (
+                        f"symbol={row['symbol']}, "
+                        f"horizon={horizon}, "
+                        f"fingerprint={row['fingerprint']}, "
+                        f"error={type(exc).__name__}: {exc}"
+                    )
+                    print(f"Outcome tracker error: {error_text}")
+                    errors.append(error_text)
+    return {
+    "updated": updated,
+    "errors": errors,
+    }
 
 
 def get_trade_performance():

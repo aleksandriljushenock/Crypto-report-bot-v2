@@ -33,3 +33,12 @@ backups/
 Thumbs.db
 
 *.zip
+# Cloud/runtime secrets and state
+.env
+.env.*
+!.env.example
+logs/
+data/
+*.db
+*.sqlite
+*.sqlite3

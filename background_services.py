@@ -163,6 +163,8 @@ class AutomationSupervisor:
     def _run_outcomes(self):
         result = update_due_outcomes()
         self.logger(f"Outcome tracker: updated={result.get('updated')}, errors={len(result.get('errors', []))}")
+        for error_text in result.get("errors", []):
+            self.logger(f"Outcome tracker error: {error_text}")
         return result
 
     def _run_capital_flows(self):

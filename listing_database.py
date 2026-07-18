@@ -58,7 +58,13 @@ def initialize_database():
                 data_quality REAL,
 
                 analysis_json TEXT,
-                last_error TEXT
+                last_error TEXT,
+
+                primary_exchange TEXT,
+                exchange_count INTEGER NOT NULL DEFAULT 1,
+                exchanges_json TEXT,
+                pairs_json TEXT,
+                market_type TEXT
             )
             """
         )
@@ -69,6 +75,23 @@ def initialize_database():
             ON listings(onboard_timestamp DESC)
             """
         )
+
+        # Lightweight migrations for databases created by earlier versions.
+        existing_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(listings)").fetchall()
+        }
+        migrations = {
+            "primary_exchange": "TEXT",
+            "exchange_count": "INTEGER NOT NULL DEFAULT 1",
+            "exchanges_json": "TEXT",
+            "pairs_json": "TEXT",
+            "market_type": "TEXT",
+        }
+        for column, declaration in migrations.items():
+            if column not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE listings ADD COLUMN {column} {declaration}"
+                )
 
         connection.execute(
             """
@@ -96,9 +119,14 @@ def upsert_listing(listing):
                 last_seen_at,
                 last_price,
                 quote_volume_24h,
-                price_change_24h
+                price_change_24h,
+                primary_exchange,
+                exchange_count,
+                exchanges_json,
+                pairs_json,
+                market_type
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
             ON CONFLICT(symbol) DO UPDATE SET
                 base_asset = excluded.base_asset,
@@ -116,7 +144,12 @@ def upsert_listing(listing):
                 last_seen_at = excluded.last_seen_at,
                 last_price = excluded.last_price,
                 quote_volume_24h = excluded.quote_volume_24h,
-                price_change_24h = excluded.price_change_24h
+                price_change_24h = excluded.price_change_24h,
+                primary_exchange = excluded.primary_exchange,
+                exchange_count = excluded.exchange_count,
+                exchanges_json = excluded.exchanges_json,
+                pairs_json = excluded.pairs_json,
+                market_type = excluded.market_type
             """,
             (
                 listing.get("symbol"),
@@ -131,6 +164,11 @@ def upsert_listing(listing):
                 listing.get("lastPrice"),
                 listing.get("quoteVolume24h"),
                 listing.get("priceChange24h"),
+                listing.get("primaryExchange"),
+                int(listing.get("exchangeCount") or 1),
+                json.dumps(listing.get("exchanges") or [], ensure_ascii=False),
+                json.dumps(listing.get("pairs") or {}, ensure_ascii=False),
+                listing.get("marketType"),
             ),
         )
 

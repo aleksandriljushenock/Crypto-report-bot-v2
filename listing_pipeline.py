@@ -5,8 +5,7 @@ from concurrent.futures import (
 )
 from datetime import datetime, timezone
 
-from binance_client import BinanceFuturesClient
-from config import BASE_URL, FUTURES_DATA_URL
+from multi_exchange_client import aggregate_markets, collect_exchange_markets
 from listing_cache import (
     get_cache_stats,
     initialize_cache,
@@ -69,93 +68,27 @@ def timestamp_to_iso(timestamp_ms):
         return None
 
 
-def synchronize_binance_universe():
-    client = BinanceFuturesClient(
-        base_url=BASE_URL,
-        futures_data_url=FUTURES_DATA_URL,
-    )
-
-    exchange_info = client.exchange_info()
-    tickers = client.ticker_24h_all()
-
-    ticker_map = {
-        ticker.get("symbol"): ticker
-        for ticker in tickers
-        if ticker.get("symbol")
-    }
+def synchronize_exchange_universe():
+    collection = collect_exchange_markets()
+    aggregated = aggregate_markets(collection["markets"])
 
     saved = 0
-
-    for symbol_info in exchange_info.get(
-        "symbols",
-        [],
-    ):
-        symbol = symbol_info.get("symbol")
-        base_asset = symbol_info.get(
-            "baseAsset"
-        )
-        quote_asset = symbol_info.get(
-            "quoteAsset"
-        )
-        contract_type = symbol_info.get(
-            "contractType"
-        )
-        status = symbol_info.get(
-            "status"
-        )
-
-        if not symbol or not base_asset:
-            continue
-
-        if quote_asset != "USDT":
-            continue
-
-        if contract_type != "PERPETUAL":
-            continue
-
-        if base_asset in STABLECOINS:
-            continue
-
-        ticker = ticker_map.get(
-            symbol,
-            {},
-        )
-
-        onboard_timestamp = (
-            symbol_info.get("onboardDate")
-        )
-
-        listing = {
-            "symbol": symbol,
-            "baseAsset": base_asset,
-            "quoteAsset": quote_asset,
-            "contractType": contract_type,
-            "status": status,
-            "onboardTimestamp": (
-                int(onboard_timestamp)
-                if onboard_timestamp
-                else None
-            ),
-            "onboardIso": timestamp_to_iso(
-                onboard_timestamp
-            ),
-            "lastPrice": safe_float(
-                ticker.get("lastPrice")
-            ),
-            "quoteVolume24h": safe_float(
-                ticker.get("quoteVolume")
-            ),
-            "priceChange24h": safe_float(
-                ticker.get(
-                    "priceChangePercent"
-                )
-            ),
-        }
-
+    for listing in aggregated:
+        onboard_timestamp = listing.get("onboardTimestamp")
+        listing["onboardIso"] = timestamp_to_iso(onboard_timestamp)
         upsert_listing(listing)
         saved += 1
 
-    return saved
+    return {
+        "saved": saved,
+        "exchangeCounts": collection.get("counts", {}),
+        "errors": collection.get("errors", []),
+    }
+
+
+def synchronize_binance_universe():
+    """Backward-compatible alias retained for external callers."""
+    return synchronize_exchange_universe()["saved"]
 
 
 def database_row_to_listing(row):
@@ -300,9 +233,8 @@ def run_incremental_listing_scan(
     initialize_cache()
     reset_stuck_processing()
 
-    synchronized_count = (
-        synchronize_binance_universe()
-    )
+    synchronization = synchronize_exchange_universe()
+    synchronized_count = synchronization["saved"]
 
     pending = get_pending_listings(
         limit=deep_limit,
@@ -387,9 +319,10 @@ def run_incremental_listing_scan(
             timezone.utc
         ).isoformat(),
 
-        "binanceSymbolsSaved": (
-            synchronized_count
-        ),
+        "exchangeSymbolsSaved": synchronized_count,
+        "binanceSymbolsSaved": synchronized_count,
+        "exchangeCounts": synchronization.get("exchangeCounts", {}),
+        "exchangeErrors": synchronization.get("errors", []),
 
         "deepAnalyzedThisRun": len(
             current_results

@@ -42,8 +42,8 @@ def env_float(name: str, default: float, minimum: Optional[float] = None) -> flo
 @dataclass(frozen=True)
 class AppSettings:
     base_dir: Path = BASE_DIR
-    data_dir: Path = BASE_DIR / "data"
-    log_dir: Path = BASE_DIR / "logs"
+    data_dir: Path = Path(env_str("DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
+    log_dir: Path = Path(env_str("LOG_DIR", str(BASE_DIR / "logs"))).expanduser().resolve()
     telegram_bot_token: str = env_str("TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = env_str("TELEGRAM_CHAT_ID")
     http_connect_timeout: int = env_int("HTTP_CONNECT_TIMEOUT", 8, 1)
