@@ -21,4 +21,4 @@ RUN mkdir -p /app/data /app/logs \
 
 USER bot
 
-CMD ["python", "cloud_entrypoint.py"]
+CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "--bind", "0.0.0.0:10000", "render_app:app"]

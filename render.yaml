@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: crypto-report-bot
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:$PORT render_app:app
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
+      - key: LOG_DIR
+        value: /opt/render/project/src/logs
+      - key: LOG_LEVEL
+        value: INFO
+      - key: TZ
+        value: Europe/Minsk
+      - key: ENABLED_EXCHANGES
+        value: binance,mexc,bybit,okx,kucoin,gate,bitget
+      - key: EXCHANGE_QUOTES
+        value: USDT,USDC

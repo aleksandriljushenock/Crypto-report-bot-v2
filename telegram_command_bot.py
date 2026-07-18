@@ -315,6 +315,24 @@ def delete_webhook():
         log(f"Не удалось удалить webhook: {exc}")
 
 
+def set_webhook(webhook_url, secret_token=None, drop_pending_updates=False):
+    payload = {
+        "url": str(webhook_url).rstrip("/"),
+        "allowed_updates": ["message", "callback_query"],
+        "drop_pending_updates": bool(drop_pending_updates),
+    }
+    if secret_token:
+        payload["secret_token"] = str(secret_token)
+
+    result = telegram_request("setWebhook", payload, timeout=30)
+    log(f"Telegram webhook установлен: {payload['url']}")
+    return result
+
+
+def get_webhook_info():
+    return telegram_request("getWebhookInfo", {}, timeout=20)
+
+
 def set_bot_commands():
     commands = [
         {
@@ -1619,6 +1637,46 @@ def process_update(update):
             f"от chat_id={chat_id}"
         )
         handle_command(chat_id, text)
+def start_runtime_services():
+    """Initialize stores and background workers without starting long polling."""
+    if not BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN отсутствует в переменных окружения")
+    if not ALLOWED_CHAT_ID:
+        raise RuntimeError("TELEGRAM_CHAT_ID отсутствует в переменных окружения")
+
+    remove_stale_lock()
+    set_bot_commands()
+    initialize_signal_store()
+
+    global trade_monitor, automation_supervisor
+    if trade_monitor is None:
+        trade_monitor = TradeMonitor(send_message, log)
+        if get_monitor_settings().get("enabled"):
+            trade_monitor.start()
+
+    if automation_supervisor is None:
+        automation_supervisor = AutomationSupervisor(send_message, log, ALLOWED_CHAT_ID)
+        automation_supervisor.start()
+
+    log("Telegram runtime services запущены в webhook-режиме.")
+    return automation_supervisor
+
+
+def stop_runtime_services():
+    global trade_monitor, automation_supervisor
+    if trade_monitor is not None:
+        try:
+            trade_monitor.stop()
+        finally:
+            trade_monitor = None
+    if automation_supervisor is not None:
+        try:
+            automation_supervisor.stop()
+        finally:
+            automation_supervisor = None
+    log("Telegram runtime services остановлены.")
+
+
 def listen():
     if not BOT_TOKEN:
         raise RuntimeError(
