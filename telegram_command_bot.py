@@ -1648,10 +1648,18 @@ def start_runtime_services():
     set_bot_commands()
     initialize_signal_store()
 
+    # Render can restart with an empty ephemeral SQLite volume. When enabled,
+    # restore monitoring automatically using TELEGRAM_CHAT_ID.
+    auto_monitor = os.getenv("MONITOR_AUTO_ENABLE", "true").strip().lower() in {"1", "true", "yes", "on"}
+    settings = get_monitor_settings()
+    if auto_monitor and (not settings.get("enabled") or not settings.get("chat_id")):
+        settings = set_monitor_settings(enabled=True, chat_id=ALLOWED_CHAT_ID)
+        log("Trade Monitor автоматически восстановлен после запуска runtime.")
+
     global trade_monitor, automation_supervisor
     if trade_monitor is None:
         trade_monitor = TradeMonitor(send_message, log)
-        if get_monitor_settings().get("enabled"):
+        if settings.get("enabled"):
             trade_monitor.start()
 
     if automation_supervisor is None:
@@ -1694,8 +1702,13 @@ def listen():
     initialize_signal_store()
 
     global trade_monitor, automation_supervisor
+    auto_monitor = os.getenv("MONITOR_AUTO_ENABLE", "true").strip().lower() in {"1", "true", "yes", "on"}
+    settings = get_monitor_settings()
+    if auto_monitor and (not settings.get("enabled") or not settings.get("chat_id")):
+        settings = set_monitor_settings(enabled=True, chat_id=ALLOWED_CHAT_ID)
+        log("Trade Monitor автоматически восстановлен после запуска polling runtime.")
     trade_monitor = TradeMonitor(send_message, log)
-    if get_monitor_settings().get("enabled"):
+    if settings.get("enabled"):
         trade_monitor.start()
 
     automation_supervisor = AutomationSupervisor(send_message, log, ALLOWED_CHAT_ID)

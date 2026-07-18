@@ -1,4 +1,5 @@
-import os, requests
+import os
+from trade_market_client import create_trade_market_client
 from v8_store import connect, initialize, now_iso
 
 def set_position(symbol, quantity, avg_price=0):
@@ -14,7 +15,9 @@ def get_positions():
     with connect() as c:return [dict(x) for x in c.execute('SELECT * FROM portfolio ORDER BY symbol').fetchall()]
 
 def _price(symbol):
-    pair=symbol if symbol.endswith('USDT') else symbol+'USDT'; return float(requests.get('https://api.binance.com/api/v3/ticker/price',params={'symbol':pair},timeout=(5,15)).json()['price'])
+    pair = symbol if symbol.endswith('USDT') else symbol + 'USDT'
+    ticker = create_trade_market_client().ticker_24h(pair)
+    return float(ticker.get('lastPrice') or 0)
 
 def portfolio_report():
     rows=get_positions(); lines=['<b>💼 PORTFOLIO MANAGER</b>','']

@@ -25,6 +25,8 @@ class TradeMonitor:
         self._lock = threading.Lock()
         self.last_run = None
         self.last_error = None
+        self.restart_count = 0
+        self.heartbeat_at = None
         initialize_signal_store()
 
     def is_alive(self):
@@ -35,32 +37,54 @@ class TradeMonitor:
             if self.is_alive():
                 return False
             self._stop_event.clear()
-            self._thread = threading.Thread(target=self._loop, daemon=True, name='trade-monitor')
+            self._thread = threading.Thread(target=self._supervised_loop, daemon=True, name='trade-monitor')
             self._thread.start()
             return True
 
     def stop(self):
         self._stop_event.set()
 
-    def _loop(self):
+    def _supervised_loop(self):
+        """Keep the monitor alive even if a cycle raises an unexpected exception."""
         self.logger('Фоновый торговый монитор запущен.')
         while not self._stop_event.is_set():
+            try:
+                self._loop()
+            except BaseException as exc:
+                if self._stop_event.is_set():
+                    break
+                self.restart_count += 1
+                self.last_error = f'{type(exc).__name__}: {exc}'
+                self.logger(
+                    f'Критическая ошибка торгового монитора; автоматический перезапуск '
+                    f'через 10 сек. restart_count={self.restart_count}: {exc}'
+                )
+                self._stop_event.wait(10)
+        self.logger('Фоновый торговый монитор остановлен.')
+
+    def _loop(self):
+        while not self._stop_event.is_set():
+            self.heartbeat_at = datetime.now(timezone.utc).isoformat()
             settings = get_monitor_settings()
             if not settings.get('enabled'):
                 self._stop_event.wait(5)
                 continue
+
             started = time.time()
             try:
                 self.run_once(settings)
                 self.last_error = None
             except Exception as exc:
-                self.last_error = str(exc)
+                self.last_error = f'{type(exc).__name__}: {exc}'
                 self.logger(f'Ошибка торгового монитора: {exc}')
+
             self.last_run = datetime.now(timezone.utc).isoformat()
+            self.heartbeat_at = self.last_run
             interval = max(5, int(settings.get('interval_minutes') or 15)) * 60
             elapsed = time.time() - started
-            self._stop_event.wait(max(30, interval - elapsed))
-        self.logger('Фоновый торговый монитор остановлен.')
+            wait_seconds = max(30, interval - elapsed)
+            self.logger(f'Монитор: следующий цикл через {int(wait_seconds)} сек.')
+            self._stop_event.wait(wait_seconds)
 
     def run_once(self, settings=None):
         settings = settings or get_monitor_settings()
@@ -81,6 +105,9 @@ class TradeMonitor:
             self.sender(chat_id, message)
             mark_signal_sent(signal_id)
             new_count += 1
-        self.logger(f"Монитор: проверено={result.get('rowsAnalyzed')}, сигналов={len(result.get('signals', []))}, новых={new_count}")
+        self.logger(
+            f"Монитор: проверено={result.get('rowsAnalyzed')}, "
+            f"сигналов={len(result.get('signals', []))}, новых={new_count}"
+        )
         result['newSignalsSent'] = new_count
         return result

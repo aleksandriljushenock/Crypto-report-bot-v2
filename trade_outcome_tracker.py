@@ -4,8 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import logging
 
-from binance_client import BinanceFuturesClient
-from config import BASE_URL, FUTURES_DATA_URL
+from trade_market_client import create_trade_market_client
 
 logger = logging.getLogger("trade_outcome_tracker")
 
@@ -124,7 +123,7 @@ def _label(row, price):
 
 def update_trade_outcomes():
     initialize_trade_outcomes()
-    client = BinanceFuturesClient(BASE_URL, FUTURES_DATA_URL)
+    client = create_trade_market_client()
     now = utc_now()
     updated, errors = 0, []
     with get_connection() as conn:
