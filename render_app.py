@@ -10,6 +10,8 @@ from typing import Callable
 
 from flask import Flask, jsonify, request
 
+from keepalive import KeepAliveService
+
 from telegram_command_bot import (
     get_webhook_info,
     log,
@@ -25,6 +27,7 @@ _started_at = datetime.now(timezone.utc)
 _runtime_lock = threading.Lock()
 _runtime_started = False
 _task_locks: dict[str, threading.Lock] = {}
+_keepalive = KeepAliveService(log)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -63,6 +66,7 @@ def _ensure_runtime() -> None:
             drop_pending_updates=_env("DROP_PENDING_UPDATES", "false").lower() in {"1", "true", "yes", "on"},
         )
         _runtime_started = True
+        _keepalive.start()
         log("Render webhook runtime полностью инициализирован.")
 
 
@@ -71,6 +75,7 @@ def _shutdown_runtime() -> None:
     if not _runtime_started:
         return
     try:
+        _keepalive.stop()
         stop_runtime_services()
     finally:
         _runtime_started = False
@@ -154,6 +159,7 @@ def health():
             trade_monitor=trade_status,
             automation=automation_status,
             health_monitor=health_status,
+            keepalive=_keepalive.snapshot(),
             uptime_seconds=int((datetime.now(timezone.utc) - _started_at).total_seconds()),
         ), (503 if degraded else 200)
     except Exception as exc:
@@ -209,8 +215,14 @@ def register_webhook():
 
 @app.get("/wake")
 def wake():
-    # Lightweight endpoint for an external uptime monitor. It does not expose secrets.
-    return jsonify(ok=True, timestamp=int(time.time()))
+    # Lightweight endpoint for internal/external uptime monitors.
+    _ensure_runtime()
+    return jsonify(
+        ok=True,
+        runtime_started=_runtime_started,
+        keepalive_alive=_keepalive.alive(),
+        timestamp=int(time.time()),
+    )
 
 
 atexit.register(_shutdown_runtime)
