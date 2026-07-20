@@ -126,6 +126,57 @@ def classify_regime(factors: Dict[str, float]) -> str:
     return "range"
 
 
+def _normalize_direction(value: Any) -> str:
+    value = str(value or "").upper()
+    if value in {"LONG", "LONG_BIAS", "BUY"}:
+        return "LONG"
+    if value in {"SHORT", "SHORT_BIAS", "SELL"}:
+        return "SHORT"
+    return value
+
+
+def _cloud_samples() -> List[Dict[str, Any]]:
+    """Rebuild learning samples from persistent Supabase observations."""
+    if os.getenv("LEARNING_CLOUD_RESTORE_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+        return []
+    try:
+        from cloud_learning_store import CloudLearningStore
+        rows = CloudLearningStore().resolved_rows(limit=int(os.getenv("LEARNING_CLOUD_MAX_ROWS", "3000")))
+    except Exception:
+        return []
+    result = []
+    for row in rows:
+        features = _json(row.get("features"), {}) or {}
+        factors = features.get("aiFactors") or features.get("tradeProfile") or {}
+        if not all(k in factors for k in FEATURES):
+            continue
+        outcome = _json(row.get("real_result") or row.get("result") or row.get("outcome"), {}) or {}
+        returns = {}
+        if isinstance(outcome.get("returns"), dict):
+            returns.update({str(k): float(v) for k, v in outcome["returns"].items() if k in HORIZONS})
+        horizon = str(outcome.get("horizon") or row.get("horizon") or "24h")
+        raw_return = outcome.get("return_percent", outcome.get("returnPercent", outcome.get("pnl_percent")))
+        if raw_return is not None and horizon in HORIZONS:
+            try:
+                returns[horizon] = float(raw_return)
+            except Exception:
+                pass
+        if not returns:
+            continue
+        metadata = _json(row.get("metadata"), {}) or {}
+        fp = str(metadata.get("fingerprint") or row.get("id") or "")
+        result.append({
+            "fingerprint": fp,
+            "symbol": row.get("symbol"),
+            "direction": _normalize_direction(row.get("signal_direction") or features.get("direction")),
+            "created_at": row.get("signal_created_at") or row.get("created_at") or now_iso(),
+            "old_score": float(row.get("signal_score") or features.get("aiScore") or features.get("score") or 0),
+            "factors": {k: float(factors.get(k, 50)) for k in FEATURES},
+            "returns": returns,
+        })
+    return result
+
+
 def load_samples() -> List[Dict[str, Any]]:
     """Aggregate all available outcomes into one sample per prediction."""
     from trade_outcome_tracker import get_connection, initialize_trade_outcomes
@@ -149,13 +200,22 @@ def load_samples() -> List[Dict[str, Any]]:
         item = grouped.setdefault(fp, {
             "fingerprint": fp,
             "symbol": row["symbol"],
-            "direction": str(row["direction"] or "").upper(),
+            "direction": _normalize_direction(row["direction"]),
             "created_at": row["created_at"],
             "old_score": float(row["ai_score"] or payload.get("aiScore") or 0),
             "factors": {k: float(factors.get(k, 50)) for k in FEATURES},
             "returns": {},
         })
         item["returns"][str(row["horizon"])] = float(row["return_percent"] or 0)
+    for item in _cloud_samples():
+        fp = item.get("fingerprint")
+        if not fp:
+            continue
+        existing = grouped.get(fp)
+        if existing:
+            existing["returns"].update(item.get("returns") or {})
+        else:
+            grouped[fp] = item
     result = []
     horizon_weights = {"1h": 0.10, "4h": 0.20, "24h": 0.45, "72h": 0.25}
     for item in grouped.values():
@@ -303,6 +363,15 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
         row = conn.execute("SELECT * FROM model_versions WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
         rules = conn.execute("SELECT * FROM learning_rules WHERE active=1 AND model_version=? ORDER BY ABS(adjustment) DESC", (row["version"],)).fetchall() if row else []
     if not row:
+        try:
+            from cloud_model_store import CloudModelStore
+            cloud = CloudModelStore().load_active_model()
+            if cloud and cloud.get("version"):
+                cfg = cloud.get("config") or _model_config(cloud.get("weights") or defaults)
+                return {"version": cloud["version"], "weights": cfg.get("global_weights", defaults),
+                        "config": cfg, "metrics": cloud.get("metrics") or {}, "rules": cloud.get("rules") or []}
+        except Exception:
+            pass
         # Preserve an already learned v13 champion as the v14 starting point.
         try:
             from learning_engine_v13 import active_model as active_v13
@@ -477,6 +546,14 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
                   "active": active_model(defaults)["version"]}
         with connect() as conn:
             conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", (result["status"], json.dumps(result), now_iso()))
+        try:
+            from cloud_model_store import CloudModelStore
+            store = CloudModelStore()
+            current_model = active_model(defaults)
+            store.save_model(current_model, "active", len(samples))
+            store.save_training_run(result)
+        except Exception:
+            pass
         return result
 
     current = active_model(defaults)
@@ -534,6 +611,13 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
               "active": version if promoted else current["version"]}
     with connect() as conn:
         conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", (status, json.dumps(result), now_iso()))
+    try:
+        from cloud_model_store import CloudModelStore
+        store = CloudModelStore()
+        store.save_model({"version": version, "config": config, "metrics": metrics}, status, len(samples))
+        store.save_training_run(result)
+    except Exception:
+        pass
     return result
 
 
@@ -545,6 +629,12 @@ def diagnostics(defaults: Dict[str, float]) -> Dict[str, Any]:
     drift = _drift(samples)
     with connect() as conn:
         versions = [dict(r) for r in conn.execute("SELECT version,status,sample_count,created_at,metrics_json FROM model_versions ORDER BY id DESC LIMIT 8").fetchall()]
+    if not versions:
+        try:
+            from cloud_model_store import CloudModelStore
+            versions = CloudModelStore().list_models(8)
+        except Exception:
+            versions = []
     regime_stats = {}
     for regime in sorted({s["regime"] for s in samples}):
         subset = [s for s in samples if s["regime"] == regime]

@@ -1,5 +1,7 @@
+import gc
 import hashlib
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -17,6 +19,8 @@ from analyzer import (
 from trade_market_client import create_trade_market_client
 from main import collect_symbol_data, select_top_symbols
 from rule_engine import evaluate_rules
+
+_SCAN_LOCK = threading.Lock()
 
 
 def _listing_metadata(symbol):
@@ -76,7 +80,7 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
         'symbolsData': {},
     }
 
-    max_workers = max(1, min(6, int(os.getenv('TRADE_SCAN_MAX_WORKERS', '4'))))
+    max_workers = max(1, min(3, int(os.getenv('TRADE_SCAN_MAX_WORKERS', '2'))))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(collect_symbol_data, client, symbol): symbol for symbol in selected_map}
         for future in as_completed(futures):
@@ -184,12 +188,10 @@ def _direction_for_candles(candles):
 
 
 def build_timeframe_profile(symbol_data, direction):
-    parsed = {}
     labels = {}
     numeric = {}
     for interval in ('1d', '4h', '1h', '15m', '5m'):
         candles = parse_klines(symbol_data.get('klines', {}).get(interval, []))
-        parsed[interval] = candles
         label, value = _direction_for_candles(candles)
         labels[interval] = label
         numeric[interval] = value
@@ -309,31 +311,51 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
 
 
 def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
-    listing_priority = get_priority_listing_symbols(limit=int(os.getenv('TRADE_LISTING_PRIORITY_LIMIT', '25')))
-    discovery_priority = get_priority_discovery_symbols(limit=int(os.getenv('TRADE_DISCOVERY_PRIORITY_LIMIT', '20')))
-    priority = list(dict.fromkeys(listing_priority + discovery_priority))
-    top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '35'))
-    snapshot = collect_market_snapshot(extra_symbols=priority, top_limit=top_limit)
-    rows = analyze_snapshot(snapshot)
-    min_score = float(os.getenv('TRADE_MIN_SCORE', '72'))
-    min_rr = float(os.getenv('TRADE_MIN_RR', '2.0'))
-    min_probability = float(os.getenv('TRADE_MIN_PROBABILITY', '65'))
-    signals = find_trade_signals(
-        rows, min_score=min_score, min_rr=min_rr,
-        include_watch=include_watch, max_results=max_results, min_probability=min_probability,
-    )
-    if apply_ai:
-        try:
-            from ai_intelligence import rank_signals
-            signals = rank_signals(signals)
-        except Exception:
-            pass
-    return {
-        'runTimeUtc': snapshot['runTimeUtc'],
-        'marketProvider': snapshot.get('marketProvider', 'unknown'),
-        'signals': signals,
-        'rowsAnalyzed': len(rows),
-        'prioritySymbols': priority,
-        'listingPrioritySymbols': listing_priority,
-        'discoveryPrioritySymbols': discovery_priority,
-    }
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return {
+            'runTimeUtc': datetime.now(timezone.utc).isoformat(),
+            'marketProvider': os.getenv('TRADE_MARKET_PROVIDER', 'unknown'),
+            'signals': [], 'rowsAnalyzed': 0, 'busy': True,
+            'prioritySymbols': [], 'listingPrioritySymbols': [], 'discoveryPrioritySymbols': [],
+        }
+    snapshot = None
+    rows = None
+    try:
+        listing_priority = get_priority_listing_symbols(limit=int(os.getenv('TRADE_LISTING_PRIORITY_LIMIT', '12')))
+        discovery_priority = get_priority_discovery_symbols(limit=int(os.getenv('TRADE_DISCOVERY_PRIORITY_LIMIT', '10')))
+        priority = list(dict.fromkeys(listing_priority + discovery_priority))
+        top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '24'))
+        snapshot = collect_market_snapshot(extra_symbols=priority, top_limit=top_limit)
+        rows = analyze_snapshot(snapshot)
+        run_time = snapshot['runTimeUtc']
+        provider = snapshot.get('marketProvider', 'unknown')
+        # Release the largest raw candle structures before ranking/AI.
+        snapshot.clear()
+        snapshot = None
+        gc.collect()
+        min_score = float(os.getenv('TRADE_MIN_SCORE', '72'))
+        min_rr = float(os.getenv('TRADE_MIN_RR', '2.0'))
+        min_probability = float(os.getenv('TRADE_MIN_PROBABILITY', '65'))
+        signals = find_trade_signals(
+            rows, min_score=min_score, min_rr=min_rr,
+            include_watch=include_watch, max_results=max_results, min_probability=min_probability,
+        )
+        if apply_ai:
+            try:
+                from ai_intelligence import rank_signals
+                signals = rank_signals(signals)
+            except Exception:
+                pass
+        return {
+            'runTimeUtc': run_time, 'marketProvider': provider, 'signals': signals,
+            'rowsAnalyzed': len(rows), 'prioritySymbols': priority,
+            'listingPrioritySymbols': listing_priority, 'discoveryPrioritySymbols': discovery_priority,
+        }
+    finally:
+        if snapshot is not None:
+            snapshot.clear()
+        if rows is not None:
+            rows.clear()
+        gc.collect()
+        _SCAN_LOCK.release()
+

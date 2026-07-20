@@ -5,7 +5,7 @@ services:
     plan: free
     autoDeploy: true
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:$PORT render_app:app
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 0 --bind 0.0.0.0:$PORT render_app:app
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -30,3 +30,15 @@ services:
         value: binance,mexc,bybit,okx,kucoin,gate,bitget
       - key: EXCHANGE_QUOTES
         value: USDT,USDC
+      - key: TRADE_SCAN_MAX_WORKERS
+        value: "2"
+      - key: TRADE_TOP_LIQUID_SYMBOLS
+        value: "24"
+      - key: LEARNING_SEARCH_ITERATIONS
+        value: "100"
+      - key: LEARNING_CLOUD_RESTORE_ENABLED
+        value: "true"
+      - key: LEARNING_CLOUD_MAX_ROWS
+        value: "3000"
+      - key: MEMORY_SOFT_LIMIT_MB
+        value: "430"

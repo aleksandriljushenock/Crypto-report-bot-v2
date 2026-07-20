@@ -29,7 +29,8 @@ def build_learning_report():
         f"Специалистов режимов: <b>{len((config.get('specialists') or {}))}</b>",
     ]
     if result.get("status") == "collecting-data":
-        lines.append(f"Нужно минимум: <b>{result.get('required')}</b>")
+        local = result.get("local") or {}
+        lines.append(f"Нужно минимум: <b>{local.get('required', 'не указано')}</b>")
     if metrics.get("samples"):
         lines += [
             "", "<b>Качество на собственной истории:</b>",

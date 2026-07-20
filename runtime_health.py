@@ -38,7 +38,13 @@ class RuntimeHealthMonitor:
         return bool(self._thread and self._thread.is_alive())
 
     def snapshot(self):
-        return {'alive': self.alive(), 'last_check': self.last_check, 'last_actions': list(self.last_actions)}
+        
+        try:
+            from memory_guard import pressure
+            memory = pressure()
+        except Exception:
+            memory = {}
+        return {'alive': self.alive(), 'last_check': self.last_check, 'last_actions': list(self.last_actions), 'memory': memory}
 
     def _can_restart(self, key):
         now = time.time()
@@ -51,6 +57,10 @@ class RuntimeHealthMonitor:
         while not self._stop.is_set():
             actions = []
             try:
+                from memory_guard import cleanup
+                memory = cleanup()
+                if memory.get('high'):
+                    actions.append(f"memory pressure {memory.get('rssMb')}MB")
                 trade = self.get_trade_monitor()
                 if trade is not None:
                     stale = False
