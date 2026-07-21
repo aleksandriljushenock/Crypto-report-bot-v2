@@ -9,24 +9,26 @@ from cloud_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
+STORE_BUILD = "2026-07-21-schema-aligned-1"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _dict(value: Any) -> dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
+        except (TypeError, ValueError, json.JSONDecodeError):
             return {}
+        return parsed if isinstance(parsed, dict) else {}
     return {}
 
 
-def _list(value: Any) -> list[Any]:
+def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     if isinstance(value, tuple):
@@ -34,24 +36,30 @@ def _list(value: Any) -> list[Any]:
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
-            return parsed if isinstance(parsed, list) else []
-        except Exception:
+        except (TypeError, ValueError, json.JSONDecodeError):
             return []
+        return parsed if isinstance(parsed, list) else []
     return []
 
 
-def _int(value: Any, default: int = 0) -> int:
+def _as_int(value: Any, default: int = 0) -> int:
     try:
-        return int(value or default)
+        return int(value)
     except (TypeError, ValueError):
         return default
 
 
-class CloudModelStore:
-    """Persistent Supabase storage for v14 learning models.
+def _error_text(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
-    This implementation intentionally targets the actual Supabase schema used
-    by this project instead of trying several incompatible payload formats.
+
+class CloudModelStore:
+    """Supabase persistence aligned with the current project schema.
+
+    The class deliberately writes only columns that exist in the supplied
+    `training_runs` and `model_registry` tables. Model parameters are stored
+    inside `model_registry.metadata`, so no compatibility-only columns are
+    required.
     """
 
     MODEL_TABLE = "model_registry"
@@ -60,113 +68,118 @@ class CloudModelStore:
 
     def __init__(self) -> None:
         self.client = get_supabase_client()
+        self._known_run_statuses: list[str] | None = None
+        logger.info("CloudModelStore loaded; build=%s", STORE_BUILD)
 
     def save_training_run(self, result: dict[str, Any]) -> bool:
+        model_name = str(result.get("model_name") or self.DEFAULT_MODEL_NAME)
         version = str(
             result.get("model_version")
             or result.get("version")
             or result.get("active")
             or "collecting-data"
         )
-        model_name = str(result.get("model_name") or self.DEFAULT_MODEL_NAME)
-        status = str(result.get("status") or "unknown")
-        metrics = _dict(result.get("metrics"))
-        parameters = _dict(result.get("parameters") or result.get("config"))
-        feature_names = _list(result.get("feature_names"))
 
-        samples_total = _int(
-            result.get("samples_total")
-            or result.get("sample_count")
-            or result.get("samples_count")
-            or result.get("samples")
-        )
-        samples_train = _int(result.get("samples_train"))
-        samples_validation = _int(result.get("samples_validation"))
+        raw_status = str(result.get("status") or "completed").strip().lower()
+        terminal = raw_status in {
+            "completed", "complete", "success", "succeeded", "trained", "done", "ok",
+            "failed", "failure", "error", "errored",
+        }
 
-        started_at = result.get("started_at") or _now()
-        completed_at = result.get("completed_at")
-        if completed_at is None and status.lower() in {
-            "completed",
-            "complete",
-            "success",
-            "succeeded",
-            "failed",
-            "error",
-        }:
-            completed_at = _now()
-
-        payload = {
-            "status": status,
+        payload: dict[str, Any] = {
             "model_name": model_name,
             "model_version": version,
-            "algorithm": result.get("algorithm"),
-            "target_name": result.get("target_name"),
-            "samples_total": samples_total,
-            "samples_train": samples_train,
-            "samples_validation": samples_validation,
-            "metrics": metrics,
-            "feature_names": feature_names,
-            "parameters": parameters,
+            "algorithm": str(result.get("algorithm") or "learning-engine-v14"),
+            "target_name": str(result.get("target_name") or "signal_outcome"),
+            "samples_total": _as_int(
+                result.get("samples_total")
+                or result.get("sample_count")
+                or result.get("samples_count")
+                or result.get("samples")
+            ),
+            "samples_train": _as_int(result.get("samples_train")),
+            "samples_validation": _as_int(result.get("samples_validation")),
+            "metrics": _as_dict(result.get("metrics")),
+            "feature_names": _as_list(result.get("feature_names")),
+            "parameters": _as_dict(result.get("parameters") or result.get("config")),
             "metadata": result,
-            "model_storage_path": result.get("model_storage_path")
-            or result.get("storage_path"),
+            "model_storage_path": result.get("model_storage_path") or result.get("storage_path"),
             "error_message": result.get("error_message") or result.get("error"),
-            "started_at": started_at,
-            "completed_at": completed_at,
+            "started_at": result.get("started_at") or _now(),
+            "completed_at": result.get("completed_at") or (_now() if terminal else None),
             "created_at": result.get("created_at") or _now(),
         }
         payload = {key: value for key, value in payload.items() if value is not None}
 
-        try:
-            self.client.table(self.RUN_TABLE).insert(payload).execute()
-            return True
-        except Exception:
-            logger.exception(
-                "Supabase insert failed for %s; model=%s version=%s",
-                self.RUN_TABLE,
-                model_name,
-                version,
-            )
-            return False
+        errors: list[str] = []
+        for status in self._run_status_candidates(raw_status):
+            candidate = dict(payload)
+            if status is not None:
+                candidate["status"] = status
+            try:
+                self.client.table(self.RUN_TABLE).insert(candidate).execute()
+                if status is None:
+                    logger.warning(
+                        "training_runs saved using database default status; model=%s version=%s",
+                        model_name,
+                        version,
+                    )
+                elif status != raw_status:
+                    logger.warning(
+                        "training_runs saved with compatible status=%s instead of %s; model=%s version=%s",
+                        status,
+                        raw_status,
+                        model_name,
+                        version,
+                    )
+                return True
+            except Exception as exc:
+                errors.append(_error_text(exc))
+
+        logger.error(
+            "Supabase insert failed for training_runs; model=%s version=%s; attempts=%s",
+            model_name,
+            version,
+            " | ".join(errors),
+        )
+        return False
 
     def save_model(self, model: dict[str, Any], status: str, sample_count: int) -> bool:
+        model_name = str(model.get("model_name") or model.get("name") or self.DEFAULT_MODEL_NAME)
         version = str(model.get("model_version") or model.get("version") or "unknown")
-        model_name = str(
-            model.get("model_name")
-            or model.get("name")
-            or self.DEFAULT_MODEL_NAME
-        )
-        config = _dict(model.get("config") or model.get("parameters"))
-        metrics = _dict(model.get("metrics"))
-        feature_names = _list(model.get("feature_names"))
-        active = str(status).lower() in {"active", "champion"}
+        status_text = str(status or "challenger").strip().lower()
+        active = status_text in {"active", "champion"}
+        config = _as_dict(model.get("config") or model.get("parameters"))
         now = _now()
 
-        payload = {
+        metadata = _as_dict(model.get("metadata"))
+        metadata.update(
+            {
+                "status": status_text,
+                "sample_count": _as_int(sample_count),
+                "parameters": config,
+                "store_build": STORE_BUILD,
+            }
+        )
+
+        payload: dict[str, Any] = {
             "model_name": model_name,
             "model_version": version,
-            "storage_bucket": model.get("storage_bucket") or "models",
-            "storage_path": model.get("storage_path")
-            or model.get("model_storage_path"),
-            "algorithm": model.get("algorithm"),
-            "framework": model.get("framework"),
-            "metrics": metrics,
-            "feature_names": feature_names,
-            "metadata": {
-                **_dict(model.get("metadata")),
-                "status": status,
-                "sample_count": _int(sample_count),
-                "parameters": config,
-            },
+            "storage_bucket": str(model.get("storage_bucket") or "models"),
+            "storage_path": str(
+                model.get("storage_path")
+                or model.get("model_storage_path")
+                or f"inline/{model_name}/{version}.json"
+            ),
+            "algorithm": str(model.get("algorithm") or "rule-ensemble"),
+            "framework": str(model.get("framework") or "python"),
+            "metrics": _as_dict(model.get("metrics")),
+            "feature_names": _as_list(model.get("feature_names")),
+            "metadata": metadata,
             "training_run_id": model.get("training_run_id"),
             "is_active": active,
             "created_at": model.get("created_at") or now,
             "activated_at": now if active else model.get("activated_at"),
-            # Compatibility columns already added to the current database.
-            "status": status,
-            "parameters": config,
-            "sample_count": _int(sample_count),
-            "samples_count": _int(sample_count),
         }
         payload = {key: value for key, value in payload.items() if value is not None}
 
@@ -182,57 +195,47 @@ class CloudModelStore:
             rows = list(existing.data or [])
 
             if rows:
-                model_id = rows[0]["id"]
                 update_payload = dict(payload)
                 update_payload.pop("created_at", None)
-                self.client.table(self.MODEL_TABLE).update(update_payload).eq(
-                    "id", model_id
-                ).execute()
+                (
+                    self.client.table(self.MODEL_TABLE)
+                    .update(update_payload)
+                    .eq("id", rows[0]["id"])
+                    .execute()
+                )
             else:
                 self.client.table(self.MODEL_TABLE).insert(payload).execute()
 
             if active:
                 self._retire_other_active_models(model_name, version)
             return True
-        except Exception:
-            logger.exception(
-                "Supabase save failed for %s; model=%s version=%s",
-                self.MODEL_TABLE,
+        except Exception as exc:
+            logger.error(
+                "Supabase save failed for model_registry; model=%s version=%s; payload_keys=%s; error=%s",
                 model_name,
                 version,
+                sorted(payload.keys()),
+                _error_text(exc),
+                exc_info=True,
             )
             return False
 
     def load_active_model(self) -> dict[str, Any] | None:
-        queries = [
-            lambda: self.client.table(self.MODEL_TABLE)
-            .select("*")
-            .eq("is_active", True)
-            .order("activated_at", desc=True)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute(),
-            lambda: self.client.table(self.MODEL_TABLE)
-            .select("*")
-            .eq("status", "active")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute(),
-            lambda: self.client.table(self.MODEL_TABLE)
-            .select("*")
-            .eq("status", "champion")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute(),
-        ]
-        for query in queries:
-            try:
-                rows = list(query().data or [])
-                if rows:
-                    return self._normalize_model(rows[0])
-            except Exception:
-                logger.debug("Active model query variant failed", exc_info=True)
-        return None
+        try:
+            response = (
+                self.client.table(self.MODEL_TABLE)
+                .select("*")
+                .eq("is_active", True)
+                .order("activated_at", desc=True)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = list(response.data or [])
+            return self._normalize_model(rows[0]) if rows else None
+        except Exception:
+            logger.exception("Не удалось загрузить активную модель из Supabase")
+            return None
 
     def list_models(self, limit: int = 8) -> list[dict[str, Any]]:
         try:
@@ -240,7 +243,7 @@ class CloudModelStore:
                 self.client.table(self.MODEL_TABLE)
                 .select("*")
                 .order("created_at", desc=True)
-                .limit(limit)
+                .limit(max(1, _as_int(limit, 8)))
                 .execute()
             )
             return [self._normalize_model(row) for row in (response.data or [])]
@@ -249,50 +252,77 @@ class CloudModelStore:
             return []
 
     def _normalize_model(self, row: dict[str, Any]) -> dict[str, Any]:
-        metadata = _dict(row.get("metadata"))
-        config = _dict(
-            row.get("parameters")
-            or metadata.get("parameters")
-            or row.get("config")
-            or row.get("config_json")
-        )
-        metrics = _dict(row.get("metrics") or row.get("metrics_json"))
-        sample_count = (
-            row.get("sample_count")
-            or row.get("samples_count")
-            or metadata.get("sample_count")
-            or 0
-        )
+        metadata = _as_dict(row.get("metadata"))
+        config = _as_dict(metadata.get("parameters"))
         return {
             "model_name": row.get("model_name") or self.DEFAULT_MODEL_NAME,
-            "version": row.get("model_version") or row.get("version"),
-            "status": row.get("status")
-            or metadata.get("status")
-            or ("active" if row.get("is_active") else "challenger"),
+            "version": row.get("model_version"),
+            "status": metadata.get("status") or ("active" if row.get("is_active") else "challenger"),
             "config": config,
             "weights": config.get("global_weights") or config.get("weights") or {},
-            "metrics": metrics,
-            "sample_count": _int(sample_count),
+            "metrics": _as_dict(row.get("metrics")),
+            "sample_count": _as_int(metadata.get("sample_count")),
             "created_at": row.get("created_at"),
             "activated_at": row.get("activated_at"),
             "rules": config.get("rules") or [],
         }
 
-    def _retire_other_active_models(self, model_name: str, keep_version: str) -> None:
-        """Retire all other active versions after the new model was saved."""
+    def _run_status_candidates(self, requested: str) -> list[str | None]:
+        normalized = self._normalize_requested_status(requested)
+        candidates: list[str | None] = [normalized]
+
+        for existing in self._load_known_run_statuses():
+            if existing not in candidates:
+                candidates.append(existing)
+
+        # Omitting the field lets PostgreSQL use the schema's own valid default.
+        candidates.append(None)
+
+        for fallback in ("completed", "success", "running", "started", "pending", "failed"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+        return candidates
+
+    def _load_known_run_statuses(self) -> list[str]:
+        if self._known_run_statuses is not None:
+            return self._known_run_statuses
         try:
-            query = (
+            response = self.client.table(self.RUN_TABLE).select("status").limit(100).execute()
+            values: list[str] = []
+            for row in response.data or []:
+                value = row.get("status")
+                if isinstance(value, str) and value and value not in values:
+                    values.append(value)
+            self._known_run_statuses = values
+        except Exception:
+            logger.debug("Не удалось прочитать существующие training_runs.status", exc_info=True)
+            self._known_run_statuses = []
+        return self._known_run_statuses
+
+    @staticmethod
+    def _normalize_requested_status(value: str) -> str:
+        raw = value.strip().lower()
+        if raw in {"complete", "success", "succeeded", "trained", "done", "ok"}:
+            return "completed"
+        if raw in {"failure", "error", "errored"}:
+            return "failed"
+        if raw in {"queued", "waiting"}:
+            return "pending"
+        return raw or "completed"
+
+    def _retire_other_active_models(self, model_name: str, keep_version: str) -> None:
+        try:
+            (
                 self.client.table(self.MODEL_TABLE)
-                .update({"is_active": False, "status": "retired"})
+                .update({"is_active": False})
                 .eq("model_name", model_name)
                 .eq("is_active", True)
                 .neq("model_version", keep_version)
+                .execute()
             )
-            query.execute()
         except Exception:
-            # Saving the new model is more important than retirement cleanup.
             logger.warning(
-                "Не удалось перевести старые модели в retired: model=%s keep=%s",
+                "Не удалось деактивировать предыдущие модели: model=%s keep=%s",
                 model_name,
                 keep_version,
                 exc_info=True,
