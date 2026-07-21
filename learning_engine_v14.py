@@ -168,6 +168,7 @@ def _cloud_samples() -> List[Dict[str, Any]]:
         result.append({
             "fingerprint": fp,
             "symbol": row.get("symbol"),
+            "timeframe": row.get("timeframe") or features.get("timeframe") or "unknown",
             "direction": _normalize_direction(row.get("signal_direction") or features.get("direction")),
             "created_at": row.get("signal_created_at") or row.get("created_at") or now_iso(),
             "old_score": float(row.get("signal_score") or features.get("aiScore") or features.get("score") or 0),
@@ -175,6 +176,30 @@ def _cloud_samples() -> List[Dict[str, Any]]:
             "returns": returns,
         })
     return result
+
+
+def _dedupe_samples(samples: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove near-duplicate signals to prevent one market burst dominating training."""
+    window_minutes = max(1, int(os.getenv("LEARNING_DEDUPE_WINDOW_MINUTES", "20")))
+    seen: dict[tuple[str, str, str, int], Dict[str, Any]] = {}
+    for sample in sorted(samples, key=lambda x: str(x.get("created_at", ""))):
+        try:
+            dt = datetime.fromisoformat(str(sample.get("created_at", "")).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            bucket = int(dt.timestamp() // (window_minutes * 60))
+        except Exception:
+            bucket = hash(str(sample.get("fingerprint", "")))
+        key = (
+            str(sample.get("symbol") or "").upper(),
+            str(sample.get("timeframe") or "unknown").lower(),
+            str(sample.get("direction") or "").upper(),
+            bucket,
+        )
+        current = seen.get(key)
+        if current is None or len(sample.get("returns") or {}) > len(current.get("returns") or {}):
+            seen[key] = sample
+    return sorted(seen.values(), key=lambda x: str(x.get("created_at", "")))
 
 
 def load_samples() -> List[Dict[str, Any]]:
@@ -200,6 +225,7 @@ def load_samples() -> List[Dict[str, Any]]:
         item = grouped.setdefault(fp, {
             "fingerprint": fp,
             "symbol": row["symbol"],
+            "timeframe": payload.get("timeframe") or payload.get("interval") or "unknown",
             "direction": _normalize_direction(row["direction"]),
             "created_at": row["created_at"],
             "old_score": float(row["ai_score"] or payload.get("aiScore") or 0),
@@ -216,9 +242,10 @@ def load_samples() -> List[Dict[str, Any]]:
             existing["returns"].update(item.get("returns") or {})
         else:
             grouped[fp] = item
+    grouped_samples = _dedupe_samples(list(grouped.values()))
     result = []
     horizon_weights = {"1h": 0.10, "4h": 0.20, "24h": 0.45, "72h": 0.25}
-    for item in grouped.values():
+    for item in grouped_samples:
         available = [(h, item["returns"][h]) for h in HORIZONS if h in item["returns"]]
         if not available:
             continue
@@ -286,13 +313,36 @@ def evaluate(samples: Sequence[Dict[str, Any]], weights: Dict[str, float]) -> Di
     top_ret = _weighted_mean([float(s["return"]) for _, s, _ in top], [w for _, _, w in top])
     rank_corr = _corr(scores, returns, ws)
     overall_ret = _weighted_mean(returns, ws)
-    # Utility rewards ranking and profitable top selections, penalizes miscalibration.
-    utility = 0.35 * rank_corr + 0.25 * (top_wr / 100.0) + 0.25 * math.tanh(top_ret / 4.0) - 0.15 * brier
+    gross_profit = sum(max(0.0, r) * w for r, w in zip(returns, ws))
+    gross_loss = sum(abs(min(0.0, r)) * w for r, w in zip(returns, ws))
+    profit_factor = gross_profit / gross_loss if gross_loss else (99.0 if gross_profit else 0.0)
+    equity = peak = max_drawdown = 0.0
+    for r in returns:
+        equity += r
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    high_conf = [(p, w, r) for p, w, r in zip(probs, wins, returns) if p >= 0.70]
+    high_conf_precision = (sum(w for _, w, _ in high_conf) / len(high_conf) * 100.0) if high_conf else 0.0
+    # Utility rewards ranking and profitable selections, penalizes miscalibration and drawdown.
+    utility = (
+        0.28 * rank_corr
+        + 0.22 * (top_wr / 100.0)
+        + 0.22 * math.tanh(top_ret / 4.0)
+        + 0.13 * math.tanh((profit_factor - 1.0) / 2.0)
+        + 0.08 * (high_conf_precision / 100.0)
+        - 0.12 * brier
+        - 0.05 * math.tanh(max_drawdown / 15.0)
+    )
     return {
         "samples": len(samples), "brier": round(brier, 6), "rank_corr": round(rank_corr, 5),
         "top_win_rate": round(top_wr, 2), "top_avg_return": round(top_ret, 4),
         "overall_win_rate": round(_weighted_mean(wins, ws) * 100, 2),
-        "overall_avg_return": round(overall_ret, 4), "utility": round(utility, 6),
+        "overall_avg_return": round(overall_ret, 4),
+        "profit_factor": round(min(profit_factor, 99.0), 4),
+        "max_drawdown_pct_points": round(max_drawdown, 4),
+        "high_conf_samples": len(high_conf),
+        "high_conf_precision": round(high_conf_precision, 2),
+        "utility": round(utility, 6),
     }
 
 
@@ -529,38 +579,43 @@ def _drift(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 def _candidate_better(base: Dict[str, float], candidate: Dict[str, float], drift: Dict[str, Any]) -> bool:
     min_gain = float(os.getenv("LEARNING_MIN_UTILITY_GAIN", "0.012"))
     required = min_gain * (1.4 if drift.get("status") == "high" else 1.0)
+    min_holdout = max(30, int(os.getenv("LEARNING_MIN_HOLDOUT_SAMPLES", "40")))
     return (
-        candidate["utility"] >= base["utility"] + required
-        and candidate["brier"] <= base["brier"] * 1.03
-        and candidate["top_avg_return"] >= base["top_avg_return"] - 0.10
-        and candidate["rank_corr"] >= base["rank_corr"] - 0.02
+        candidate.get("samples", 0) >= min_holdout
+        and candidate["utility"] >= base["utility"] + required
+        and candidate["brier"] <= base["brier"] * 1.02
+        and candidate["top_avg_return"] >= base["top_avg_return"]
+        and candidate["rank_corr"] >= base["rank_corr"] - 0.01
+        and candidate.get("profit_factor", 0.0) >= max(1.05, base.get("profit_factor", 0.0) * 0.98)
+        and candidate.get("max_drawdown_pct_points", 999.0) <= base.get("max_drawdown_pct_points", 999.0) * 1.05 + 0.5
+        and candidate.get("high_conf_precision", 0.0) >= base.get("high_conf_precision", 0.0) - 2.0
     )
 
 
 def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     initialize()
     samples = load_samples()
-    min_samples = max(50, int(os.getenv("LEARNING_MIN_SAMPLES", "60")))
+    min_samples = max(100, int(os.getenv("LEARNING_MIN_SAMPLES", "200")))
     if len(samples) < min_samples:
         result = {"status": "collecting-data", "samples": len(samples), "required": min_samples,
                   "active": active_model(defaults)["version"]}
-        with connect() as conn:
-            conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", (result["status"], json.dumps(result), now_iso()))
-        try:
-            from cloud_model_store import CloudModelStore
-            store = CloudModelStore()
-            current_model = active_model(defaults)
-            store.save_model(current_model, "active", len(samples))
-            store.save_training_run(result)
-        except Exception:
-            pass
+        # Collection progress is not a completed training run. Persist the active model
+        # only at milestones to avoid polluting training_runs and excessive Supabase writes.
+        milestone = max(10, int(os.getenv("LEARNING_COLLECTION_SAVE_STEP", "25")))
+        if len(samples) == 0 or len(samples) % milestone == 0:
+            try:
+                from cloud_model_store import CloudModelStore
+                current_model = active_model(defaults)
+                CloudModelStore().save_model(current_model, "active", len(samples))
+            except Exception:
+                pass
         return result
 
     current = active_model(defaults)
     seed = int(hashlib.sha256((str(len(samples)) + samples[-1]["fingerprint"]).encode()).hexdigest()[:8], 16)
     global_weights = optimize_weights(samples, defaults, seed)
     specialists: Dict[str, Dict[str, float]] = {}
-    specialist_min = max(30, int(os.getenv("LEARNING_SPECIALIST_MIN_SAMPLES", "36")))
+    specialist_min = max(50, int(os.getenv("LEARNING_SPECIALIST_MIN_SAMPLES", "80")))
     for regime in sorted({s["regime"] for s in samples}):
         subset = [s for s in samples if s["regime"] == regime]
         if len(subset) >= specialist_min:
@@ -588,14 +643,14 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
               "calibration": calibration, "rules": rules, "drift": drift,
               "training": {"samples": len(samples), "holdout": len(holdout), "seed": seed}}
     version = "14." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    status = "active" if promoted else "challenger"
+    model_status = "active" if promoted else "challenger"
     metrics = {"baseline": base_metrics, "candidate": candidate_metrics, "promoted": promoted,
                "drift": drift, "specialists": len(specialists)}
     with connect() as conn:
         if promoted:
             conn.execute("UPDATE model_versions SET status='retired' WHERE status='active'")
         conn.execute("INSERT INTO model_versions(version,status,config_json,metrics_json,sample_count,created_at,activated_at) VALUES(?,?,?,?,?,?,?)",
-                     (version, status, json.dumps(config), json.dumps(metrics), len(samples), now_iso(), now_iso() if promoted else None))
+                     (version, model_status, json.dumps(config), json.dumps(metrics), len(samples), now_iso(), now_iso() if promoted else None))
         for rule in rules:
             payload = {k: v for k, v in rule.items() if k not in {"kind", "regime", "direction", "samples", "win_rate", "avg_return", "adjustment"}}
             conn.execute("INSERT INTO learning_rules(model_version,kind,regime,direction,rule_json,samples,win_rate,avg_return,adjustment,active,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -606,15 +661,19 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
                              (version, regime, b["score_min"], int(b["score_max"]), b["samples"], b["wins"], b["avg_return"], b["probability"]))
         conn.execute("INSERT INTO drift_snapshots(model_version,drift_score,details_json,created_at) VALUES(?,?,?,?)",
                      (version, drift["score"], json.dumps(drift), now_iso()))
-    result = {"status": status, "samples": len(samples), "version": version, "promoted": promoted,
+    result = {"status": "completed", "model_status": model_status,
+              "samples": len(samples), "samples_total": len(samples),
+              "samples_train": split, "samples_validation": len(holdout),
+              "version": version, "promoted": promoted,
               "metrics": metrics, "specialists": len(specialists), "rules": len(rules),
+              "feature_names": list(FEATURES),
               "active": version if promoted else current["version"]}
     with connect() as conn:
-        conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", (status, json.dumps(result), now_iso()))
+        conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", ("completed", json.dumps(result), now_iso()))
     try:
         from cloud_model_store import CloudModelStore
         store = CloudModelStore()
-        store.save_model({"version": version, "config": config, "metrics": metrics}, status, len(samples))
+        store.save_model({"version": version, "config": config, "metrics": metrics}, model_status, len(samples))
         store.save_training_run(result)
     except Exception:
         pass

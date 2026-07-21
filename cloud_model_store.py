@@ -9,7 +9,7 @@ from cloud_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
-STORE_BUILD = "2026-07-21-schema-aligned-1"
+STORE_BUILD = "2026-07-21-quality-upgrade-1"
 
 
 def _now() -> str:
@@ -81,10 +81,8 @@ class CloudModelStore:
         )
 
         raw_status = str(result.get("status") or "completed").strip().lower()
-        terminal = raw_status in {
-            "completed", "complete", "success", "succeeded", "trained", "done", "ok",
-            "failed", "failure", "error", "errored",
-        }
+        normalized_status = self._normalize_requested_status(raw_status)
+        terminal = normalized_status in {"completed", "failed"}
 
         payload: dict[str, Any] = {
             "model_name": model_name,
@@ -308,7 +306,11 @@ class CloudModelStore:
             return "failed"
         if raw in {"queued", "waiting"}:
             return "pending"
-        return raw or "completed"
+        if raw in {"collecting-data", "collecting", "training", "started", "in-progress", "processing"}:
+            return "running"
+        if raw in {"active", "champion", "challenger"}:
+            return "completed"
+        return raw or "pending"
 
     def _retire_other_active_models(self, model_name: str, keep_version: str) -> None:
         try:

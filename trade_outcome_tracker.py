@@ -3,13 +3,14 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import logging
+import os
 
 from trade_market_client import create_trade_market_client
 
 logger = logging.getLogger("trade_outcome_tracker")
 
 DB_PATH = Path('data') / 'trade_outcomes.db'
-HORIZONS = {'1h': 1, '24h': 24, '7d': 24 * 7}
+HORIZONS = {'1h': 1, '4h': 4, '24h': 24, '72h': 72}
 
 
 def utc_now():
@@ -34,6 +35,7 @@ def initialize_trade_outcomes():
                 fingerprint TEXT PRIMARY KEY,
                 symbol TEXT NOT NULL,
                 direction TEXT,
+                timeframe TEXT,
                 entry_price REAL,
                 stop REAL,
                 tp1 REAL,
@@ -65,6 +67,8 @@ def initialize_trade_outcomes():
             conn.execute("ALTER TABLE tracked_signals ADD COLUMN ai_score REAL")
         if "ai_tier" not in columns:
             conn.execute("ALTER TABLE tracked_signals ADD COLUMN ai_tier TEXT")
+        if "timeframe" not in columns:
+            conn.execute("ALTER TABLE tracked_signals ADD COLUMN timeframe TEXT")
 
 
 def _entry_from_signal(signal):
@@ -89,15 +93,31 @@ def register_trade_signal(signal):
     entry = _entry_from_signal(signal)
     if entry is None:
         return False
+    symbol = str(signal.get('symbol') or '').upper()
+    direction = str(signal.get('direction') or '')
+    timeframe = str(signal.get('timeframe') or signal.get('interval') or 'unknown').lower()
+    dedupe_minutes = max(1, int(os.getenv('LEARNING_SIGNAL_DEDUPE_MINUTES', '20')))
+    cutoff = (utc_now() - timedelta(minutes=dedupe_minutes)).isoformat()
     with get_connection() as conn:
+        duplicate = conn.execute(
+            "SELECT 1 FROM tracked_signals WHERE symbol=? AND direction=? "
+            "AND COALESCE(timeframe,'unknown')=? AND created_at>=? LIMIT 1",
+            (symbol, direction, timeframe, cutoff),
+        ).fetchone()
+        if duplicate:
+            logger.info(
+                'Duplicate learning signal skipped: %s %s %s window=%sm',
+                symbol, timeframe, direction, dedupe_minutes,
+            )
+            return False
         conn.execute('''
             INSERT INTO tracked_signals (
-                fingerprint, symbol, direction, entry_price, stop, tp1, tp2, tp3,
+                fingerprint, symbol, direction, timeframe, entry_price, stop, tp1, tp2, tp3,
                 score, probability, ai_score, ai_tier, created_at, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fingerprint) DO NOTHING
         ''', (
-            signal['fingerprint'], signal['symbol'], signal.get('direction'), entry,
+            signal['fingerprint'], symbol, direction, timeframe, entry,
             signal.get('stop'), signal.get('tp1'), signal.get('tp2'), signal.get('tp3'),
             signal.get('score'), signal.get('probability'), signal.get('aiScore'), signal.get('aiTier'), utc_iso(),
             json.dumps(signal, ensure_ascii=False),
@@ -169,6 +189,6 @@ def get_trade_performance():
                    SUM(CASE WHEN return_percent > 0 THEN 1 ELSE 0 END) wins,
                    SUM(CASE WHEN result_label LIKE 'TP%' THEN 1 ELSE 0 END) tp_hits,
                    SUM(CASE WHEN result_label = 'SL' THEN 1 ELSE 0 END) sl_hits
-            FROM trade_outcomes GROUP BY horizon ORDER BY CASE horizon WHEN '1h' THEN 1 WHEN '24h' THEN 2 ELSE 3 END
+            FROM trade_outcomes GROUP BY horizon ORDER BY CASE horizon WHEN '1h' THEN 1 WHEN '4h' THEN 2 WHEN '24h' THEN 3 WHEN '72h' THEN 4 ELSE 5 END
         ''').fetchall()
     return [dict(row) for row in rows]
