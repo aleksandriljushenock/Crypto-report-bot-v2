@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from trade_engine import run_trade_scan
 from trade_signal_report import build_signal_block
-from trade_outcome_tracker import register_trade_signal
+from trade_outcome_tracker import persist_trade_signal
 from trade_watchlist import upsert_watch_candidate
 from trade_signal_store import (
     get_monitor_settings,
@@ -100,7 +100,9 @@ class TradeMonitor:
             if signal_recently_sent(signal['fingerprint'], cooldown_hours=cooldown):
                 continue
             signal_id = save_signal(signal, sent=False)
-            register_trade_signal(signal)
+            cloud_id = persist_trade_signal(signal, source="automatic_monitor")
+            if not cloud_id:
+                self.logger(f"Monitor signal not confirmed in Supabase: {signal.get('fingerprint')}")
             message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
             self.sender(chat_id, message)
             mark_signal_sent(signal_id)

@@ -38,7 +38,7 @@ from trade_signal_report import (
     build_recent_signals_report,
     build_trade_scan_report,
 )
-from trade_outcome_tracker import get_trade_performance, register_trade_signal
+from trade_outcome_tracker import get_trade_performance, persist_trade_signal
 from trade_statistics_report import build_performance_report, build_watchlist_report
 from trade_watchlist import get_watchlist, upsert_watch_candidate
 from cloud_learning_store import CloudLearningStore
@@ -1094,34 +1094,10 @@ def run_trade_scan_task(chat_id):
                 from trade_signal_store import save_signal
 
                 save_signal(signal, sent=False)
-                register_trade_signal(signal)
+                cloud_id = persist_trade_signal(signal, source="manual_trade_scan")
+                if not cloud_id:
+                    log(f"Сигнал сохранён локально, но не подтверждён Supabase: {fingerprint}")
                 upsert_watch_candidate(signal, source="manual")
-
-                cloud_store.save(
-                    {
-                        "symbol": signal.get("symbol"),
-                        "timeframe": signal.get("timeframe") or "manual",
-                        "signal_type": "manual_trade_scan",
-                        "signal_direction": signal.get("direction"),
-                        "signal_score": signal.get("score"),
-                        "signal_confidence": signal.get("probability"),
-                        "entry_price": signal.get("entryPrice"),
-                        "target_price": signal.get("tp1"),
-                        "stop_loss": signal.get("stop"),
-                        "market_price_at_signal": signal.get("entryPrice"),
-                        "features": to_json_safe(signal),
-                        "metadata": {
-                            "source": "telegram_manual_trade",
-                            "fingerprint": fingerprint,
-                            "ai_score": signal.get("aiScore"),
-                            "ai_tier": signal.get("aiTier"),
-                            "tp2": signal.get("tp2"),
-                            "tp3": signal.get("tp3"),
-                        },
-                        "signal_created_at": datetime.now(timezone.utc).isoformat(),
-                        "training_status": "pending",
-                    }
-                )
 
             except Exception as exc:
                 log(f"Ошибка сохранения сигнала: {exc}")

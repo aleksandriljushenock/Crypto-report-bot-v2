@@ -1,253 +1,163 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from cloud_client import get_supabase_client
-
 
 logger = logging.getLogger(__name__)
 
 
 class CloudLearningStore:
-    """
-    Слой работы с таблицей learning_observations.
+    """Cloud-first repository for ``learning_observations``.
 
-    Остальной код бота не должен напрямую выполнять
-    insert, select и update через Supabase.
+    Supabase is the durable source of truth. Local SQLite databases are caches
+    that may be rebuilt after every Render restart.
     """
 
     TABLE_NAME = "learning_observations"
+    ALLOWED_COLUMNS = {
+        "id", "symbol", "timeframe", "signal_type", "signal_direction",
+        "signal_score", "signal_confidence", "entry_price", "target_price",
+        "stop_loss", "market_price_at_signal", "market_price_after",
+        "price_change_pct", "max_favorable_excursion_pct",
+        "max_adverse_excursion_pct", "outcome", "outcome_score", "features",
+        "smart_money_data", "news_data", "metadata", "signal_created_at",
+        "resolve_after", "resolved_at", "training_status", "training_run_id",
+        "created_at", "updated_at", "real_result",
+    }
 
     def __init__(self) -> None:
         self.client = get_supabase_client()
 
-    def save(
-        self,
-        observation: dict[str, Any],
-    ) -> str | None:
-        """
-        Сохраняет новое обучающее наблюдение.
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
 
-        observation должен быть обычным словарём,
-        ключи которого совпадают с колонками таблицы.
-        """
+    @classmethod
+    def _clean(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in payload.items() if k in cls.ALLOWED_COLUMNS and v is not None}
 
-        try:
-            response = (
-                self.client
-                .table(self.TABLE_NAME)
-                .insert(observation)
-                .execute()
-            )
+    @staticmethod
+    def _fingerprint(payload: dict[str, Any]) -> str:
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            return str(metadata.get("fingerprint") or "")
+        return ""
 
-            if not response.data:
-                logger.warning(
-                    "Supabase не вернул сохранённую запись."
-                )
-                return None
-
-            observation_id = response.data[0].get("id")
-
-            if observation_id is None:
-                logger.warning(
-                    "Запись создана, но поле id отсутствует."
-                )
-                return None
-
-            logger.info(
-                "Наблюдение сохранено: %s",
-                observation_id,
-            )
-
-            return str(observation_id)
-
-        except Exception:
-            logger.exception(
-                "Ошибка сохранения наблюдения в Supabase."
-            )
-            return None
-
-    def unresolved(
-        self,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """
-        Возвращает наблюдения, которые ещё не обработаны.
-        """
-
-        try:
-            response = (
-                self.client
-                .table(self.TABLE_NAME)
-                .select("*")
-                .eq("training_status", "pending")
-                .limit(limit)
-                .execute()
-            )
-
-            return list(response.data or [])
-
-        except Exception:
-            logger.exception(
-                "Ошибка загрузки pending-наблюдений."
-            )
-            return []
-
-    def update_outcome(
-        self,
-        fingerprint: str,
-        data: dict[str, Any],
-    ) -> bool:
-        """
-        Находит наблюдение по metadata.fingerprint и обновляет результат.
-
-        При создании наблюдения fingerprint должен быть сохранён
-        в колонке metadata:
-
-            metadata={"fingerprint": "..."}
-        """
-
+    def find_by_fingerprint(self, fingerprint: str) -> dict[str, Any] | None:
         if not fingerprint:
-            logger.warning(
-                "Невозможно обновить наблюдение: fingerprint пуст."
-            )
-            return False
-
-        update_data = dict(data)
-        new_metadata = update_data.pop("metadata", None)
-
+            return None
         try:
-            lookup_response = (
-                self.client
-                .table(self.TABLE_NAME)
-                .select("id, metadata")
+            response = (
+                self.client.table(self.TABLE_NAME)
+                .select("*")
                 .contains("metadata", {"fingerprint": fingerprint})
                 .limit(1)
                 .execute()
             )
+            rows = list(response.data or [])
+            return rows[0] if rows else None
+        except Exception:
+            logger.exception("Ошибка поиска learning observation: fingerprint=%s", fingerprint)
+            return None
 
-            rows = list(lookup_response.data or [])
-
-            if not rows:
-                logger.warning(
-                    "Наблюдение не найдено в Supabase: fingerprint=%s",
-                    fingerprint,
+    def save(self, observation: dict[str, Any]) -> str | None:
+        """Idempotently create or merge an observation by fingerprint."""
+        payload = self._clean(dict(observation))
+        payload.setdefault("training_status", "pending")
+        payload["updated_at"] = self._now()
+        fingerprint = self._fingerprint(payload)
+        try:
+            existing = self.find_by_fingerprint(fingerprint) if fingerprint else None
+            if existing and existing.get("id"):
+                merged_metadata = dict(existing.get("metadata") or {})
+                merged_metadata.update(payload.get("metadata") or {})
+                payload["metadata"] = merged_metadata
+                response = (
+                    self.client.table(self.TABLE_NAME)
+                    .update(payload)
+                    .eq("id", existing["id"])
+                    .execute()
                 )
-                return False
+                return str(existing["id"]) if response.data is not None else None
 
-            row = rows[0]
-            observation_id = row.get("id")
+            payload.setdefault("created_at", self._now())
+            response = self.client.table(self.TABLE_NAME).insert(payload).execute()
+            if not response.data:
+                logger.warning("Supabase не вернул сохранённую learning observation")
+                return None
+            return str(response.data[0].get("id")) if response.data[0].get("id") else None
+        except Exception:
+            logger.exception("Ошибка сохранения learning observation")
+            return None
 
-            if observation_id is None:
-                logger.warning(
-                    "У найденного наблюдения отсутствует id: fingerprint=%s",
-                    fingerprint,
-                )
-                return False
+    def pending(self, limit: int = 1000, due_only: bool = False) -> list[dict[str, Any]]:
+        """Return pending observations, optionally only those whose first horizon is due."""
+        try:
+            query = (
+                self.client.table(self.TABLE_NAME)
+                .select("*")
+                .eq("training_status", "pending")
+                .order("signal_created_at", desc=False)
+                .limit(max(1, int(limit)))
+            )
+            if due_only:
+                query = query.lte("resolve_after", self._now())
+            return list(query.execute().data or [])
+        except Exception:
+            logger.exception("Ошибка загрузки pending learning observations")
+            return []
 
-            if new_metadata is not None:
-                existing_metadata = row.get("metadata")
+    # Backward-compatible alias.
+    unresolved = pending
 
-                if not isinstance(existing_metadata, dict):
-                    existing_metadata = {}
-
-                if not isinstance(new_metadata, dict):
-                    logger.warning(
-                        "Поле metadata пропущено: ожидался dict, получено %s.",
-                        type(new_metadata).__name__,
-                    )
-                else:
-                    update_data["metadata"] = {
-                        **existing_metadata,
-                        **new_metadata,
-                    }
-
+    def update_by_id(self, observation_id: str, data: dict[str, Any]) -> bool:
+        payload = self._clean(dict(data))
+        payload["updated_at"] = self._now()
+        try:
             response = (
-                self.client
-                .table(self.TABLE_NAME)
-                .update(update_data)
+                self.client.table(self.TABLE_NAME)
+                .update(payload)
                 .eq("id", observation_id)
                 .execute()
             )
-
-            if not response.data:
-                logger.warning(
-                    "Supabase не вернул обновлённую запись: id=%s",
-                    observation_id,
-                )
-                return False
-
-            logger.info(
-                "Результат наблюдения обновлён: id=%s, fingerprint=%s",
-                observation_id,
-                fingerprint,
-            )
-            return True
-
+            return response.data is not None
         except Exception:
-            logger.exception(
-                "Ошибка обновления результата наблюдения: fingerprint=%s",
-                fingerprint,
-            )
+            logger.exception("Ошибка обновления learning observation id=%s", observation_id)
             return False
 
-    def resolved_rows(self, limit: int = 1000) -> list[dict[str, Any]]:
-        """Return completed observations for adaptive quality learning."""
+    def update_outcome(self, fingerprint: str, data: dict[str, Any]) -> bool:
+        row = self.find_by_fingerprint(fingerprint)
+        if not row or not row.get("id"):
+            logger.warning("Learning observation не найдена: fingerprint=%s", fingerprint)
+            return False
+        payload = dict(data)
+        if isinstance(payload.get("metadata"), dict):
+            merged = dict(row.get("metadata") or {})
+            merged.update(payload["metadata"])
+            payload["metadata"] = merged
+        return self.update_by_id(str(row["id"]), payload)
+
+    def resolved_rows(self, limit: int = 3000) -> list[dict[str, Any]]:
+        """Return all durable samples that contain at least one resolved horizon."""
         try:
             response = (
                 self.client.table(self.TABLE_NAME)
                 .select("*")
                 .not_.is_("real_result", "null")
-                .order("created_at", desc=True)
+                .order("signal_created_at", desc=False)
                 .limit(max(1, int(limit)))
                 .execute()
             )
             return list(response.data or [])
         except Exception:
-            logger.exception("Ошибка загрузки resolved-наблюдений.")
+            logger.exception("Ошибка загрузки resolved learning observations")
             return []
 
-    def resolved(
-        self,
-        observation_id: str,
-        result_data: dict[str, Any],
-    ) -> bool:
-        """
-        Помечает наблюдение обработанным по его id.
-
-        result_data должен содержать только колонки,
-        которые реально существуют в таблице.
-        """
-
-        update_data = dict(result_data)
-        update_data["training_status"] = "resolved"
-
-        try:
-            response = (
-                self.client
-                .table(self.TABLE_NAME)
-                .update(update_data)
-                .eq("id", observation_id)
-                .execute()
-            )
-
-            if not response.data:
-                logger.warning(
-                    "Supabase не вернул обновлённую запись: id=%s",
-                    observation_id,
-                )
-                return False
-
-            logger.info(
-                "Наблюдение помечено обработанным: %s",
-                observation_id,
-            )
-            return True
-
-        except Exception:
-            logger.exception(
-                "Ошибка обновления наблюдения %s.",
-                observation_id,
-            )
-            return False
+    def resolved(self, observation_id: str, result_data: dict[str, Any]) -> bool:
+        payload = dict(result_data)
+        payload.setdefault("training_status", "ready")
+        payload.setdefault("resolved_at", self._now())
+        return self.update_by_id(observation_id, payload)

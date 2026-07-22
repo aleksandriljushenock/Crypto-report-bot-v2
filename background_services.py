@@ -163,7 +163,7 @@ class AutomationSupervisor:
 
     def _run_trade_outcomes(self):
         result = update_trade_outcomes()
-        self.logger(f"Trade outcomes: updated={result.get('updated')}, errors={len(result.get('errors', []))}")
+        self.logger(f"Trade outcomes: imported={result.get('imported')}, updated={result.get('updated')}, cloud_synced={result.get('cloud_synced')}, errors={len(result.get('errors', []))}")
         return result
 
     def _run_outcomes(self):
