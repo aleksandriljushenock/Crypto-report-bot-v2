@@ -32,3 +32,5 @@ urllib3==2.7.0
 Werkzeug==3.1.8
 supabase>=2.15,<3.0
 gunicorn==23.0.0
+# Optional zero-shot time-series expert used by chronos_forecaster.py
+chronos-forecasting==2.3.1

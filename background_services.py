@@ -54,6 +54,7 @@ class AutomationSupervisor:
         smart_money_minutes = self._minutes('SMART_MONEY_INTERVAL_MINUTES', 20)
         learning_minutes = self._minutes('SELF_LEARNING_INTERVAL_MINUTES', 360)
         ai_minutes = self._minutes('AI_INTELLIGENCE_INTERVAL_MINUTES', 20)
+        checkpoint_minutes = self._minutes('LEARNING_CHECKPOINT_INTERVAL_MINUTES', 10)
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
@@ -104,6 +105,11 @@ class AutomationSupervisor:
                 'self-learning-engine', learning_minutes * 60,
                 self._run_learning, self.logger,
                 enabled=self._bool_env('SELF_LEARNING_ENABLED', True), first_delay=180,
+            ),
+            PeriodicWorker(
+                'learning-checkpoint', checkpoint_minutes * 60,
+                self._run_learning_checkpoint, self.logger,
+                enabled=self._bool_env('LEARNING_CHECKPOINT_ENABLED', True), first_delay=240,
             ),
         ]
 
@@ -214,6 +220,14 @@ class AutomationSupervisor:
 
     def _run_learning(self):
         return retrain()
+
+    def _run_learning_checkpoint(self):
+        from learning_checkpoint_manager import save_checkpoint
+        from learning_engine_v14 import DB_PATH, initialize
+        initialize()
+        result = save_checkpoint(DB_PATH, reason="periodic")
+        self.logger(f"Learning checkpoint: status={result.get('status')}, bytes={result.get('size_bytes', 0)}")
+        return result
 
 
 def build_automation_status(supervisor):

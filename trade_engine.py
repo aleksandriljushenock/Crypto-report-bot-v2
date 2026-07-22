@@ -161,7 +161,7 @@ def analyze_snapshot(snapshot):
             score['fundingAnalysis'] = calculate_funding_analysis(symbol_data)
             rules = evaluate_rules(score, levels)
             timeframe = build_timeframe_profile(symbol_data, score.get('direction'))
-            rows.append({'score': score, 'levels': levels, 'rules': rules, 'listing': _listing_metadata(symbol), 'timeframe': timeframe})
+            rows.append({'score': score, 'levels': levels, 'rules': rules, 'listing': _listing_metadata(symbol), 'timeframe': timeframe, 'chronosCloses': [c.get('close') for c in symbol_data['parsedKlines'].get(os.getenv('CHRONOS_TIMEFRAME', '15m'), []) if c.get('close') is not None]})
         except Exception as exc:
             rows.append({'symbol': symbol, 'error': str(exc)})
     rows.sort(key=lambda item: item.get('score', {}).get('score', 0), reverse=True)
@@ -303,6 +303,12 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
             continue
         if float(signal.get('rr') or 0) < min_rr:
             continue
+        # Chronos is invoked only for already-qualified candidates, not for every scanned symbol.
+        try:
+            from chronos_forecaster import blend_signal, forecast_closes
+            signal = blend_signal(signal, forecast_closes(row.get('chronosCloses') or []))
+        except Exception:
+            pass
         if float(signal.get('probability') or 0) < min_probability:
             continue
         signals.append(signal)

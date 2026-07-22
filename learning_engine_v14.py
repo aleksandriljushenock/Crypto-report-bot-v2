@@ -33,6 +33,7 @@ FEATURES = (
     "risk_reward", "capital_flow", "narrative", "news", "smart_money",
 )
 HORIZONS = ("1h", "4h", "24h", "72h")
+_RESTORE_ATTEMPTED = False
 
 
 def now_iso() -> str:
@@ -54,6 +55,14 @@ def connect() -> sqlite3.Connection:
 
 
 def initialize() -> None:
+    global _RESTORE_ATTEMPTED
+    if not _RESTORE_ATTEMPTED:
+        _RESTORE_ATTEMPTED = True
+        try:
+            from learning_checkpoint_manager import restore_checkpoint
+            restore_checkpoint(DB_PATH)
+        except Exception:
+            pass
     with connect() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS model_versions(
@@ -607,6 +616,8 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
                 from cloud_model_store import CloudModelStore
                 current_model = active_model(defaults)
                 CloudModelStore().save_model(current_model, "active", len(samples))
+                from learning_checkpoint_manager import save_checkpoint
+                save_checkpoint(DB_PATH, reason=f"collection-milestone-{len(samples)}")
             except Exception:
                 pass
         return result
@@ -675,6 +686,8 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
         store = CloudModelStore()
         store.save_model({"version": version, "config": config, "metrics": metrics}, model_status, len(samples))
         store.save_training_run(result)
+        from learning_checkpoint_manager import save_checkpoint
+        save_checkpoint(DB_PATH, reason=f"training-{model_status}-{version}")
     except Exception:
         pass
     return result
