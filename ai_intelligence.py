@@ -9,7 +9,8 @@ from ai_score_engine import enrich_signal, get_score_history, get_top_scores, sa
 
 
 def rank_signals(signals):
-    enriched = []
+    """Pre-rank cheaply, run Chronos only on finalists, then re-evaluate EV/quality."""
+    prepared = []
     gate_enabled = os.getenv("HEDGE_QUALITY_GATE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     for signal in signals or []:
         item = enrich_signal(signal)
@@ -21,11 +22,47 @@ def rank_signals(signals):
             item.setdefault("qualityPassed", True)
             item.setdefault("qualityScore", float(item.get("aiScore") or 0))
             item.setdefault("expectedValuePct", 0.0)
+        prepared.append(item)
+
+    # First pass is deliberately Chronos-free and cheap.
+    prepared.sort(
+        key=lambda x: (
+            float(x.get("expectedValuePct") or -999),
+            float(x.get("qualityScore") or 0),
+            float(x.get("aiScore") or 0),
+        ),
+        reverse=True,
+    )
+
+    try:
+        from chronos_forecaster import apply_to_finalists
+        prepared = apply_to_finalists(prepared)
+    except Exception as exc:
+        for item in prepared:
+            item.pop("_chronosCloses", None)
+            item.setdefault("chronosStatus", "error")
+            item.setdefault("chronosError", str(exc)[:200])
+
+    # Chronos changes probability/confidence, so calculate EV and gate once more.
+    ranked = []
+    for item in prepared:
+        try:
+            from ai_hedge_fund_engine import evaluate_signal
+            item.update(evaluate_signal(item))
+        except Exception:
+            pass
         save_ai_score(item)
         if not gate_enabled or item.get("qualityPassed"):
-            enriched.append(item)
-    enriched.sort(key=lambda x: (float(x.get("expectedValuePct") or -999), float(x.get("qualityScore") or 0), float(x.get("aiScore") or 0)), reverse=True)
-    return enriched
+            ranked.append(item)
+    ranked.sort(
+        key=lambda x: (
+            float(x.get("expectedValuePct") or -999),
+            float(x.get("qualityScore") or 0),
+            float(x.get("aiScore") or 0),
+        ),
+        reverse=True,
+    )
+    return ranked
 
 
 def run_ai_intelligence(max_results: int = 15) -> Dict[str, Any]:

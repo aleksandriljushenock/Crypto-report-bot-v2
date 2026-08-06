@@ -337,15 +337,19 @@ def get_trade_performance() -> list[dict[str, Any]]:
 
 
 def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str | None:
-    """Durably save a signal to Supabase first, then cache it locally.
-
-    A Render restart after this function returns cannot lose the observation.
-    """
+    """Durably save a signal to Supabase first, then cache it locally."""
     fingerprint = str(signal.get("fingerprint") or "")
     if not fingerprint:
         return None
     created_at = str(signal.get("signal_created_at") or utc_iso())
     resolve_after = (_parse_dt(created_at) + timedelta(hours=1)).isoformat()
+    chronos = signal.get("chronos") or {}
+    direction = str(signal.get("direction") or "").upper()
+    chronos_probability = (
+        chronos.get("probabilityUp")
+        if direction in {"LONG", "LONG_BIAS", "BUY"}
+        else chronos.get("probabilityDown")
+    )
     payload = {
         "symbol": signal.get("symbol"),
         "timeframe": signal.get("timeframe") or signal.get("interval") or "unknown",
@@ -379,6 +383,8 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
             "historical_probability": signal.get("historicalProbability"),
             "historical_evidence": signal.get("historicalEvidence"),
             "hedge_profile_version": signal.get("hedgeProfileVersion"),
+            "chronos": chronos or None,
+            "chronos_status": signal.get("chronosStatus"),
         },
         "signal_created_at": created_at,
         "resolve_after": resolve_after,
@@ -388,7 +394,13 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
         "expected_value_pct": signal.get("expectedValuePct"),
         "quality_decision": signal.get("qualityDecision"),
         "hedge_profile_version": signal.get("hedgeProfileVersion"),
+        "chronos_probability": chronos_probability,
+        "chronos_return_pct": chronos.get("forecastReturnPct"),
+        "chronos_agreement": chronos.get("directionAgreement"),
+        "chronos_model": chronos.get("model"),
+        "chronos_status": signal.get("chronosStatus"),
     }
+
     try:
         from cloud_learning_store import CloudLearningStore
         cloud_id = CloudLearningStore().save(payload)

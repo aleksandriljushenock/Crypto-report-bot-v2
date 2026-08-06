@@ -286,6 +286,8 @@ def row_to_signal(row):
         'structure15m': score.get('structure15m'),
         'structure1h': score.get('structure1h'),
         'listing': row.get('listing', {}),
+        # Kept only until final AI ranking; removed before persistence.
+        '_chronosCloses': list(row.get('chronosCloses') or []),
     }
 
 
@@ -303,12 +305,8 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
             continue
         if float(signal.get('rr') or 0) < min_rr:
             continue
-        # Chronos is invoked only for already-qualified candidates, not for every scanned symbol.
-        try:
-            from chronos_forecaster import blend_signal, forecast_closes
-            signal = blend_signal(signal, forecast_closes(row.get('chronosCloses') or []))
-        except Exception:
-            pass
+        # Chronos runs later, only for the best final candidates after Hedge pre-ranking.
+        # This avoids loading PyTorch while dozens of rows and candle payloads are still alive.
         if float(signal.get('probability') or 0) < min_probability:
             continue
         signals.append(signal)

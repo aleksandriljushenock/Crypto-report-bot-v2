@@ -28,12 +28,16 @@ class CloudLearningStore:
         "created_at", "updated_at", "real_result",
         "quality_score", "calibrated_probability", "expected_value_pct",
         "quality_decision", "hedge_profile_version",
+        "chronos_probability", "chronos_return_pct", "chronos_agreement",
+        "chronos_model", "chronos_status",
     }
 
 
     HEDGE_COLUMNS = {
         "quality_score", "calibrated_probability", "expected_value_pct",
         "quality_decision", "hedge_profile_version",
+        "chronos_probability", "chronos_return_pct", "chronos_agreement",
+        "chronos_model", "chronos_status",
     }
 
     @classmethod
