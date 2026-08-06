@@ -26,7 +26,26 @@ class CloudLearningStore:
         "smart_money_data", "news_data", "metadata", "signal_created_at",
         "resolve_after", "resolved_at", "training_status", "training_run_id",
         "created_at", "updated_at", "real_result",
+        "quality_score", "calibrated_probability", "expected_value_pct",
+        "quality_decision", "hedge_profile_version",
     }
+
+
+    HEDGE_COLUMNS = {
+        "quality_score", "calibrated_probability", "expected_value_pct",
+        "quality_decision", "hedge_profile_version",
+    }
+
+    @classmethod
+    def _legacy_compatible(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """Keep hedge metrics in metadata when DB migration is not applied yet."""
+        result = dict(payload)
+        hedge = {key: result.pop(key) for key in list(cls.HEDGE_COLUMNS) if key in result}
+        if hedge:
+            metadata = dict(result.get("metadata") or {})
+            metadata.update(hedge)
+            result["metadata"] = metadata
+        return result
 
     def __init__(self) -> None:
         self.client = get_supabase_client()
@@ -69,29 +88,46 @@ class CloudLearningStore:
         payload.setdefault("training_status", "pending")
         payload["updated_at"] = self._now()
         fingerprint = self._fingerprint(payload)
-        try:
-            existing = self.find_by_fingerprint(fingerprint) if fingerprint else None
-            if existing and existing.get("id"):
-                merged_metadata = dict(existing.get("metadata") or {})
-                merged_metadata.update(payload.get("metadata") or {})
-                payload["metadata"] = merged_metadata
+        existing = self.find_by_fingerprint(fingerprint) if fingerprint else None
+        if existing and existing.get("id"):
+            merged_metadata = dict(existing.get("metadata") or {})
+            merged_metadata.update(payload.get("metadata") or {})
+            payload["metadata"] = merged_metadata
+            try:
                 response = (
                     self.client.table(self.TABLE_NAME)
                     .update(payload)
                     .eq("id", existing["id"])
                     .execute()
                 )
-                return str(existing["id"]) if response.data is not None else None
+            except Exception:
+                logger.warning("Hedge columns unavailable; retrying observation update via metadata")
+                try:
+                    response = (
+                        self.client.table(self.TABLE_NAME)
+                        .update(self._legacy_compatible(payload))
+                        .eq("id", existing["id"])
+                        .execute()
+                    )
+                except Exception:
+                    logger.exception("Ошибка сохранения learning observation")
+                    return None
+            return str(existing["id"]) if response.data is not None else None
 
-            payload.setdefault("created_at", self._now())
+        payload.setdefault("created_at", self._now())
+        try:
             response = self.client.table(self.TABLE_NAME).insert(payload).execute()
-            if not response.data:
-                logger.warning("Supabase не вернул сохранённую learning observation")
-                return None
-            return str(response.data[0].get("id")) if response.data[0].get("id") else None
         except Exception:
-            logger.exception("Ошибка сохранения learning observation")
+            logger.warning("Hedge columns unavailable; retrying observation insert via metadata")
+            try:
+                response = self.client.table(self.TABLE_NAME).insert(self._legacy_compatible(payload)).execute()
+            except Exception:
+                logger.exception("Ошибка сохранения learning observation")
+                return None
+        if not response.data:
+            logger.warning("Supabase не вернул сохранённую learning observation")
             return None
+        return str(response.data[0].get("id")) if response.data[0].get("id") else None
 
     def pending(self, limit: int = 1000, due_only: bool = False) -> list[dict[str, Any]]:
         """Return pending observations, optionally only those whose first horizon is due."""
@@ -125,8 +161,18 @@ class CloudLearningStore:
             )
             return response.data is not None
         except Exception:
-            logger.exception("Ошибка обновления learning observation id=%s", observation_id)
-            return False
+            logger.warning("Hedge columns unavailable; retrying id update via metadata")
+            try:
+                response = (
+                    self.client.table(self.TABLE_NAME)
+                    .update(self._legacy_compatible(payload))
+                    .eq("id", observation_id)
+                    .execute()
+                )
+                return response.data is not None
+            except Exception:
+                logger.exception("Ошибка обновления learning observation id=%s", observation_id)
+                return False
 
     def update_outcome(self, fingerprint: str, data: dict[str, Any]) -> bool:
         row = self.find_by_fingerprint(fingerprint)

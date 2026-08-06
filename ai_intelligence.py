@@ -6,17 +6,25 @@ import os
 from typing import Any, Dict
 
 from ai_score_engine import enrich_signal, get_score_history, get_top_scores, save_ai_score
-from signal_quality_engine import enrich_with_quality
 
 
 def rank_signals(signals):
     enriched = []
+    gate_enabled = os.getenv("HEDGE_QUALITY_GATE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     for signal in signals or []:
-        item = enrich_with_quality(enrich_signal(signal))
+        item = enrich_signal(signal)
+        try:
+            from ai_hedge_fund_engine import evaluate_signal
+            item.update(evaluate_signal(item))
+        except Exception as exc:
+            item["hedgeEngineFallback"] = str(exc)[:300]
+            item.setdefault("qualityPassed", True)
+            item.setdefault("qualityScore", float(item.get("aiScore") or 0))
+            item.setdefault("expectedValuePct", 0.0)
         save_ai_score(item)
-        if item.get("qualityPassed", True):
+        if not gate_enabled or item.get("qualityPassed"):
             enriched.append(item)
-    enriched.sort(key=lambda x: (float(x.get("qualityScore") or 0), float(x.get("aiScore") or 0), float(x.get("rr") or 0)), reverse=True)
+    enriched.sort(key=lambda x: (float(x.get("expectedValuePct") or -999), float(x.get("qualityScore") or 0), float(x.get("aiScore") or 0)), reverse=True)
     return enriched
 
 

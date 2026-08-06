@@ -342,14 +342,15 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
         min_score = float(os.getenv('TRADE_MIN_SCORE', '72'))
         min_rr = float(os.getenv('TRADE_MIN_RR', '2.0'))
         min_probability = float(os.getenv('TRADE_MIN_PROBABILITY', '65'))
+        candidate_pool = max(max_results * 5, int(os.getenv('HEDGE_CANDIDATE_POOL', '20'))) if apply_ai else max_results
         signals = find_trade_signals(
             rows, min_score=min_score, min_rr=min_rr,
-            include_watch=include_watch, max_results=max_results, min_probability=min_probability,
+            include_watch=include_watch, max_results=candidate_pool, min_probability=min_probability,
         )
         if apply_ai:
             try:
                 from ai_intelligence import rank_signals
-                signals = rank_signals(signals)
+                signals = rank_signals(signals)[:max_results]
             except Exception:
                 pass
         return {
