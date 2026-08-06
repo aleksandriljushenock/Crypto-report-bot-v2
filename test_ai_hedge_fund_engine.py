@@ -20,3 +20,18 @@ def test_anti_profile_blocks():
     r=evaluate_signal(s)
     assert not r['qualityPassed']
     assert 'long_against_4h' in r['antiProfileHits']
+
+def test_rule_weights_are_configurable(monkeypatch):
+    monkeypatch.setenv('RULE_WEIGHT_PROBABILITY_TREND_LIQUIDITY', '12')
+    r=evaluate_signal(base())
+    hit=next(x for x in r['qualityRules'] if x['name']=='probability_trend_liquidity')
+    assert hit['adjustment'] == 12
+
+
+def test_position_sizing(monkeypatch):
+    monkeypatch.setenv('POSITION_SIZING_ENABLED', 'true')
+    monkeypatch.setenv('POSITION_SIZE_BASE_USD', '3')
+    monkeypatch.setenv('POSITION_SIZE_STRONG_USD', '4')
+    monkeypatch.setenv('POSITION_SIZE_MAX_USD', '5')
+    r=evaluate_signal(base())
+    assert r['suggestedPositionSizeUsd'] in (4.0, 5.0)

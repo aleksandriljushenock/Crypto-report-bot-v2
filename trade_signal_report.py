@@ -42,6 +42,8 @@ def build_signal_block(signal, index=None):
             f"P(cal): <b>{esc(signal.get('calibratedProbability'))}%</b>"
         )
         lines.append(f"Решение: <b>{esc(signal.get('qualityDecision'))}</b>")
+        if signal.get('suggestedPositionSizeUsd') is not None and float(signal.get('suggestedPositionSizeUsd') or 0) > 0:
+            lines.append(f"Рекомендуемый размер позиции: <b>${float(signal.get('suggestedPositionSizeUsd')):.2f}</b>")
         positives = signal.get('positiveProfileHits') or []
         negatives = signal.get('antiProfileHits') or []
         if positives:
