@@ -27,6 +27,7 @@ def build_signal_block(signal, index=None):
         f"Статус: <b>{esc(signal.get('status'))}</b> | Score: <b>{esc(signal.get('score'))}/100</b>",
         f"Вероятность: <b>{esc(signal.get('probability'))}%</b> | Уверенность: <b>{esc(signal.get('confidence'))}%</b>",
         f"🧠 AI Score: <b>{esc(signal.get('aiScore', 'N/A'))}/100</b> | Tier: <b>{esc(signal.get('aiTier', 'N/A'))}</b>",
+        f"💎 Quality: <b>{esc(signal.get('qualityScore', 'N/A'))}/100</b> | Решение: <b>{esc(signal.get('qualityDecision', 'N/A'))}</b>",
         f"Сетап: <b>{esc(signal.get('setup'))}</b> | R/R: <b>{esc(signal.get('rr'))}</b>",
         f"Вход: <code>{esc(signal.get('entryText'))}</code>",
         f"Stop: <code>{esc(signal.get('stop'))}</code>",
@@ -41,6 +42,15 @@ def build_signal_block(signal, index=None):
             f"Профиль: Trend {esc(profile.get('trend'))} | Momentum {esc(profile.get('momentum'))} | "
             f"Volume {esc(profile.get('volume'))} | Risk {esc(profile.get('risk'))}"
         )
+    quality_reasons = signal.get('qualityReasons') or []
+    if quality_reasons:
+        lines.append('<b>Фильтр прибыльности:</b>')
+        for reason in quality_reasons[:4]:
+            sign = '+' if float(reason.get('points') or 0) > 0 else ''
+            lines.append(f"• {esc(reason.get('name'))}: <b>{sign}{esc(reason.get('points'))}</b> — {esc(reason.get('detail'))}")
+    hard_blocks = signal.get('qualityHardBlocks') or []
+    if hard_blocks:
+        lines.append('⛔ Блокировки: ' + ', '.join(esc(x) for x in hard_blocks))
     listing = signal.get('listing') or {}
     if listing.get('isRecentListing'):
         lines.append(f"🆕 Недавний листинг: {esc(listing.get('listingAgeDays'))} дней | Alpha: {esc(listing.get('listingScore'))}")

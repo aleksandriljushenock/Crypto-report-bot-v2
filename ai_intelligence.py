@@ -6,15 +6,17 @@ import os
 from typing import Any, Dict
 
 from ai_score_engine import enrich_signal, get_score_history, get_top_scores, save_ai_score
+from signal_quality_engine import enrich_with_quality
 
 
 def rank_signals(signals):
     enriched = []
     for signal in signals or []:
-        item = enrich_signal(signal)
+        item = enrich_with_quality(enrich_signal(signal))
         save_ai_score(item)
-        enriched.append(item)
-    enriched.sort(key=lambda x: (float(x.get("aiScore") or 0), float(x.get("rr") or 0)), reverse=True)
+        if item.get("qualityPassed", True):
+            enriched.append(item)
+    enriched.sort(key=lambda x: (float(x.get("qualityScore") or 0), float(x.get("aiScore") or 0), float(x.get("rr") or 0)), reverse=True)
     return enriched
 
 
