@@ -9,6 +9,7 @@ from early_discovery_report import add_project_block
 from listing_pipeline import run_incremental_listing_scan
 from outcome_tracker import update_due_outcomes
 from trade_outcome_tracker import update_trade_outcomes
+from paper_trading import update_positions
 from capital_flow_engine import scan_capital_flows
 from news_engine import scan_news
 from narrative_engine import scan_narratives
@@ -71,6 +72,7 @@ class AutomationSupervisor:
         listing_minutes = self._minutes('LISTING_REFRESH_INTERVAL_MINUTES', 360)
         outcome_minutes = self._minutes('OUTCOME_UPDATE_INTERVAL_MINUTES', 180)
         trade_outcome_minutes = self._minutes('TRADE_OUTCOME_UPDATE_INTERVAL_MINUTES', 60)
+        paper_minutes = self._minutes('PAPER_UPDATE_INTERVAL_MINUTES', 5)
         capital_flow_minutes = self._minutes('CAPITAL_FLOW_INTERVAL_MINUTES', 15)
         news_minutes = self._minutes('NEWS_INTERVAL_MINUTES', 10)
         narrative_minutes = self._minutes('NARRATIVE_INTERVAL_MINUTES', 60)
@@ -93,6 +95,11 @@ class AutomationSupervisor:
                 'trade-outcome-tracker', trade_outcome_minutes * 60,
                 self._guarded('trade-outcome-tracker', self._run_trade_outcomes), self.logger,
                 enabled=self._bool_env('TRADE_OUTCOME_TRACKER_ENABLED', True), first_delay=120,
+            ),
+            PeriodicWorker(
+                'paper-trading-tracker', paper_minutes * 60,
+                self._guarded('paper-trading-tracker', self._run_paper_trading), self.logger,
+                enabled=self._bool_env('PAPER_TRACKER_ENABLED', True), first_delay=45,
             ),
             PeriodicWorker(
                 'outcome-tracker', outcome_minutes * 60,
@@ -189,6 +196,14 @@ class AutomationSupervisor:
         self.logger(f"Trade outcomes: imported={result.get('imported')}, updated={result.get('updated')}, cloud_synced={result.get('cloud_synced')}, errors={len(result.get('errors', []))}")
         return result
 
+    def _run_paper_trading(self):
+        notifier = None
+        if self.chat_id:
+            notifier = lambda text: self.sender(self.chat_id, text)
+        result = update_positions(notifier=notifier)
+        self.logger(f"Paper trading: checked={result.get('checked')}, closed={result.get('closed')}, errors={len(result.get('errors', []))}")
+        return result
+
     def _run_outcomes(self):
         result = update_due_outcomes()
         self.logger(f"Outcome tracker: updated={result.get('updated')}, errors={len(result.get('errors', []))}")
@@ -268,6 +283,7 @@ def build_automation_status(supervisor):
         'early-discovery-monitor': 'Early Discovery',
         'listing-database-refresh': 'База листингов',
         'trade-outcome-tracker': 'Trade Outcome Tracker',
+        'paper-trading-tracker': 'Paper Trading Tracker',
         'outcome-tracker': 'Alpha Outcome Tracker',
         'capital-flow-engine': 'Capital Flow Engine',
         'ai-news-engine': 'AI News Engine',

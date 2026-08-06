@@ -53,6 +53,17 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec("PROFILE_RECENT_WINDOW_DAYS", "int", 21, "recency", "Окно, дней", "Размер свежего временного окна.", 1, 365),
     SettingSpec("PROFILE_MIN_RECENT_SAMPLES", "int", 30, "recency", "Мин. свежих примеров", "Минимальная выборка для recent-профиля.", 1, 100000),
     SettingSpec("PROFILE_RECENT_WEIGHT", "float", 2.0, "recency", "Вес свежей истории", "Вес recent-профиля относительно общей истории.", 0, 20),
+    SettingSpec("PAPER_TRADING_ENABLED", "bool", True, "paper", "Paper Trading", "Автоматически открывать виртуальные сделки по финальным сигналам."),
+    SettingSpec("PAPER_INITIAL_BALANCE_USD", "float", 100, "paper", "Стартовый баланс, $", "Начальный баланс paper-счёта.", 1, 1000000),
+    SettingSpec("PAPER_MAX_OPEN_POSITIONS", "int", 10, "paper", "Макс. открытых позиций", "Ограничение одновременных виртуальных позиций.", 1, 100),
+    SettingSpec("PAPER_ONE_POSITION_PER_SYMBOL", "bool", True, "paper", "Одна позиция на монету", "Не открывать повторную позицию по уже открытому символу."),
+    SettingSpec("PAPER_MAX_LEVERAGE", "int", 20, "paper", "Макс. плечо", "Верхний предел автоматического плеча.", 1, 125),
+    SettingSpec("PAPER_LIQUIDATION_BUFFER_PCT", "float", 0.5, "paper", "Запас после стопа, %", "Минимальный расчётный запас между стопом и ликвидацией.", 0.05, 20),
+    SettingSpec("PAPER_MAINTENANCE_MARGIN_PCT", "float", 0.5, "paper", "Maintenance margin, %", "Консервативная поправка для оценки ликвидации.", 0, 10),
+    SettingSpec("PAPER_FEE_PCT_PER_SIDE", "float", 0.06, "paper", "Комиссия за сторону, %", "Комиссия paper-сделки отдельно на вход и выход.", 0, 2),
+    SettingSpec("PAPER_SLIPPAGE_PCT", "float", 0.03, "paper", "Проскальзывание, %", "Неблагоприятное проскальзывание при закрытии.", 0, 5),
+    SettingSpec("PAPER_MAX_HOLD_HOURS", "int", 72, "paper", "Макс. удержание, часов", "Закрыть позицию по рынку после этого срока.", 1, 720),
+    SettingSpec("PAPER_MIN_FREE_BALANCE_USD", "float", 5, "paper", "Резерв баланса, $", "Минимальная свободная сумма, которую paper-счёт не использует.", 0, 100000),
     SettingSpec("TRADE_TOP_LIQUID_SYMBOLS", "int", 30, "runtime", "Монет в скане", "Количество наиболее ликвидных монет для анализа.", 1, 500),
     SettingSpec("HEDGE_CANDIDATE_POOL", "int", 8, "runtime", "Hedge-кандидатов", "Количество кандидатов для тяжёлого Hedge-этапа.", 1, 100),
 )
@@ -64,6 +75,7 @@ CATEGORY_TITLES = {
     "position": "💵 Размер позиции",
     "recency": "🕒 Свежесть истории",
     "runtime": "⚙️ Сканирование",
+    "paper": "🧪 Paper Trading",
 }
 
 

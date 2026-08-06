@@ -105,6 +105,15 @@ class TradeMonitor:
                 self.logger(f"Monitor signal not confirmed in Supabase: {signal.get('fingerprint')}")
             message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
             self.sender(chat_id, message)
+            try:
+                from paper_trading import open_from_signal, format_open_message
+                paper_result = open_from_signal(signal, source="automatic_monitor")
+                if paper_result.get("status") == "opened":
+                    self.sender(chat_id, format_open_message(paper_result))
+                elif paper_result.get("status") not in {"disabled", "duplicate", "symbol-already-open"}:
+                    self.logger(f"Paper trading skipped: {paper_result.get('status')} symbol={signal.get('symbol')}")
+            except Exception as exc:
+                self.logger(f"Paper trading open error: {exc}")
             mark_signal_sent(signal_id)
             new_count += 1
         self.logger(

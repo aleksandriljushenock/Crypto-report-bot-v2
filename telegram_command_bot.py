@@ -40,6 +40,15 @@ from trade_signal_report import (
     build_trade_scan_report,
 )
 from trade_outcome_tracker import get_trade_performance, persist_trade_signal
+from paper_trading import (
+    ensure_account as ensure_paper_account,
+    format_open_message as format_paper_open_message,
+    get_open_positions as get_paper_positions,
+    get_recent_trades as get_paper_trades,
+    open_from_signal as open_paper_from_signal,
+    performance as get_paper_performance,
+    reset_account as reset_paper_account,
+)
 from trade_statistics_report import build_performance_report, build_watchlist_report
 from trade_watchlist import get_watchlist, upsert_watch_candidate
 from cloud_learning_store import CloudLearningStore
@@ -378,6 +387,7 @@ def set_bot_commands():
         {"command": "signals", "description": "Последние торговые сигналы"},
         {"command": "watchlist", "description": "AI Watchlist монет"},
         {"command": "performance", "description": "Эффективность сигналов"},
+        {"command": "paper", "description": "Paper Trading и PnL"},
         {"command": "automation_status", "description": "Статус фоновых сервисов"},
         {"command": "pro", "description": "Полный Professional отчет v8"},
         {"command": "flows", "description": "Потоки капитала"},
@@ -598,6 +608,7 @@ def trade_keyboard():
                 {"text": "📈 Результаты", "callback_data": "trade_performance"},
             ],
             [{"text": "🔥 Последние сигналы", "callback_data": "recent_signals"}],
+            [{"text": "🧪 Paper Trading", "callback_data": "paper_menu"}],
             _home_row(),
         ]
     }
@@ -683,6 +694,7 @@ def strategy_settings_keyboard():
                 {"text": "🕒 Свежесть", "callback_data": "cfg_cat:recency"},
             ],
             [{"text": "⚙️ Сканирование", "callback_data": "cfg_cat:runtime"}],
+            [{"text": "🧪 Paper Trading", "callback_data": "cfg_cat:paper"}],
             [{"text": "🔄 Загрузить из Supabase", "callback_data": "cfg_reload"}],
             _back_row("menu_system"),
         ]
@@ -1284,6 +1296,11 @@ def run_trade_scan_task(chat_id):
                 if not cloud_id:
                     log(f"Сигнал сохранён локально, но не подтверждён Supabase: {fingerprint}")
                 upsert_watch_candidate(signal, source="manual")
+                paper_result = open_paper_from_signal(signal, source="manual_trade_scan")
+                if paper_result.get("status") == "opened":
+                    send_message(chat_id, format_paper_open_message(paper_result))
+                elif paper_result.get("status") not in {"disabled", "duplicate", "symbol-already-open"}:
+                    log(f"Paper trading skipped: {paper_result.get('status')} symbol={signal.get('symbol')}")
 
             except Exception as exc:
                 log(f"Ошибка сохранения сигнала: {exc}")
@@ -1350,6 +1367,78 @@ def send_v8_report(chat_id, builder):
         send_message(chat_id, f"❌ Ошибка AI Intelligence:\n<code>{str(exc)[:500]}</code>", reply_markup=main_keyboard())
 
 
+def paper_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📊 Статистика", "callback_data": "paper_status"},
+                {"text": "📂 Открытые позиции", "callback_data": "paper_positions"},
+            ],
+            [{"text": "📜 История сделок", "callback_data": "paper_history"}],
+            [
+                {"text": "▶️ Paper ON", "callback_data": "paper_on"},
+                {"text": "⏸ Paper OFF", "callback_data": "paper_off"},
+            ],
+            [{"text": "♻️ Сбросить баланс", "callback_data": "paper_reset_confirm"}],
+            _back_row("menu_trade"),
+            _home_row(),
+        ]
+    }
+
+
+def build_paper_status_text():
+    stats = get_paper_performance()
+    account = stats.get("account") or {}
+    balance = float(account.get("balance") or 0)
+    initial = float(account.get("initial_balance") or 0)
+    pnl = float(stats.get("net_pnl") or account.get("realized_pnl") or 0)
+    enabled = str(os.getenv("PAPER_TRADING_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+    return (
+        "🧪 <b>PAPER TRADING</b>\n\n"
+        f"Статус: <b>{'🟢 включён' if enabled else '⚪ выключен'}</b>\n"
+        f"Стартовый баланс: <b>${initial:.2f}</b>\n"
+        f"Текущий баланс: <b>${balance:.2f}</b>\n"
+        f"Net PnL: <b>{pnl:+.4f} USDT</b>\n"
+        f"Закрытых сделок: <b>{stats.get('closed_count', 0)}</b>\n"
+        f"Win rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b>\n"
+        f"Profit Factor: <b>{float(stats.get('profit_factor') or 0):.2f}</b>\n"
+        f"Открытых позиций: <b>{len(stats.get('open_positions') or [])}</b>\n\n"
+        "Плечо рассчитывается так, чтобы оценочная ликвидация находилась за стопом с заданным запасом."
+    )
+
+
+def build_paper_positions_text():
+    rows = get_paper_positions()
+    if not rows:
+        return "📂 <b>ОТКРЫТЫЕ PAPER-ПОЗИЦИИ</b>\n\nОткрытых позиций нет."
+    lines = ["📂 <b>ОТКРЫТЫЕ PAPER-ПОЗИЦИИ</b>", ""]
+    for row in rows[:20]:
+        lines.extend([
+            f"<b>{html.escape(str(row.get('symbol')))}</b> {row.get('side')} • {int(row.get('leverage') or 1)}x",
+            f"Margin: ${float(row.get('margin_usd') or 0):.2f} • Notional: ${float(row.get('notional_usd') or 0):.2f}",
+            f"Entry <code>{float(row.get('entry_price') or 0):.8g}</code> • TP <code>{float(row.get('tp1_price') or 0):.8g}</code>",
+            f"SL <code>{float(row.get('stop_price') or 0):.8g}</code> • Liq <code>{float(row.get('estimated_liquidation_price') or 0):.8g}</code>",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def build_paper_history_text():
+    rows = get_paper_trades(20)
+    if not rows:
+        return "📜 <b>ИСТОРИЯ PAPER-СДЕЛОК</b>\n\nЗакрытых сделок пока нет."
+    lines = ["📜 <b>ИСТОРИЯ PAPER-СДЕЛОК</b>", ""]
+    for row in rows:
+        pnl = float(row.get("net_pnl") or 0)
+        icon = "✅" if pnl > 0 else "❌"
+        lines.append(
+            f"{icon} <b>{html.escape(str(row.get('symbol')))}</b> {row.get('side')} • "
+            f"{row.get('close_reason')} • <b>{pnl:+.4f} USDT</b> "
+            f"({float(row.get('return_on_margin_pct') or 0):+.2f}%)"
+        )
+    return "\n".join(lines)
+
+
 def handle_portfolio_command(chat_id, text):
     parts = text.strip().split()
     command = parts[0].split("@")[0].lower()
@@ -1409,6 +1498,11 @@ def handle_command(chat_id, text):
 
     if command == "/performance":
         send_trade_performance(chat_id)
+        return
+
+    if command == "/paper":
+        ensure_paper_account()
+        send_message(chat_id, build_paper_status_text(), reply_markup=paper_keyboard())
         return
 
     if command == "/pro":
@@ -1649,6 +1743,63 @@ def process_update(update):
             else:
                 text = "✅ <b>Сканер готов</b>\nМожно запустить новый поиск входов."
             send_message(chat_id, text, reply_markup=trade_keyboard())
+            return
+
+        if callback_data == "paper_menu":
+            ensure_paper_account()
+            send_message(chat_id, build_paper_status_text(), reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "paper_status":
+            send_message(chat_id, build_paper_status_text(), reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "paper_positions":
+            send_message(chat_id, build_paper_positions_text(), reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "paper_history":
+            send_message(chat_id, build_paper_history_text(), reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "paper_on":
+            try:
+                save_strategy_setting("PAPER_TRADING_ENABLED", True, updated_by=f"telegram:{chat_id}")
+                text = "🟢 <b>Paper Trading включён</b>\nНовые финальные сигналы будут открывать виртуальные позиции."
+            except Exception as exc:
+                text = f"❌ Ошибка: <code>{html.escape(str(exc)[:300])}</code>"
+            send_message(chat_id, text, reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "paper_off":
+            try:
+                save_strategy_setting("PAPER_TRADING_ENABLED", False, updated_by=f"telegram:{chat_id}")
+                text = "⚪ <b>Paper Trading выключен</b>\nНовые позиции не открываются. Уже открытые продолжают отслеживаться."
+            except Exception as exc:
+                text = f"❌ Ошибка: <code>{html.escape(str(exc)[:300])}</code>"
+            send_message(chat_id, text, reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "paper_reset_confirm":
+            send_message(
+                chat_id,
+                "⚠️ <b>Сбросить paper-счёт?</b>\nБудут удалены история и статистика. Сброс невозможен при открытых позициях.",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "✅ Да, сбросить до $100", "callback_data": "paper_reset_execute"}],
+                    [{"text": "❌ Отмена", "callback_data": "paper_menu"}],
+                ]},
+            )
+            return
+
+        if callback_data == "paper_reset_execute":
+            result = reset_paper_account(100.0)
+            if result.get("status") == "reset":
+                text = "✅ Paper-счёт сброшен. Баланс: <b>$100.00</b>."
+            elif result.get("status") == "open-positions-exist":
+                text = "❌ Сначала дождись закрытия всех paper-позиций."
+            else:
+                text = "❌ Не удалось сбросить paper-счёт. Проверь Render logs."
+            send_message(chat_id, text, reply_markup=paper_keyboard())
             return
 
         if callback_data == "chronos_on":
@@ -1945,6 +2096,7 @@ def start_runtime_services():
     set_bot_commands()
     load_strategy_settings(seed_missing=True)
     initialize_signal_store()
+    ensure_paper_account()
 
     # Render can restart with an empty ephemeral SQLite volume. When enabled,
     # restore monitoring automatically using TELEGRAM_CHAT_ID.
@@ -2012,6 +2164,7 @@ def listen():
     delete_webhook()
     set_bot_commands()
     initialize_signal_store()
+    ensure_paper_account()
 
     global trade_monitor, automation_supervisor
     auto_monitor = os.getenv("MONITOR_AUTO_ENABLE", "true").strip().lower() in {"1", "true", "yes", "on"}
