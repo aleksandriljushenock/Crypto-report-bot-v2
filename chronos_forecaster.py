@@ -5,6 +5,8 @@ import json
 import logging
 import math
 import os
+import subprocess
+import sys
 import threading
 import urllib.request
 from typing import Any, Sequence
@@ -92,6 +94,30 @@ def _remote_forecast(clean: list[float], horizon: int) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+
+def _subprocess_forecast(clean: list[float], horizon: int) -> dict[str, Any] | None:
+    timeout = max(30, int(os.getenv('CHRONOS_SUBPROCESS_TIMEOUT_SECONDS', '150')))
+    worker = os.path.join(os.path.dirname(__file__), 'chronos_worker.py')
+    payload = json.dumps({'context': clean, 'prediction_length': horizon})
+    env = os.environ.copy()
+    env.setdefault('OMP_NUM_THREADS', '1')
+    env.setdefault('MKL_NUM_THREADS', '1')
+    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+    completed = subprocess.run(
+        [sys.executable, worker], input=payload, text=True,
+        capture_output=True, timeout=timeout, env=env, check=False,
+    )
+    if completed.returncode != 0:
+        logger.warning('Chronos subprocess failed: code=%s stderr=%s', completed.returncode, completed.stderr[-500:])
+        return None
+    try:
+        data = json.loads(completed.stdout.strip().splitlines()[-1])
+    except Exception:
+        logger.warning('Chronos subprocess returned invalid JSON: %s', completed.stdout[-500:])
+        return None
+    return data if isinstance(data, dict) and not data.get('error') else None
+
+
 def _load_pipeline():
     global _MODEL, _LOAD_FAILED
     if _MODEL is not None:
@@ -133,12 +159,21 @@ def forecast_closes(closes: Sequence[float], prediction_length: int | None = Non
     horizon = prediction_length or int(os.getenv('CHRONOS_PREDICTION_LENGTH', '8'))
     horizon = max(1, min(32, int(horizon)))
 
-    mode = os.getenv('CHRONOS_MODE', 'local').strip().lower()
+    mode = os.getenv('CHRONOS_MODE', 'subprocess').strip().lower()
     if mode == 'remote':
         try:
             return _remote_forecast(clean, horizon)
         except Exception:
             logger.exception('Chronos remote inference failed')
+            return None
+    if mode == 'subprocess':
+        try:
+            return _subprocess_forecast(clean, horizon)
+        except subprocess.TimeoutExpired:
+            logger.warning('Chronos subprocess timeout after configured limit')
+            return None
+        except Exception:
+            logger.exception('Chronos subprocess inference failed')
             return None
 
     pipeline = _load_pipeline()

@@ -80,7 +80,7 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
         'symbolsData': {},
     }
 
-    max_workers = max(1, min(3, int(os.getenv('TRADE_SCAN_MAX_WORKERS', '2'))))
+    max_workers = max(1, min(2, int(os.getenv('TRADE_SCAN_MAX_WORKERS', '1'))))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(collect_symbol_data, client, symbol): symbol for symbol in selected_map}
         for future in as_completed(futures):
@@ -328,7 +328,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
         listing_priority = get_priority_listing_symbols(limit=int(os.getenv('TRADE_LISTING_PRIORITY_LIMIT', '12')))
         discovery_priority = get_priority_discovery_symbols(limit=int(os.getenv('TRADE_DISCOVERY_PRIORITY_LIMIT', '10')))
         priority = list(dict.fromkeys(listing_priority + discovery_priority))
-        top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '24'))
+        top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '16'))
         snapshot = collect_market_snapshot(extra_symbols=priority, top_limit=top_limit)
         rows = analyze_snapshot(snapshot)
         run_time = snapshot['runTimeUtc']
@@ -340,7 +340,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
         min_score = float(os.getenv('TRADE_MIN_SCORE', '72'))
         min_rr = float(os.getenv('TRADE_MIN_RR', '2.0'))
         min_probability = float(os.getenv('TRADE_MIN_PROBABILITY', '65'))
-        candidate_pool = max(max_results * 5, int(os.getenv('HEDGE_CANDIDATE_POOL', '20'))) if apply_ai else max_results
+        candidate_pool = max(max_results * 2, int(os.getenv('HEDGE_CANDIDATE_POOL', '10'))) if apply_ai else max_results
         signals = find_trade_signals(
             rows, min_score=min_score, min_rr=min_rr,
             include_watch=include_watch, max_results=candidate_pool, min_probability=min_probability,
@@ -361,6 +361,10 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
             snapshot.clear()
         if rows is not None:
             rows.clear()
-        gc.collect()
+        try:
+            from memory_guard import cleanup
+            cleanup()
+        except Exception:
+            gc.collect()
         _SCAN_LOCK.release()
 

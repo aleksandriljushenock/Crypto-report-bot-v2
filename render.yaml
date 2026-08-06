@@ -5,7 +5,7 @@ services:
     plan: free
     autoDeploy: true
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn --workers 1 --threads 4 --timeout 0 --bind 0.0.0.0:$PORT render_app:app
+    startCommand: gunicorn --workers 1 --threads 1 --timeout 0 --bind 0.0.0.0:$PORT render_app:app
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -31,14 +31,41 @@ services:
       - key: EXCHANGE_QUOTES
         value: USDT,USDC
       - key: TRADE_SCAN_MAX_WORKERS
-        value: "2"
+        value: "1"
       - key: TRADE_TOP_LIQUID_SYMBOLS
-        value: "24"
+        value: "16"
       - key: LEARNING_SEARCH_ITERATIONS
-        value: "100"
+        value: "40"
       - key: LEARNING_CLOUD_RESTORE_ENABLED
         value: "true"
       - key: LEARNING_CLOUD_MAX_ROWS
-        value: "3000"
+        value: "750"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "430"
+        value: "340"
+      - key: MEMORY_HARD_LIMIT_MB
+        value: "470"
+      - key: LOW_MEMORY_MODE
+        value: "true"
+      - key: HEDGE_CANDIDATE_POOL
+        value: "10"
+      - key: CHRONOS_MODE
+        value: subprocess
+      - key: CHRONOS_FINALISTS
+        value: "1"
+      - key: CHRONOS_CONTEXT_LENGTH
+        value: "96"
+      - key: CHRONOS_PREDICTION_LENGTH
+        value: "6"
+      - key: CHRONOS_TORCH_THREADS
+        value: "1"
+      - key: CHRONOS_REQUIRED_HEADROOM_MB
+        value: "220"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_NUM_THREADS
+        value: "1"
+

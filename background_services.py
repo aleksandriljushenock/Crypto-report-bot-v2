@@ -21,6 +21,9 @@ from ai_score_engine import claim_ai_alert
 from core.scheduler import PeriodicWorker
 
 
+_HEAVY_TASK_LOCK = threading.Lock()
+
+
 class AutomationSupervisor:
     def __init__(self, sender, logger, chat_id):
         self.sender = sender
@@ -43,6 +46,26 @@ class AutomationSupervisor:
         except ValueError:
             return default
 
+    def _guarded(self, name, callback):
+        def runner():
+            from memory_guard import cleanup, pressure
+            state = pressure()
+            if state.get('high'):
+                cleanup()
+                state = pressure()
+            if state.get('critical'):
+                self.logger(f"{name}: skipped due to critical memory rss={state.get('rssMb')}MB")
+                return {'status': 'skipped-memory', 'rssMb': state.get('rssMb')}
+            if not _HEAVY_TASK_LOCK.acquire(blocking=False):
+                self.logger(f"{name}: skipped because another heavy task is running")
+                return {'status': 'skipped-busy'}
+            try:
+                return callback()
+            finally:
+                cleanup()
+                _HEAVY_TASK_LOCK.release()
+        return runner
+
     def _build_workers(self):
         discovery_minutes = self._minutes('DISCOVERY_MONITOR_INTERVAL_MINUTES', 30)
         listing_minutes = self._minutes('LISTING_REFRESH_INTERVAL_MINUTES', 360)
@@ -58,57 +81,57 @@ class AutomationSupervisor:
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
-                self._run_discovery, self.logger,
-                enabled=self._bool_env('DISCOVERY_MONITOR_ENABLED', True), first_delay=20,
+                self._guarded('early-discovery-monitor', self._run_discovery), self.logger,
+                enabled=self._bool_env('DISCOVERY_MONITOR_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=20,
             ),
             PeriodicWorker(
                 'listing-database-refresh', listing_minutes * 60,
-                self._run_listing_refresh, self.logger,
-                enabled=self._bool_env('LISTING_REFRESH_ENABLED', True), first_delay=60,
+                self._guarded('listing-database-refresh', self._run_listing_refresh), self.logger,
+                enabled=self._bool_env('LISTING_REFRESH_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=60,
             ),
             PeriodicWorker(
                 'trade-outcome-tracker', trade_outcome_minutes * 60,
-                self._run_trade_outcomes, self.logger,
+                self._guarded('trade-outcome-tracker', self._run_trade_outcomes), self.logger,
                 enabled=self._bool_env('TRADE_OUTCOME_TRACKER_ENABLED', True), first_delay=120,
             ),
             PeriodicWorker(
                 'outcome-tracker', outcome_minutes * 60,
-                self._run_outcomes, self.logger,
+                self._guarded('outcome-tracker', self._run_outcomes), self.logger,
                 enabled=self._bool_env('OUTCOME_TRACKER_ENABLED', True), first_delay=90,
             ),
             PeriodicWorker(
                 'capital-flow-engine', capital_flow_minutes * 60,
-                self._run_capital_flows, self.logger,
-                enabled=self._bool_env('CAPITAL_FLOW_ENABLED', True), first_delay=45,
+                self._guarded('capital-flow-engine', self._run_capital_flows), self.logger,
+                enabled=self._bool_env('CAPITAL_FLOW_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=45,
             ),
             PeriodicWorker(
                 'ai-news-engine', news_minutes * 60,
-                self._run_news, self.logger,
-                enabled=self._bool_env('NEWS_ENGINE_ENABLED', True), first_delay=75,
+                self._guarded('ai-news-engine', self._run_news), self.logger,
+                enabled=self._bool_env('NEWS_ENGINE_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=75,
             ),
             PeriodicWorker(
                 'narrative-engine', narrative_minutes * 60,
-                self._run_narratives, self.logger,
-                enabled=self._bool_env('NARRATIVE_ENGINE_ENABLED', True), first_delay=105,
+                self._guarded('narrative-engine', self._run_narratives), self.logger,
+                enabled=self._bool_env('NARRATIVE_ENGINE_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=105,
             ),
             PeriodicWorker(
                 'smart-money-engine', smart_money_minutes * 60,
-                self._run_smart_money, self.logger,
-                enabled=self._bool_env('SMART_MONEY_ENABLED', True), first_delay=135,
+                self._guarded('smart-money-engine', self._run_smart_money), self.logger,
+                enabled=self._bool_env('SMART_MONEY_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=135,
             ),
             PeriodicWorker(
                 'ai-intelligence-engine', ai_minutes * 60,
-                self._run_ai_intelligence, self.logger,
-                enabled=self._bool_env('AI_INTELLIGENCE_ENABLED', True), first_delay=150,
+                self._guarded('ai-intelligence-engine', self._run_ai_intelligence), self.logger,
+                enabled=self._bool_env('AI_INTELLIGENCE_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=150,
             ),
             PeriodicWorker(
                 'self-learning-engine', learning_minutes * 60,
-                self._run_learning, self.logger,
+                self._guarded('self-learning-engine', self._run_learning), self.logger,
                 enabled=self._bool_env('SELF_LEARNING_ENABLED', True), first_delay=180,
             ),
             PeriodicWorker(
                 'learning-checkpoint', checkpoint_minutes * 60,
-                self._run_learning_checkpoint, self.logger,
+                self._guarded('learning-checkpoint', self._run_learning_checkpoint), self.logger,
                 enabled=self._bool_env('LEARNING_CHECKPOINT_ENABLED', True), first_delay=240,
             ),
         ]
