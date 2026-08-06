@@ -522,23 +522,32 @@ def start_report(chat_id):
         )
         report_thread.start()
 
-def _back_row():
-    return [{"text": "⬅️ Главное меню", "callback_data": "menu_main"}]
+def _back_row(target="menu_main"):
+    return [{"text": "⬅️ Назад", "callback_data": target}]
+
+
+def _home_row():
+    return [{"text": "🏠 Главное меню", "callback_data": "menu_main"}]
 
 
 def main_keyboard():
-    """Compact v11 navigation grouped by user intent."""
+    """User-first navigation with quick actions and preserved legacy tools."""
     return {
         "inline_keyboard": [
+            [{"text": "⚡ Запустить торговый скан", "callback_data": "trade_scan"}],
             [
-                {"text": "📊 Анализ рынка", "callback_data": "menu_market"},
-                {"text": "📈 Торговля", "callback_data": "menu_trade"},
+                {"text": "📈 Торговый центр", "callback_data": "menu_trade"},
+                {"text": "🧠 AI-центр", "callback_data": "menu_ai"},
             ],
             [
-                {"text": "🧠 AI Intelligence", "callback_data": "menu_ai"},
+                {"text": "🌍 Рынок", "callback_data": "menu_market"},
+                {"text": "🔭 Поиск возможностей", "callback_data": "menu_discovery"},
+            ],
+            [
                 {"text": "💼 Портфель", "callback_data": "menu_portfolio"},
+                {"text": "⚙️ Система", "callback_data": "menu_system"},
             ],
-            [{"text": "⚙️ Система", "callback_data": "menu_system"}],
+            [{"text": "📟 Панель состояния", "callback_data": "dashboard"}],
         ]
     }
 
@@ -546,20 +555,17 @@ def main_keyboard():
 def market_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "📊 Market Report", "callback_data": "run_report"}],
+            [{"text": "📊 Полный Market Report", "callback_data": "run_report"}],
             [
-                {"text": "🔥 Сигналы", "callback_data": "recent_signals"},
-                {"text": "🔍 Найти входы", "callback_data": "trade_scan"},
-            ],
-            [
+                {"text": "🔥 Последние сигналы", "callback_data": "recent_signals"},
                 {"text": "💰 Capital Flow", "callback_data": "capital_flows"},
-                {"text": "🧠 Нарративы", "callback_data": "narratives"},
             ],
             [
-                {"text": "📰 Новости", "callback_data": "ai_news"},
+                {"text": "🧠 Нарративы", "callback_data": "narratives"},
                 {"text": "😨 Fear & Greed", "callback_data": "sentiment"},
             ],
-            _back_row(),
+            [{"text": "📰 Новости рынка", "callback_data": "ai_news"}],
+            _home_row(),
         ]
     }
 
@@ -567,20 +573,35 @@ def market_keyboard():
 def trade_keyboard():
     return {
         "inline_keyboard": [
+            [{"text": "⚡ Запустить скан сейчас", "callback_data": "trade_scan"}],
+            [
+                {"text": "▶️ Включить монитор", "callback_data": "monitor_on"},
+                {"text": "⏸ Остановить монитор", "callback_data": "monitor_off"},
+            ],
+            [
+                {"text": "📡 Статус мониторинга", "callback_data": "monitor_status"},
+                {"text": "⏱ Статус скана", "callback_data": "scan_status"},
+            ],
             [
                 {"text": "⭐ Watchlist", "callback_data": "trade_watchlist"},
                 {"text": "📈 Результаты", "callback_data": "trade_performance"},
             ],
-            [
-                {"text": "▶️ Trade Monitor", "callback_data": "monitor_on"},
-                {"text": "⏸ Остановить", "callback_data": "monitor_off"},
-            ],
-            [{"text": "📡 Статус мониторинга", "callback_data": "monitor_status"}],
+            [{"text": "🔥 Последние сигналы", "callback_data": "recent_signals"}],
+            _home_row(),
+        ]
+    }
+
+
+def discovery_keyboard():
+    return {
+        "inline_keyboard": [
             [
                 {"text": "🔭 Early Discovery", "callback_data": "early_discovery"},
                 {"text": "🚨 Listing Hunter", "callback_data": "listing_hunter"},
             ],
-            _back_row(),
+            [{"text": "🆕 Обновить базу листингов", "callback_data": "scan_new_100"}],
+            [{"text": "📈 Прогресс базы", "callback_data": "listing_progress"}],
+            _home_row(),
         ]
     }
 
@@ -588,14 +609,19 @@ def trade_keyboard():
 def ai_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "🏆 TOP AI", "callback_data": "top_ai"}],
-            [{"text": "🚀 AI Центр", "callback_data": "pro_report"}],
+            [
+                {"text": "🏆 TOP AI", "callback_data": "top_ai"},
+                {"text": "🚀 Проф. отчёт", "callback_data": "pro_report"},
+            ],
             [
                 {"text": "🐋 Smart Money", "callback_data": "smart_money"},
                 {"text": "🧬 AI Learning", "callback_data": "self_learning"},
             ],
-            [{"text": "📚 AI History", "callback_data": "ai_history"}],
-            _back_row(),
+            [
+                {"text": "📚 AI History", "callback_data": "ai_history"},
+                {"text": "🧩 Модель", "callback_data": "model_status"},
+            ],
+            _home_row(),
         ]
     }
 
@@ -604,8 +630,8 @@ def portfolio_keyboard():
     return {
         "inline_keyboard": [
             [{"text": "💼 Обзор портфеля", "callback_data": "portfolio"}],
-            [{"text": "ℹ️ Управление позициями", "callback_data": "portfolio_help"}],
-            _back_row(),
+            [{"text": "ℹ️ Как управлять позициями", "callback_data": "portfolio_help"}],
+            _home_row(),
         ]
     }
 
@@ -615,12 +641,65 @@ def system_keyboard():
         "inline_keyboard": [
             [
                 {"text": "✅ Статус бота", "callback_data": "bot_status"},
-                {"text": "🧩 Сервисы", "callback_data": "automation_status"},
+                {"text": "🧩 Фоновые сервисы", "callback_data": "automation_status"},
             ],
-            [{"text": "🆕 Обновить базу листингов", "callback_data": "scan_new_100"}],
+            [
+                {"text": "❤️ Health Check", "callback_data": "health_check"},
+                {"text": "📟 Панель состояния", "callback_data": "dashboard"},
+            ],
             [{"text": "📈 Прогресс базы", "callback_data": "listing_progress"}],
-            [{"text": "❤️ Health Check", "callback_data": "health_check"}],
-            _back_row(),
+            _home_row(),
+        ]
+    }
+
+
+def _chronos_state_text():
+    enabled = str(os.getenv("CHRONOS_ENABLED", "false")).strip().lower() in ("1", "true", "yes", "on")
+    mode = str(os.getenv("CHRONOS_MODE", "local") or "local").strip().lower()
+    return f"{'🟢' if enabled else '⚪'} {'включён' if enabled else 'выключен'} ({mode})"
+
+
+def build_dashboard_text():
+    monitor_settings = get_monitor_settings()
+    monitor_enabled = bool(monitor_settings.get("enabled"))
+    monitor_alive = bool(trade_monitor and trade_monitor.is_alive())
+    scan_alive = bool(trade_scan_thread and trade_scan_thread.is_alive())
+    report_alive = bool(is_report_running())
+    listing_alive = bool(new_scan_thread and new_scan_thread.is_alive())
+    services = []
+    if scan_alive:
+        services.append("торговый скан")
+    if report_alive:
+        services.append("market report")
+    if listing_alive:
+        services.append("база листингов")
+    active = ", ".join(services) if services else "нет тяжёлых задач"
+    return (
+        "📟 <b>ПАНЕЛЬ СОСТОЯНИЯ</b>\n\n"
+        f"📡 Монитор: <b>{'включён' if monitor_enabled else 'остановлен'}</b> "
+        f"({'процесс активен' if monitor_alive else 'процесс не активен'})\n"
+        f"⚡ Ручной скан: <b>{'выполняется' if scan_alive else 'готов'}</b>\n"
+        f"🧠 Chronos: <b>{_chronos_state_text()}</b>\n"
+        f"⚙️ Активность: <b>{active}</b>\n"
+        f"🕒 Обновлено: <b>{datetime.now().strftime('%H:%M:%S')}</b>\n\n"
+        "Быстрые действия доступны кнопками ниже."
+    )
+
+
+def dashboard_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "⚡ Запустить скан", "callback_data": "trade_scan"}],
+            [
+                {"text": "▶️ Монитор ON", "callback_data": "monitor_on"},
+                {"text": "⏸ Монитор OFF", "callback_data": "monitor_off"},
+            ],
+            [
+                {"text": "🔥 Сигналы", "callback_data": "recent_signals"},
+                {"text": "📈 Результаты", "callback_data": "trade_performance"},
+            ],
+            [{"text": "🔄 Обновить панель", "callback_data": "dashboard"}],
+            _home_row(),
         ]
     }
 
@@ -628,8 +707,6 @@ def system_keyboard():
 def build_home_text():
     monitor_settings = get_monitor_settings()
     monitor_enabled = bool(monitor_settings.get("enabled"))
-    monitor_state = "🟢 включен" if monitor_enabled else "⚪ остановлен"
-
     running = []
     if is_report_running():
         running.append("Market Report")
@@ -637,14 +714,15 @@ def build_home_text():
         running.append("Listing DB")
     if trade_scan_thread is not None and trade_scan_thread.is_alive():
         running.append("Trade Scan")
-
-    activity = ", ".join(running) if running else "нет активных задач"
+    activity = ", ".join(running) if running else "готов к работе"
     return (
-        "🤖 <b>Crypto Intelligence Platform v12</b>\n\n"
-        f"📡 Trade Monitor: <b>{monitor_state}</b>\n"
-        f"⚙️ Активность: <b>{activity}</b>\n"
-        f"🕒 Обновлено: <b>{datetime.now().strftime('%H:%M:%S')}</b>\n\n"
-        "Выбери раздел:"
+        "🤖 <b>CRYPTO AI COMMAND CENTER</b>\n"
+        "<i>AI Hedge Fund • Learning MAX • Chronos</i>\n\n"
+        f"📡 Монитор сигналов: <b>{'🟢 включён' if monitor_enabled else '⚪ остановлен'}</b>\n"
+        f"🧠 Chronos: <b>{_chronos_state_text()}</b>\n"
+        f"⚙️ Состояние: <b>{activity}</b>\n"
+        f"🕒 <b>{datetime.now().strftime('%H:%M:%S')}</b>\n\n"
+        "Нажми <b>«Запустить торговый скан»</b> для немедленного поиска входов."
     )
 
 
@@ -1101,7 +1179,7 @@ def run_trade_scan_task(chat_id):
 
             except Exception as exc:
                 log(f"Ошибка сохранения сигнала: {exc}")
-        send_message(chat_id, build_trade_scan_report(result), reply_markup=main_keyboard())
+        send_message(chat_id, build_trade_scan_report(result), reply_markup=trade_keyboard())
         log(f"Ручной торговый скан завершен: signals={len(result.get('signals', []))}")
     except Exception as exc:
         log(f"Ошибка торгового сканера: {exc}")
@@ -1115,7 +1193,7 @@ def start_trade_scan(chat_id):
     global trade_scan_thread
     with trade_scan_lock:
         if trade_scan_thread is not None and trade_scan_thread.is_alive():
-            send_message(chat_id, "⚠️ Торговый скан уже выполняется.", reply_markup=main_keyboard())
+            send_message(chat_id, "⚠️ Торговый скан уже выполняется. Открой «Статус скана».", reply_markup=trade_keyboard())
             return
         trade_scan_thread = threading.Thread(target=run_trade_scan_task, args=(chat_id,), daemon=True)
         trade_scan_thread.start()
@@ -1401,6 +1479,22 @@ def process_update(update):
 
         if callback_data == "menu_system":
             send_message(chat_id, "⚙️ <b>Система</b>\nСостояние и обслуживание:", reply_markup=system_keyboard())
+            return
+
+        if callback_data == "dashboard":
+            send_message(chat_id, build_dashboard_text(), reply_markup=dashboard_keyboard())
+            return
+
+        if callback_data == "scan_status":
+            if trade_scan_thread is not None and trade_scan_thread.is_alive():
+                text = "⏳ <b>Торговый скан выполняется</b>\nДождись итогового отчёта — новый запуск сейчас не требуется."
+            else:
+                text = "✅ <b>Сканер готов</b>\nМожно запустить новый поиск входов."
+            send_message(chat_id, text, reply_markup=trade_keyboard())
+            return
+
+        if callback_data == "model_status":
+            send_v8_report(chat_id, build_model_status_report)
             return
 
         if callback_data == "portfolio_help":
