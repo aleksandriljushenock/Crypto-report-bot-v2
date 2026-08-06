@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import re
+import html
 from datetime import datetime, timezone
 from listing_cache import get_cache_stats
 from listing_database import get_database_stats
@@ -53,6 +54,15 @@ from news_engine import build_news_report
 from self_learning_engine import build_learning_report, build_model_status_report
 from operational_reports import (build_market_report, build_regime_report, build_confidence_report, build_features_report, build_health_report)
 from ai_intelligence import build_top_ai_report, build_ai_history_report
+from strategy_settings import (
+    CATEGORY_TITLES,
+    SPEC_BY_KEY,
+    current_value as get_strategy_setting_value,
+    load_from_supabase as load_strategy_settings,
+    reset_setting as reset_strategy_setting,
+    save_setting as save_strategy_setting,
+    settings_by_category,
+)
 from trade_signal_store import (
     get_monitor_settings,
     get_recent_signals,
@@ -83,6 +93,7 @@ trade_monitor = None
 automation_supervisor = None
 runtime_health_monitor = None
 cloud_store = CloudLearningStore()
+strategy_edit_pending = {}
 
 
 def log(message):
@@ -652,11 +663,95 @@ def system_keyboard():
                 {"text": "❤️ Health Check", "callback_data": "health_check"},
                 {"text": "📟 Панель состояния", "callback_data": "dashboard"},
             ],
+            [{"text": "🎛 Настройки стратегии", "callback_data": "strategy_settings"}],
             [{"text": "📈 Прогресс базы", "callback_data": "listing_progress"}],
             _home_row(),
         ]
     }
 
+
+
+def strategy_settings_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🎯 Фильтры", "callback_data": "cfg_cat:filters"},
+                {"text": "🧩 Веса правил", "callback_data": "cfg_cat:rules"},
+            ],
+            [
+                {"text": "💵 Размер позиции", "callback_data": "cfg_cat:position"},
+                {"text": "🕒 Свежесть", "callback_data": "cfg_cat:recency"},
+            ],
+            [{"text": "⚙️ Сканирование", "callback_data": "cfg_cat:runtime"}],
+            [{"text": "🔄 Загрузить из Supabase", "callback_data": "cfg_reload"}],
+            _back_row("menu_system"),
+        ]
+    }
+
+
+def build_strategy_settings_text():
+    lines = [
+        "🎛 <b>НАСТРОЙКИ СТРАТЕГИИ</b>",
+        "",
+        "Значения хранятся в Supabase и применяются сразу, без деплоя.",
+        "Render ENV используется как резерв при недоступности базы.",
+        "",
+        "Выбери раздел:",
+    ]
+    return "\n".join(lines)
+
+
+def strategy_category_keyboard(category):
+    rows = []
+    for spec in settings_by_category(category):
+        value = get_strategy_setting_value(spec.key)
+        rows.append([{
+            "text": f"{spec.title}: {value}",
+            "callback_data": f"cfg_edit:{spec.key}",
+        }])
+    rows.append([{"text": "⬅️ К разделам", "callback_data": "strategy_settings"}])
+    rows.append(_home_row())
+    return {"inline_keyboard": rows}
+
+
+def build_strategy_category_text(category):
+    title = CATEGORY_TITLES.get(category, category)
+    lines = [f"{title}", ""]
+    for spec in settings_by_category(category):
+        value = html.escape(get_strategy_setting_value(spec.key))
+        lines.append(f"• <b>{html.escape(spec.title)}</b>: <code>{value}</code>")
+    lines.extend(["", "Нажми параметр, чтобы изменить его."])
+    return "\n".join(lines)
+
+
+def build_strategy_edit_text(key):
+    spec = SPEC_BY_KEY[key]
+    value = html.escape(get_strategy_setting_value(key))
+    bounds = []
+    if spec.minimum is not None:
+        bounds.append(f"min {spec.minimum:g}")
+    if spec.maximum is not None:
+        bounds.append(f"max {spec.maximum:g}")
+    bounds_text = f" ({', '.join(bounds)})" if bounds else ""
+    return (
+        f"✏️ <b>{html.escape(spec.title)}</b>\n\n"
+        f"Текущее значение: <code>{value}</code>\n"
+        f"Тип: <code>{spec.kind}</code>{bounds_text}\n\n"
+        f"{html.escape(spec.description)}\n\n"
+        "Отправь новое значение обычным сообщением.\n"
+        "Для отмены отправь <code>/cancel</code>."
+    )
+
+
+def strategy_edit_keyboard(key):
+    spec = SPEC_BY_KEY[key]
+    return {
+        "inline_keyboard": [
+            [{"text": "↩️ Значение по умолчанию", "callback_data": f"cfg_reset:{key}"}],
+            [{"text": "⬅️ Назад", "callback_data": f"cfg_cat:{spec.category}"}],
+            _home_row(),
+        ]
+    }
 
 def _chronos_state_text():
     try:
@@ -1494,6 +1589,56 @@ def process_update(update):
             send_message(chat_id, "⚙️ <b>Система</b>\nСостояние и обслуживание:", reply_markup=system_keyboard())
             return
 
+        if callback_data == "strategy_settings":
+            strategy_edit_pending.pop(str(chat_id), None)
+            send_message(chat_id, build_strategy_settings_text(), reply_markup=strategy_settings_keyboard())
+            return
+
+        if callback_data == "cfg_reload":
+            applied = load_strategy_settings(seed_missing=True)
+            send_message(
+                chat_id,
+                f"🔄 Настройки загружены из Supabase: <b>{len(applied)}</b>",
+                reply_markup=strategy_settings_keyboard(),
+            )
+            return
+
+        if callback_data and callback_data.startswith("cfg_cat:"):
+            category = callback_data.split(":", 1)[1]
+            if category not in CATEGORY_TITLES:
+                send_message(chat_id, "⚠️ Неизвестный раздел.", reply_markup=strategy_settings_keyboard())
+                return
+            strategy_edit_pending.pop(str(chat_id), None)
+            send_message(
+                chat_id,
+                build_strategy_category_text(category),
+                reply_markup=strategy_category_keyboard(category),
+            )
+            return
+
+        if callback_data and callback_data.startswith("cfg_edit:"):
+            key = callback_data.split(":", 1)[1]
+            if key not in SPEC_BY_KEY:
+                send_message(chat_id, "⚠️ Неизвестный параметр.", reply_markup=strategy_settings_keyboard())
+                return
+            strategy_edit_pending[str(chat_id)] = key
+            send_message(chat_id, build_strategy_edit_text(key), reply_markup=strategy_edit_keyboard(key))
+            return
+
+        if callback_data and callback_data.startswith("cfg_reset:"):
+            key = callback_data.split(":", 1)[1]
+            try:
+                value = reset_strategy_setting(key, updated_by=f"telegram:{chat_id}")
+                spec = SPEC_BY_KEY[key]
+                text = f"✅ <b>{html.escape(spec.title)}</b> сброшен: <code>{html.escape(value)}</code>"
+                keyboard = strategy_category_keyboard(spec.category)
+            except Exception as exc:
+                text = f"❌ Не удалось сбросить параметр: <code>{html.escape(str(exc)[:400])}</code>"
+                keyboard = strategy_settings_keyboard()
+            strategy_edit_pending.pop(str(chat_id), None)
+            send_message(chat_id, text, reply_markup=keyboard)
+            return
+
         if callback_data == "dashboard":
             send_message(chat_id, build_dashboard_text(), reply_markup=dashboard_keyboard())
             return
@@ -1749,6 +1894,40 @@ def process_update(update):
 
         return
 
+    pending_key = strategy_edit_pending.get(str(chat_id))
+    if pending_key:
+        if text.strip().lower() == "/cancel":
+            spec = SPEC_BY_KEY[pending_key]
+            strategy_edit_pending.pop(str(chat_id), None)
+            send_message(
+                chat_id,
+                "↩️ Изменение отменено.",
+                reply_markup=strategy_category_keyboard(spec.category),
+            )
+            return
+        try:
+            value = save_strategy_setting(
+                pending_key,
+                text.strip(),
+                updated_by=f"telegram:{chat_id}",
+            )
+            spec = SPEC_BY_KEY[pending_key]
+            strategy_edit_pending.pop(str(chat_id), None)
+            send_message(
+                chat_id,
+                f"✅ <b>{html.escape(spec.title)}</b> обновлён: <code>{html.escape(value)}</code>\n"
+                "Новое значение применяется к следующим расчётам.",
+                reply_markup=strategy_category_keyboard(spec.category),
+            )
+        except Exception as exc:
+            send_message(
+                chat_id,
+                f"❌ Некорректное значение: <code>{html.escape(str(exc)[:400])}</code>\n\n"
+                "Попробуй ещё раз или отправь /cancel.",
+                reply_markup=strategy_edit_keyboard(pending_key),
+            )
+        return
+
     if text.startswith("/"):
         log(
             f"Получена команда {text!r} "
@@ -1764,6 +1943,7 @@ def start_runtime_services():
 
     remove_stale_lock()
     set_bot_commands()
+    load_strategy_settings(seed_missing=True)
     initialize_signal_store()
 
     # Render can restart with an empty ephemeral SQLite volume. When enabled,
