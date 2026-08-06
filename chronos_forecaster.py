@@ -26,7 +26,25 @@ def _bool(name: str, default: bool) -> bool:
 
 
 def _enabled() -> bool:
-    return _bool('CHRONOS_ENABLED', False)
+    default = _bool('CHRONOS_ENABLED', False)
+    try:
+        from automation_store import get_runtime_bool
+        return get_runtime_bool('chronos_enabled', default)
+    except Exception:
+        return default
+
+def chronos_enabled() -> bool:
+    return _enabled()
+
+def set_chronos_enabled(enabled: bool) -> bool:
+    try:
+        from automation_store import set_runtime_bool
+        state = bool(set_runtime_bool('chronos_enabled', enabled))
+    except Exception:
+        state = bool(enabled)
+    if not state:
+        unload_pipeline('telegram-disabled')
+    return state
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

@@ -621,6 +621,11 @@ def ai_keyboard():
                 {"text": "📚 AI History", "callback_data": "ai_history"},
                 {"text": "🧩 Модель", "callback_data": "model_status"},
             ],
+            [
+                {"text": "🟢 Chronos ON", "callback_data": "chronos_on"},
+                {"text": "⚪ Chronos OFF", "callback_data": "chronos_off"},
+            ],
+            [{"text": "🧠 Статус Chronos", "callback_data": "chronos_status"}],
             _home_row(),
         ]
     }
@@ -654,8 +659,12 @@ def system_keyboard():
 
 
 def _chronos_state_text():
-    enabled = str(os.getenv("CHRONOS_ENABLED", "false")).strip().lower() in ("1", "true", "yes", "on")
-    mode = str(os.getenv("CHRONOS_MODE", "local") or "local").strip().lower()
+    try:
+        from chronos_forecaster import chronos_enabled
+        enabled = chronos_enabled()
+    except Exception:
+        enabled = str(os.getenv("CHRONOS_ENABLED", "false")).strip().lower() in ("1", "true", "yes", "on")
+    mode = str(os.getenv("CHRONOS_MODE", "subprocess") or "subprocess").strip().lower()
     return f"{'🟢' if enabled else '⚪'} {'включён' if enabled else 'выключен'} ({mode})"
 
 
@@ -697,6 +706,10 @@ def dashboard_keyboard():
             [
                 {"text": "🔥 Сигналы", "callback_data": "recent_signals"},
                 {"text": "📈 Результаты", "callback_data": "trade_performance"},
+            ],
+            [
+                {"text": "🟢 Chronos ON", "callback_data": "chronos_on"},
+                {"text": "⚪ Chronos OFF", "callback_data": "chronos_off"},
             ],
             [{"text": "🔄 Обновить панель", "callback_data": "dashboard"}],
             _home_row(),
@@ -1491,6 +1504,40 @@ def process_update(update):
             else:
                 text = "✅ <b>Сканер готов</b>\nМожно запустить новый поиск входов."
             send_message(chat_id, text, reply_markup=trade_keyboard())
+            return
+
+        if callback_data == "chronos_on":
+            try:
+                from chronos_forecaster import set_chronos_enabled
+                enabled = set_chronos_enabled(True)
+                text = (
+                    "🟢 <b>Chronos включён</b>\n"
+                    "Будет применяться только к финальному кандидату и только если memory guard разрешит запуск."
+                    if enabled else "⚠️ Не удалось включить Chronos."
+                )
+            except Exception as exc:
+                text = f"❌ Ошибка включения Chronos: <code>{str(exc)[:300]}</code>"
+            send_message(chat_id, text, reply_markup=ai_keyboard())
+            return
+
+        if callback_data == "chronos_off":
+            try:
+                from chronos_forecaster import set_chronos_enabled
+                set_chronos_enabled(False)
+                text = "⚪ <b>Chronos выключен</b>\nСканирование продолжит работать без модели Chronos."
+            except Exception as exc:
+                text = f"❌ Ошибка выключения Chronos: <code>{str(exc)[:300]}</code>"
+            send_message(chat_id, text, reply_markup=ai_keyboard())
+            return
+
+        if callback_data == "chronos_status":
+            send_message(
+                chat_id,
+                f"🧠 <b>Chronos</b>\nТекущее состояние: <b>{_chronos_state_text()}</b>\n\n"
+                "Настройка сохраняется для текущего экземпляра Render и после рестарта возвращается "
+                "к значению CHRONOS_ENABLED из ENV.",
+                reply_markup=ai_keyboard(),
+            )
             return
 
         if callback_data == "model_status":
