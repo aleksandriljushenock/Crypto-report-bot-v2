@@ -107,7 +107,7 @@ class AutomationSupervisor:
             PeriodicWorker(
                 'ai-news-engine', news_minutes * 60,
                 self._guarded('ai-news-engine', self._run_news), self.logger,
-                enabled=self._bool_env('NEWS_ENGINE_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=75,
+                enabled=self._bool_env('NEWS_ENGINE_ENABLED', True), first_delay=75,
             ),
             PeriodicWorker(
                 'narrative-engine', narrative_minutes * 60,
@@ -202,18 +202,26 @@ class AutomationSupervisor:
         return {'analyzed': len(items), 'top': items[:3]}
 
     def _run_news(self):
+        # Новости продолжают собираться и сохраняться для AI-расчётов.
+        # Автоматическая отправка в Telegram отключена по умолчанию:
+        # пользователь открывает новости только через отдельную кнопку /news.
         items = scan_news()
+        notify_enabled = self._bool_env('NEWS_AUTO_NOTIFICATIONS', False)
         threshold = float(os.getenv('NEWS_NOTIFY_MIN_IMPACT', '75'))
         sent = 0
-        for item in items:
-            if float(item.get('impact') or 0) < threshold or not self.chat_id:
-                continue
-            key = f"news:{item.get('title','')[:160]}"
-            if claim_notification(key, 'news', item):
-                self.sender(self.chat_id, f"<b>⚠️ ВАЖНАЯ НОВОСТЬ</b>\nImpact: <b>{item['impact']}</b>\n\n{item['title']}")
-                sent += 1
-        self.logger(f"AI news: new={len(items)}, sent={sent}")
-        return {'new': len(items), 'sent': sent}
+        if notify_enabled:
+            for item in items:
+                if float(item.get('impact') or 0) < threshold or not self.chat_id:
+                    continue
+                key = f"news:{item.get('title','')[:160]}"
+                if claim_notification(key, 'news', item):
+                    self.sender(self.chat_id, f"<b>⚠️ ВАЖНАЯ НОВОСТЬ</b>\nImpact: <b>{item['impact']}</b>\n\n{item['title']}")
+                    sent += 1
+        self.logger(
+            f"AI news: collected={len(items)}, telegram_sent={sent}, "
+            f"auto_notifications={'on' if notify_enabled else 'off'}"
+        )
+        return {'new': len(items), 'sent': sent, 'auto_notifications': notify_enabled}
 
     def _run_narratives(self):
         items = scan_narratives()

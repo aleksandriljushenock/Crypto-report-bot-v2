@@ -17,7 +17,7 @@ HTML = '''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewp
 def index():
     top = get_top_scores(12, 72)
     cards=[]
-    for kind,title in [('capital_flow','Capital Flow'),('narrative','Narratives'),('news','News'),('smart_money','Smart Money'),('fear_greed','Fear & Greed')]:
+    for kind,title in [('capital_flow','Capital Flow'),('narrative','Narratives'),('smart_money','Smart Money'),('fear_greed','Fear & Greed')]:
         cards.append((title,json.dumps(latest(kind,8),ensure_ascii=False,indent=2,default=str)))
     cards.append(('Portfolio',json.dumps(get_positions(),ensure_ascii=False,indent=2,default=str)))
     return render_template_string(HTML, top=top, cards=cards)
