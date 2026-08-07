@@ -19,3 +19,5 @@ data
 .idea
 .vscode
 run_*.bat
+
+backups

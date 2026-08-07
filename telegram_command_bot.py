@@ -389,6 +389,7 @@ def set_bot_commands():
         {"command": "watchlist", "description": "AI Watchlist монет"},
         {"command": "performance", "description": "Эффективность сигналов"},
         {"command": "paper", "description": "Paper Trading и PnL"},
+        {"command": "server", "description": "CPU, RAM, disk и VPS status"},
         {"command": "automation_status", "description": "Статус фоновых сервисов"},
         {"command": "pro", "description": "Полный Professional отчет v8"},
         {"command": "flows", "description": "Потоки капитала"},
@@ -721,6 +722,7 @@ def system_keyboard():
                 {"text": "📡 Мониторинг", "callback_data": "menu_trade"},
                 {"text": "🧩 Фоновые сервисы", "callback_data": "automation_status"},
             ],
+            [{"text": "🖥 Сервер", "callback_data": "server_status"}],
             [{"text": "📟 Диагностика", "callback_data": "dashboard"}],
             _home_row(),
         ]
@@ -1808,6 +1810,11 @@ def handle_command(chat_id, text):
         send_message(chat_id, build_paper_status_text(), reply_markup=paper_keyboard())
         return
 
+    if command == "/server":
+        from server_status import build_server_status
+        send_message(chat_id, build_server_status(), reply_markup=system_keyboard())
+        return
+
     if command == "/pro":
         send_v8_report(chat_id, build_professional_report)
         return
@@ -2312,6 +2319,11 @@ def process_update(update):
                 reply_markup=main_keyboard(),
             )
 
+            return
+
+        if callback_data == "server_status":
+            from server_status import build_server_status
+            send_message(chat_id, build_server_status(), reply_markup=system_keyboard())
             return
 
         if callback_data == "bot_status":
