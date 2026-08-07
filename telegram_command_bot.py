@@ -32,6 +32,7 @@ from core.http_client import http
 from core.logging_setup import get_logger
 from core.settings import settings
 from trade_engine import run_trade_scan
+from trade_market_client import get_provider_health_snapshot, probe_provider_health
 from background_services import AutomationSupervisor, build_automation_status
 from trade_monitor import TradeMonitor
 from trade_signal_report import (
@@ -699,9 +700,10 @@ def analytics_keyboard():
                 {"text": "🧪 Paper PnL", "callback_data": "paper_status"},
             ],
             [
+                {"text": "🏦 Биржи", "callback_data": "exchange_status"},
                 {"text": "🌍 Рынок + новости", "callback_data": "menu_market"},
-                {"text": "🔭 Discovery", "callback_data": "menu_discovery"},
             ],
+            [{"text": "🔭 Discovery", "callback_data": "menu_discovery"}],
             _home_row(),
         ]
     }
@@ -1033,6 +1035,72 @@ def build_best_combos_text():
     lines.extend(f"• <b>{html.escape(name)}</b>: {count}" for name, count in top)
     lines.append("\nДля оценки прибыльности используй статистику после накопления закрытых paper-сделок.")
     return "\n".join(lines)
+
+
+def _format_provider_time(ts):
+    if not ts:
+        return "—"
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%H:%M:%S UTC")
+    except Exception:
+        return "—"
+
+
+def build_exchange_status_text(active_probe=True):
+    probe_rows = probe_provider_health() if active_probe else []
+    probe_by_name = {row.get("provider"): row for row in probe_rows}
+    rows = get_provider_health_snapshot()
+    configured = [row.get("provider") for row in rows]
+    lines = [
+        "🏦 <b>БИРЖИ И ИСТОЧНИКИ РЫНКА</b>",
+        "",
+        "Монеты мониторятся через fallback-цепочку публичных futures API.",
+        f"Порядок: <b>{' → '.join(name.upper() for name in configured)}</b>",
+        "",
+    ]
+    online = 0
+    for row in rows:
+        name = str(row.get("provider") or "?").upper()
+        probe = probe_by_name.get(row.get("provider"))
+        if probe is not None:
+            ok = bool(probe.get("ok"))
+            status = "online" if ok else "degraded"
+            latency = probe.get("latency_ms")
+        else:
+            status = row.get("status") or "unknown"
+            latency = None
+        if status == "online":
+            icon, label = "🟢", "ONLINE"
+            online += 1
+        elif status == "cooldown":
+            icon, label = "🟠", f"COOLDOWN {int(row.get('cooldown_remaining') or 0)}s"
+        elif status == "degraded":
+            icon, label = "🔴", "DEGRADED"
+        else:
+            icon, label = "⚪", "НЕ ПРОВЕРЕНА"
+        lines.append(f"{icon} <b>{name}</b> — <b>{label}</b>")
+        if latency is not None:
+            lines.append(f"   ↳ ping: <b>{int(latency)} ms</b>")
+        if row.get("last_success_at"):
+            lines.append(f"   ↳ последний успех: {_format_provider_time(row.get('last_success_at'))}")
+        if row.get("error") and status != "online":
+            err = html.escape(str(row.get("error"))[:180])
+            lines.append(f"   ↳ ошибка: <code>{err}</code>")
+        lines.append("")
+    lines.append(f"Доступно сейчас: <b>{online}/{len(rows)}</b>")
+    lines.append("")
+    lines.append("Если первая биржа недоступна или не знает конкретный символ, клиент переключается на следующую.")
+    return "\n".join(lines)
+
+
+def exchange_status_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "🔄 Проверить снова", "callback_data": "exchange_status"}],
+            [{"text": "📊 Аналитика", "callback_data": "menu_analytics"}],
+            _home_row(),
+        ]
+    }
 
 
 def build_paper_goal_text():
@@ -1994,6 +2062,10 @@ def process_update(update):
 
         if callback_data == "best_combos":
             send_message(chat_id, build_best_combos_text(), reply_markup=analytics_keyboard())
+            return
+
+        if callback_data == "exchange_status":
+            send_message(chat_id, build_exchange_status_text(active_probe=True), reply_markup=exchange_status_keyboard())
             return
 
         if callback_data == "paper_goal":

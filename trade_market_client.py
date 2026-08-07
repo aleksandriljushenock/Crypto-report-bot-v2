@@ -24,16 +24,29 @@ def _cooldown_seconds():
 
 
 def _mark_failed(provider, exc):
+    now = time.time()
     with _PROVIDER_LOCK:
-        _PROVIDER_HEALTH[provider] = {
-            "blocked_until": time.time() + _cooldown_seconds(),
+        state = dict(_PROVIDER_HEALTH.get(provider) or {})
+        state.update({
+            "blocked_until": now + _cooldown_seconds(),
             "error": f"{type(exc).__name__}: {exc}",
-        }
+            "last_failure_at": now,
+            "failures": int(state.get("failures", 0)) + 1,
+        })
+        _PROVIDER_HEALTH[provider] = state
 
 
 def _mark_success(provider):
+    now = time.time()
     with _PROVIDER_LOCK:
-        _PROVIDER_HEALTH.pop(provider, None)
+        state = dict(_PROVIDER_HEALTH.get(provider) or {})
+        state.update({
+            "blocked_until": 0,
+            "error": None,
+            "last_success_at": now,
+            "successes": int(state.get("successes", 0)) + 1,
+        })
+        _PROVIDER_HEALTH[provider] = state
 
 
 def _available(provider):
@@ -110,6 +123,57 @@ class FallbackTradeMarketClient:
             raise AttributeError(name)
         return lambda *args, **kwargs: self._call(name, *args, **kwargs)
 
+
+
+def get_provider_health_snapshot():
+    """Return local circuit-breaker/provider activity state without network I/O."""
+    now = time.time()
+    rows = []
+    with _PROVIDER_LOCK:
+        health = {k: dict(v) for k, v in _PROVIDER_HEALTH.items()}
+    for name in _provider_order():
+        state = health.get(name, {})
+        blocked_until = float(state.get("blocked_until", 0) or 0)
+        last_success = float(state.get("last_success_at", 0) or 0)
+        last_failure = float(state.get("last_failure_at", 0) or 0)
+        if blocked_until > now:
+            status = "cooldown"
+        elif last_success and last_success >= last_failure:
+            status = "online"
+        elif last_failure:
+            status = "degraded"
+        else:
+            status = "unknown"
+        rows.append({
+            "provider": name,
+            "status": status,
+            "blocked_until": blocked_until,
+            "cooldown_remaining": max(0, int(blocked_until - now)),
+            "last_success_at": last_success,
+            "last_failure_at": last_failure,
+            "successes": int(state.get("successes", 0) or 0),
+            "failures": int(state.get("failures", 0) or 0),
+            "error": state.get("error"),
+        })
+    return rows
+
+
+def probe_provider_health(symbol="BTCUSDT", timeout=5):
+    """Actively ping configured exchanges with a lightweight ticker request."""
+    results = []
+    for name in _provider_order():
+        started = time.perf_counter()
+        try:
+            client = _build_provider(name, timeout)
+            client.ticker_24h(symbol)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            _mark_success(name)
+            results.append({"provider": name, "ok": True, "latency_ms": latency_ms, "error": None})
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            _mark_failed(name, exc)
+            results.append({"provider": name, "ok": False, "latency_ms": latency_ms, "error": str(exc)})
+    return results
 
 def create_trade_market_client():
     timeout = int(os.getenv("EXCHANGE_HTTP_TIMEOUT", "15"))
