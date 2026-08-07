@@ -23,6 +23,10 @@ from rule_engine import evaluate_rules
 _SCAN_LOCK = threading.Lock()
 
 
+def is_trade_scan_running():
+    return _SCAN_LOCK.locked()
+
+
 def _listing_metadata(symbol):
     metadata = {'isRecentListing': False, 'listingScore': None, 'listingAgeDays': None}
     try:

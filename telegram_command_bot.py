@@ -1052,14 +1052,37 @@ def build_best_combos_text():
 
 
 def build_scanner_intelligence_text():
-    from scanner_intelligence import get_last_scan_intelligence, aggregate_24h
+    from scanner_intelligence import get_last_scan_intelligence, aggregate_24h, is_previous_process_snapshot
+    from trade_engine import is_trade_scan_running
     row = get_last_scan_intelligence()
+    running = is_trade_scan_running()
     if not row:
+        if running:
+            return (
+                "🔎 <b>SCANNER INTELLIGENCE</b>\n\n"
+                "🟡 <b>Инициализация после запуска</b>\n"
+                "🌍 Загружаю Multi-Exchange Universe\n"
+                "🏦 Проверяю доступные биржи\n"
+                "⏳ Первый полный скан ещё не завершён."
+            )
         return "🔎 <b>SCANNER INTELLIGENCE</b>\n\nДанных ещё нет. Запусти торговый скан."
     st = row.get("stages") or {}
+    previous_process = is_previous_process_snapshot(row)
     lines = [
         "🔎 <b>SCANNER INTELLIGENCE</b>", "",
-        f"Последний скан: <code>{html.escape(str(row.get('runTimeUtc') or '—'))}</code>",
+    ]
+    if running:
+        lines += [
+            "🟡 <b>Новый скан выполняется сейчас</b>",
+            "Свежие цифры появятся после завершения полного прохода.", "",
+        ]
+    if previous_process:
+        lines += [
+            "☁️ <b>Восстановлено после redeploy из Supabase</b>",
+            "Ниже — последний успешно завершённый скан предыдущего процесса.", "",
+        ]
+    lines += [
+        f"Последний успешный скан: <code>{html.escape(str(row.get('runTimeUtc') or '—'))}</code>",
         f"Проверено: <b>{int(st.get('analyzed') or 0)}</b>", "",
         "<b>Воронка:</b>",
         f"• структура/status → <b>{int(st.get('status') or 0)}</b>",

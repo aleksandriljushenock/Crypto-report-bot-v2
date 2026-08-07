@@ -84,6 +84,28 @@ def build_signal_block(signal, index=None):
 
 def build_trade_scan_report(result, manual=True):
     signals = result.get('signals', [])
+    if result.get('busy'):
+        lines = [
+            '<b>🔍 ТОРГОВЫЙ СКАНЕР</b>', '',
+            '🟡 <b>Скан уже выполняется</b>',
+            'Другой цикл (обычно фоновый монитор после redeploy) уже загружает рынок.',
+            'Новый параллельный проход не запускается, чтобы не удваивать RAM и API-запросы.',
+        ]
+        try:
+            from scanner_intelligence import get_last_scan_intelligence
+            previous = get_last_scan_intelligence()
+            st = previous.get('stages') or {}
+            if previous:
+                lines += [
+                    '', '<b>Последний успешно завершённый скан:</b>',
+                    f"UTC: {esc(previous.get('runTimeUtc') or previous.get('savedAt') or '—')}",
+                    f"Проверено: <b>{int(st.get('analyzed') or 0)}</b> монет",
+                    f"Сигналов: <b>{int(st.get('signals') or 0)}</b>",
+                ]
+        except Exception:
+            pass
+        lines += ['', '⏳ Открой «Статус скана» через несколько минут — после завершения появятся свежие цифры.']
+        return '\n'.join(lines)
     lines = [
         '<b>🔍 ТОРГОВЫЙ СКАНЕР</b>',
         f"UTC: {esc(result.get('runTimeUtc'))}",
