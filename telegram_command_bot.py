@@ -552,63 +552,77 @@ def _home_row():
 
 
 def main_keyboard():
-    """User-first navigation with quick actions and preserved legacy tools."""
+    """Compact UX 2.0: daily actions first, advanced tools one level deeper."""
     return {
         "inline_keyboard": [
-            [{"text": "⚡ Запустить торговый скан", "callback_data": "trade_scan"}],
+            [{"text": "🔍 Сканировать сейчас", "callback_data": "trade_scan"}],
             [
-                {"text": "📈 Торговый центр", "callback_data": "menu_trade"},
-                {"text": "🧠 AI-центр", "callback_data": "menu_ai"},
+                {"text": "🎯 Сигналы", "callback_data": "menu_signals"},
+                {"text": "📈 Портфель", "callback_data": "menu_portfolio"},
             ],
             [
-                {"text": "🌍 Рынок", "callback_data": "menu_market"},
-                {"text": "🔭 Поиск возможностей", "callback_data": "menu_discovery"},
+                {"text": "🤖 AI Центр", "callback_data": "menu_ai"},
+                {"text": "📊 Аналитика", "callback_data": "menu_analytics"},
+            ],
+            [{"text": "⚙️ Настройки", "callback_data": "menu_system"}],
+        ]
+    }
+
+
+def signals_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔥 Последние", "callback_data": "recent_signals"},
+                {"text": "💎 Лучший сигнал", "callback_data": "best_signal"},
             ],
             [
-                {"text": "💼 Портфель", "callback_data": "menu_portfolio"},
-                {"text": "⚙️ Система", "callback_data": "menu_system"},
+                {"text": "🧠 Почему AI выбрал", "callback_data": "explain_signal"},
+                {"text": "⭐ Watchlist", "callback_data": "trade_watchlist"},
             ],
-            [{"text": "📟 Панель состояния", "callback_data": "dashboard"}],
+            [
+                {"text": "📈 Результаты", "callback_data": "trade_performance"},
+                {"text": "📰 Новости", "callback_data": "ai_news"},
+            ],
+            [{"text": "⏱ Статус скана", "callback_data": "scan_status"}],
+            _home_row(),
         ]
     }
 
 
 def market_keyboard():
+    """Legacy market tools remain available from Analytics -> Advanced."""
     return {
         "inline_keyboard": [
             [{"text": "📊 Полный Market Report", "callback_data": "run_report"}],
             [
-                {"text": "🔥 Последние сигналы", "callback_data": "recent_signals"},
                 {"text": "💰 Capital Flow", "callback_data": "capital_flows"},
+                {"text": "😨 Fear & Greed", "callback_data": "sentiment"},
             ],
             [
                 {"text": "🧠 Нарративы", "callback_data": "narratives"},
-                {"text": "😨 Fear & Greed", "callback_data": "sentiment"},
+                {"text": "📰 Новости", "callback_data": "ai_news"},
             ],
-            [{"text": "📰 Новости рынка", "callback_data": "ai_news"}],
+            [{"text": "⬅️ Аналитика", "callback_data": "menu_analytics"}],
             _home_row(),
         ]
     }
 
 
 def trade_keyboard():
+    """Legacy trading controls. Main user flow lives in Signals and Portfolio."""
     return {
         "inline_keyboard": [
-            [{"text": "⚡ Запустить скан сейчас", "callback_data": "trade_scan"}],
+            [{"text": "⚡ Запустить скан", "callback_data": "trade_scan"}],
             [
-                {"text": "▶️ Включить монитор", "callback_data": "monitor_on"},
-                {"text": "⏸ Остановить монитор", "callback_data": "monitor_off"},
+                {"text": "▶️ Монитор ON", "callback_data": "monitor_on"},
+                {"text": "⏸ Монитор OFF", "callback_data": "monitor_off"},
             ],
             [
-                {"text": "📡 Статус мониторинга", "callback_data": "monitor_status"},
+                {"text": "📡 Статус монитора", "callback_data": "monitor_status"},
                 {"text": "⏱ Статус скана", "callback_data": "scan_status"},
             ],
-            [
-                {"text": "⭐ Watchlist", "callback_data": "trade_watchlist"},
-                {"text": "📈 Результаты", "callback_data": "trade_performance"},
-            ],
-            [{"text": "🔥 Последние сигналы", "callback_data": "recent_signals"}],
-            [{"text": "🧪 Paper Trading", "callback_data": "paper_menu"}],
+            [{"text": "🎯 К сигналам", "callback_data": "menu_signals"}],
             _home_row(),
         ]
     }
@@ -623,6 +637,7 @@ def discovery_keyboard():
             ],
             [{"text": "🆕 Обновить базу листингов", "callback_data": "scan_new_100"}],
             [{"text": "📈 Прогресс базы", "callback_data": "listing_progress"}],
+            [{"text": "⬅️ Аналитика", "callback_data": "menu_analytics"}],
             _home_row(),
         ]
     }
@@ -632,22 +647,19 @@ def ai_keyboard():
     return {
         "inline_keyboard": [
             [
+                {"text": "🏆 Champion / Модель", "callback_data": "model_status"},
+                {"text": "🧬 Learning", "callback_data": "self_learning"},
+            ],
+            [
                 {"text": "🏆 TOP AI", "callback_data": "top_ai"},
-                {"text": "🚀 Проф. отчёт", "callback_data": "pro_report"},
-            ],
-            [
-                {"text": "🐋 Smart Money", "callback_data": "smart_money"},
-                {"text": "🧬 AI Learning", "callback_data": "self_learning"},
-            ],
-            [
                 {"text": "📚 AI History", "callback_data": "ai_history"},
-                {"text": "🧩 Модель", "callback_data": "model_status"},
             ],
+            [{"text": "🧠 Статус Chronos", "callback_data": "chronos_status"}],
             [
                 {"text": "🟢 Chronos ON", "callback_data": "chronos_on"},
                 {"text": "⚪ Chronos OFF", "callback_data": "chronos_off"},
             ],
-            [{"text": "🧠 Статус Chronos", "callback_data": "chronos_status"}],
+            [{"text": "🐋 Smart Money", "callback_data": "smart_money"}],
             _home_row(),
         ]
     }
@@ -656,8 +668,40 @@ def ai_keyboard():
 def portfolio_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "💼 Обзор портфеля", "callback_data": "portfolio"}],
-            [{"text": "ℹ️ Как управлять позициями", "callback_data": "portfolio_help"}],
+            [{"text": "🧪 Paper Trading", "callback_data": "paper_menu"}],
+            [
+                {"text": "📂 Открытые", "callback_data": "paper_positions"},
+                {"text": "📜 История", "callback_data": "paper_history"},
+            ],
+            [
+                {"text": "📊 PnL и статистика", "callback_data": "paper_status"},
+                {"text": "🏁 Путь к 50", "callback_data": "paper_goal"},
+            ],
+            [{"text": "💼 Ручной портфель", "callback_data": "portfolio"}],
+            _home_row(),
+        ]
+    }
+
+
+def analytics_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🌡 Market Mood", "callback_data": "market_mood"},
+                {"text": "🗺 Heat Map", "callback_data": "heat_map"},
+            ],
+            [
+                {"text": "💎 Лучший сигнал", "callback_data": "best_signal"},
+                {"text": "🧩 Лучшие комбинации", "callback_data": "best_combos"},
+            ],
+            [
+                {"text": "📈 Результаты", "callback_data": "trade_performance"},
+                {"text": "🧪 Paper PnL", "callback_data": "paper_status"},
+            ],
+            [
+                {"text": "🌍 Рынок + новости", "callback_data": "menu_market"},
+                {"text": "🔭 Discovery", "callback_data": "menu_discovery"},
+            ],
             _home_row(),
         ]
     }
@@ -666,21 +710,19 @@ def portfolio_keyboard():
 def system_keyboard():
     return {
         "inline_keyboard": [
+            [{"text": "🎛 Настройки стратегии", "callback_data": "strategy_settings"}],
             [
-                {"text": "✅ Статус бота", "callback_data": "bot_status"},
+                {"text": "✅ Статус", "callback_data": "bot_status"},
+                {"text": "❤️ Health", "callback_data": "health_check"},
+            ],
+            [
+                {"text": "📡 Мониторинг", "callback_data": "menu_trade"},
                 {"text": "🧩 Фоновые сервисы", "callback_data": "automation_status"},
             ],
-            [
-                {"text": "❤️ Health Check", "callback_data": "health_check"},
-                {"text": "📟 Панель состояния", "callback_data": "dashboard"},
-            ],
-            [{"text": "🎛 Настройки стратегии", "callback_data": "strategy_settings"}],
-            [{"text": "📈 Прогресс базы", "callback_data": "listing_progress"}],
+            [{"text": "📟 Диагностика", "callback_data": "dashboard"}],
             _home_row(),
         ]
     }
-
-
 
 def strategy_settings_keyboard():
     return {
@@ -824,25 +866,218 @@ def dashboard_keyboard():
     }
 
 
+def _signal_payload(row):
+    payload = row.get("payload") if isinstance(row, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _num(value, default=0.0):
+    try:
+        return float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _signal_quality(row):
+    p = _signal_payload(row)
+    return _num(p.get("qualityScore", p.get("quality_score", row.get("quality_score") if isinstance(row, dict) else 0)))
+
+
+def _signal_probability(row):
+    p = _signal_payload(row)
+    return _num(p.get("calibratedProbability", p.get("probability", row.get("probability") if isinstance(row, dict) else 0)))
+
+
+def _signal_ev(row):
+    p = _signal_payload(row)
+    return _num(p.get("expectedValuePct", p.get("expected_value_pct", 0)))
+
+
+def _signal_direction(row):
+    p = _signal_payload(row)
+    return str(p.get("direction") or (row.get("direction") if isinstance(row, dict) else "") or "").upper()
+
+
+def _signal_symbol(row):
+    p = _signal_payload(row)
+    return str(p.get("symbol") or (row.get("symbol") if isinstance(row, dict) else "") or "?").upper()
+
+
+def _paper_snapshot():
+    try:
+        stats = get_paper_performance() or {}
+        account = stats.get("account") or {}
+        return {
+            "balance": _num(account.get("balance")),
+            "initial": _num(account.get("initial_balance"), 100),
+            "pnl": _num(stats.get("net_pnl"), account.get("realized_pnl") or 0),
+            "closed": int(stats.get("closed_count") or 0),
+            "open": len(stats.get("open_positions") or []),
+            "win_rate": _num(stats.get("win_rate")),
+            "pf": _num(stats.get("profit_factor")),
+        }
+    except Exception as exc:
+        log(f"Paper snapshot error: {exc}")
+        return {"balance": 0, "initial": 100, "pnl": 0, "closed": 0, "open": 0, "win_rate": 0, "pf": 0}
+
+
+def build_best_signal_text():
+    rows = get_recent_signals(limit=50)
+    if not rows:
+        return "💎 <b>ЛУЧШИЙ СИГНАЛ</b>\n\nСигналов пока нет."
+    best = max(rows, key=lambda r: (_signal_quality(r), _signal_ev(r), _signal_probability(r)))
+    p = _signal_payload(best)
+    symbol = html.escape(_signal_symbol(best))
+    direction = "SHORT" if "SHORT" in _signal_direction(best) else "LONG"
+    score = _num(p.get("score", best.get("score", 0)))
+    quality = _signal_quality(best)
+    prob = _signal_probability(best)
+    ev = _signal_ev(best)
+    rr = _num(p.get("rr", best.get("rr", 0)))
+    return (
+        "💎 <b>ЛУЧШИЙ СИГНАЛ ИЗ ПОСЛЕДНИХ 50</b>\n\n"
+        f"<b>{symbol} {direction}</b>\n"
+        f"Score: <b>{score:.0f}</b>\n"
+        f"Quality: <b>{quality:.1f}</b>\n"
+        f"Probability: <b>{prob:.1f}%</b>\n"
+        f"EV: <b>{ev:+.2f}%</b>\n"
+        f"R/R: <b>{rr:.2f}</b>"
+    )
+
+
+def build_explain_signal_text():
+    rows = get_recent_signals(limit=1)
+    if not rows:
+        return "🧠 <b>ПОЧЕМУ AI ВЫБРАЛ СИГНАЛ</b>\n\nСигналов пока нет."
+    row = rows[0]
+    p = _signal_payload(row)
+    positive = p.get("positiveProfileHits") or p.get("positive_profile_hits") or []
+    anti = p.get("antiProfileHits") or p.get("anti_profile_hits") or []
+    reasons = p.get("aiReasons") or p.get("qualityRules") or p.get("quality_rules") or []
+    if isinstance(positive, str): positive = [positive]
+    if isinstance(anti, str): anti = [anti]
+    if isinstance(reasons, str): reasons = [reasons]
+    lines = [
+        "🧠 <b>ПОЧЕМУ AI ВЫБРАЛ ПОСЛЕДНИЙ СИГНАЛ</b>", "",
+        f"<b>{html.escape(_signal_symbol(row))}</b> • Quality <b>{_signal_quality(row):.1f}</b> • EV <b>{_signal_ev(row):+.2f}%</b>", ""
+    ]
+    if positive:
+        lines.append("✅ <b>Сильные профили</b>")
+        lines.extend(f"• {html.escape(str(x))}" for x in positive[:5])
+    if reasons:
+        lines.append("\n📌 <b>Ключевые причины</b>")
+        lines.extend(f"• {html.escape(str(x))}" for x in reasons[:5])
+    if anti:
+        lines.append("\n⚠️ <b>Риски / анти-профили</b>")
+        lines.extend(f"• {html.escape(str(x))}" for x in anti[:5])
+    if not positive and not reasons and not anti:
+        lines.append("Подробные причины не сохранены в payload этого сигнала. Базовые метрики доступны в карточке сигнала.")
+    return "\n".join(lines)
+
+
+def build_market_mood_text():
+    rows = get_recent_signals(limit=30)
+    if not rows:
+        return "🌡 <b>MARKET MOOD</b>\n\nНедостаточно недавних сигналов."
+    long_n = sum(1 for r in rows if "LONG" in _signal_direction(r))
+    short_n = sum(1 for r in rows if "SHORT" in _signal_direction(r))
+    avg_q = sum(_signal_quality(r) for r in rows) / max(1, len(rows))
+    avg_p = sum(_signal_probability(r) for r in rows) / max(1, len(rows))
+    directional = (long_n - short_n) / max(1, len(rows))
+    mood = max(0, min(100, 50 + directional * 25 + (avg_q - 70) * 0.8 + (avg_p - 65) * 0.5))
+    label = "Strong Bull" if mood >= 75 else "Bull" if mood >= 60 else "Neutral" if mood >= 40 else "Bear" if mood >= 25 else "Strong Bear"
+    icon = "🟢" if mood >= 60 else "🟡" if mood >= 40 else "🔴"
+    return (
+        "🌡 <b>MARKET MOOD</b>\n\n"
+        f"{icon} Индекс: <b>{mood:.0f}/100</b> — <b>{label}</b>\n"
+        f"LONG / SHORT: <b>{long_n} / {short_n}</b>\n"
+        f"Средний Quality: <b>{avg_q:.1f}</b>\n"
+        f"Средняя Probability: <b>{avg_p:.1f}%</b>\n\n"
+        "Индекс — внутренняя сводка по последним сигналам, а не отдельный прогноз цены."
+    )
+
+
+def build_heat_map_text():
+    rows = get_recent_signals(limit=50)
+    if not rows:
+        return "🗺 <b>HEAT MAP</b>\n\nНедостаточно данных."
+    latest = {}
+    for row in rows:
+        sym = _signal_symbol(row)
+        if sym not in latest:
+            latest[sym] = row
+        if len(latest) >= 12:
+            break
+    lines = ["🗺 <b>HEAT MAP ПО ПОСЛЕДНИМ СИГНАЛАМ</b>", ""]
+    for sym, row in latest.items():
+        d = _signal_direction(row)
+        arrow = "🟢 ↑" if "LONG" in d else "🔴 ↓" if "SHORT" in d else "🟡 →"
+        lines.append(f"{arrow} <b>{html.escape(sym)}</b> • Q {_signal_quality(row):.0f} • P {_signal_probability(row):.0f}%")
+    return "\n".join(lines)
+
+
+def build_best_combos_text():
+    rows = get_recent_signals(limit=100)
+    counts = {}
+    for row in rows:
+        p = _signal_payload(row)
+        hits = p.get("positiveProfileHits") or p.get("positive_profile_hits") or []
+        if isinstance(hits, str): hits = [hits]
+        for hit in hits:
+            name = str(hit)
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return "🧩 <b>ЛУЧШИЕ КОМБИНАЦИИ</b>\n\nВ последних сигналах нет сохранённых profile hits."
+    top = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:8]
+    lines = ["🧩 <b>ЧАЩЕ ВСЕГО СРАБАТЫВАЮЩИЕ ПРОФИЛИ</b>", ""]
+    lines.extend(f"• <b>{html.escape(name)}</b>: {count}" for name, count in top)
+    lines.append("\nДля оценки прибыльности используй статистику после накопления закрытых paper-сделок.")
+    return "\n".join(lines)
+
+
+def build_paper_goal_text():
+    st = _paper_snapshot()
+    closed = st["closed"]
+    goal = 50
+    ratio = max(0, min(1, closed / goal))
+    filled = int(round(ratio * 10))
+    bar = "█" * filled + "░" * (10 - filled)
+    roi = ((st["balance"] / st["initial"] - 1) * 100) if st["initial"] else 0
+    return (
+        "🏁 <b>ТЕСТ СТРАТЕГИИ: 50 PAPER-СДЕЛОК</b>\n\n"
+        f"<code>{bar}</code> <b>{closed}/{goal}</b>\n"
+        f"Старт: <b>${st['initial']:.2f}</b>\n"
+        f"Баланс: <b>${st['balance']:.2f}</b>\n"
+        f"PnL: <b>{st['pnl']:+.2f} USDT</b>\n"
+        f"ROI: <b>{roi:+.2f}%</b>\n"
+        f"Win rate: <b>{st['win_rate']:.1f}%</b>\n"
+        f"Profit Factor: <b>{st['pf']:.2f}</b>\n\n"
+        "До завершения теста параметры стратегии лучше не менять."
+    )
+
+
 def build_home_text():
     monitor_settings = get_monitor_settings()
     monitor_enabled = bool(monitor_settings.get("enabled"))
-    running = []
-    if is_report_running():
-        running.append("Market Report")
-    if new_scan_thread is not None and new_scan_thread.is_alive():
-        running.append("Listing DB")
-    if trade_scan_thread is not None and trade_scan_thread.is_alive():
-        running.append("Trade Scan")
-    activity = ", ".join(running) if running else "готов к работе"
+    scan_alive = bool(trade_scan_thread and trade_scan_thread.is_alive())
+    paper = _paper_snapshot()
+    recent = get_recent_signals(limit=1)
+    last = recent[0] if recent else None
+    if last:
+        last_line = f"{html.escape(_signal_symbol(last))} {'SHORT' if 'SHORT' in _signal_direction(last) else 'LONG'} • Q {_signal_quality(last):.0f} • EV {_signal_ev(last):+.1f}%"
+    else:
+        last_line = "пока нет"
     return (
-        "🤖 <b>CRYPTO AI COMMAND CENTER</b>\n"
-        "<i>AI Hedge Fund • Learning MAX • Chronos</i>\n\n"
-        f"📡 Монитор сигналов: <b>{'🟢 включён' if monitor_enabled else '⚪ остановлен'}</b>\n"
-        f"🧠 Chronos: <b>{_chronos_state_text()}</b>\n"
-        f"⚙️ Состояние: <b>{activity}</b>\n"
-        f"🕒 <b>{datetime.now().strftime('%H:%M:%S')}</b>\n\n"
-        "Нажми <b>«Запустить торговый скан»</b> для немедленного поиска входов."
+        "🏠 <b>CRYPTO AI</b>\n"
+        "<i>Торговый ассистент • Paper Trading • Learning</i>\n\n"
+        f"📡 Монитор: <b>{'🟢 ON' if monitor_enabled else '⚪ OFF'}</b>\n"
+        f"🔍 Сканер: <b>{'⏳ идёт' if scan_alive else '✅ готов'}</b>\n"
+        f"🧠 Chronos: <b>{_chronos_state_text()}</b>\n\n"
+        f"💰 Paper баланс: <b>${paper['balance']:.2f}</b> ({paper['pnl']:+.2f})\n"
+        f"📂 Открыто позиций: <b>{paper['open']}</b>\n"
+        f"🏁 Тест: <b>{paper['closed']}/50</b> закрытых сделок\n\n"
+        f"💎 Последний сигнал: <b>{last_line}</b>\n\n"
+        "Основные действия — на кнопках ниже."
     )
 
 
@@ -1380,7 +1615,7 @@ def paper_keyboard():
                 {"text": "⏸ Paper OFF", "callback_data": "paper_off"},
             ],
             [{"text": "♻️ Сбросить баланс", "callback_data": "paper_reset_confirm"}],
-            _back_row("menu_trade"),
+            _back_row("menu_portfolio"),
             _home_row(),
         ]
     }
@@ -1663,24 +1898,32 @@ def process_update(update):
             send_message(chat_id, build_home_text(), reply_markup=main_keyboard())
             return
 
+        if callback_data == "menu_signals":
+            send_message(chat_id, "🎯 <b>СИГНАЛЫ</b>\nПоследние входы, причины выбора и результативность.", reply_markup=signals_keyboard())
+            return
+
+        if callback_data == "menu_analytics":
+            send_message(chat_id, "📊 <b>АНАЛИТИКА</b>\nРынок, комбинации и статистика стратегии.", reply_markup=analytics_keyboard())
+            return
+
         if callback_data == "menu_market":
-            send_message(chat_id, "📊 <b>Анализ рынка</b>\nВыбери инструмент:", reply_markup=market_keyboard())
+            send_message(chat_id, "🌍 <b>РЫНОК И НОВОСТИ</b>\nДополнительные рыночные инструменты по запросу.", reply_markup=market_keyboard())
             return
 
         if callback_data == "menu_trade":
-            send_message(chat_id, "📈 <b>Торговля</b>\nСигналы, мониторинг и листинги:", reply_markup=trade_keyboard())
+            send_message(chat_id, "📡 <b>МОНИТОРИНГ</b>\nУправление автоматическим и ручным сканированием.", reply_markup=trade_keyboard())
             return
 
         if callback_data == "menu_ai":
-            send_message(chat_id, "🧠 <b>AI Intelligence</b>\nПрофессиональная аналитика:", reply_markup=ai_keyboard())
+            send_message(chat_id, "🤖 <b>AI ЦЕНТР</b>\nChampion, Learning, Chronos и AI-диагностика.", reply_markup=ai_keyboard())
             return
 
         if callback_data == "menu_portfolio":
-            send_message(chat_id, "💼 <b>Портфель</b>\nОбзор и управление позициями:", reply_markup=portfolio_keyboard())
+            send_message(chat_id, build_paper_status_text(), reply_markup=portfolio_keyboard())
             return
 
         if callback_data == "menu_system":
-            send_message(chat_id, "⚙️ <b>Система</b>\nСостояние и обслуживание:", reply_markup=system_keyboard())
+            send_message(chat_id, "⚙️ <b>НАСТРОЙКИ</b>\nСтратегия и технические инструменты.", reply_markup=system_keyboard())
             return
 
         if callback_data == "strategy_settings":
@@ -1731,6 +1974,30 @@ def process_update(update):
                 keyboard = strategy_settings_keyboard()
             strategy_edit_pending.pop(str(chat_id), None)
             send_message(chat_id, text, reply_markup=keyboard)
+            return
+
+        if callback_data == "best_signal":
+            send_message(chat_id, build_best_signal_text(), reply_markup=signals_keyboard())
+            return
+
+        if callback_data == "explain_signal":
+            send_message(chat_id, build_explain_signal_text(), reply_markup=signals_keyboard())
+            return
+
+        if callback_data == "market_mood":
+            send_message(chat_id, build_market_mood_text(), reply_markup=analytics_keyboard())
+            return
+
+        if callback_data == "heat_map":
+            send_message(chat_id, build_heat_map_text(), reply_markup=analytics_keyboard())
+            return
+
+        if callback_data == "best_combos":
+            send_message(chat_id, build_best_combos_text(), reply_markup=analytics_keyboard())
+            return
+
+        if callback_data == "paper_goal":
+            send_message(chat_id, build_paper_goal_text(), reply_markup=portfolio_keyboard())
             return
 
         if callback_data == "dashboard":
