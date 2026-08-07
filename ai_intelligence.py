@@ -7,9 +7,15 @@ from typing import Any, Dict
 
 from ai_score_engine import enrich_signal, get_score_history, get_top_scores, save_ai_score
 
+_LAST_RANK_DIAGNOSTICS = {}
+
+def get_last_rank_diagnostics():
+    return dict(_LAST_RANK_DIAGNOSTICS)
+
 
 def rank_signals(signals):
     """Pre-rank cheaply, run Chronos only on finalists, then re-evaluate EV/quality."""
+    global _LAST_RANK_DIAGNOSTICS
     prepared = []
     gate_enabled = os.getenv("HEDGE_QUALITY_GATE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     for signal in signals or []:
@@ -45,6 +51,11 @@ def rank_signals(signals):
 
     # Chronos changes probability/confidence, so calculate EV and gate once more.
     ranked = []
+    rejected = []
+    min_quality = float(os.getenv("HEDGE_MIN_QUALITY", "70"))
+    min_ev = float(os.getenv("HEDGE_MIN_EV_PCT", "0.20"))
+    quality_count = 0
+    ev_count = 0
     for item in prepared:
         try:
             from ai_hedge_fund_engine import evaluate_signal
@@ -52,8 +63,45 @@ def rank_signals(signals):
         except Exception:
             pass
         save_ai_score(item)
+        quality = float(item.get("qualityScore") or 0)
+        ev = float(item.get("expectedValuePct") or 0)
+        if quality >= min_quality:
+            quality_count += 1
+        if quality >= min_quality and ev >= min_ev:
+            ev_count += 1
         if not gate_enabled or item.get("qualityPassed"):
             ranked.append(item)
+        else:
+            reasons = []
+            if quality < min_quality:
+                reasons.append("Quality")
+            if ev < min_ev:
+                reasons.append("EV")
+            if item.get("antiProfileHits"):
+                reasons.append("anti-profile")
+            rejected.append({
+                "symbol": item.get("symbol"), "score": item.get("score"),
+                "rr": item.get("rr"), "probability": item.get("probability"),
+                "qualityScore": quality, "expectedValuePct": ev,
+                "reason": ", ".join(reasons) or "AI gate",
+            })
+    quality_bands = {"85+": 0, "80-85": 0, "75-80": 0, "70-75": 0, "<70": 0}
+    probability_bands = {"80+": 0, "75-80": 0, "70-75": 0, "<70": 0}
+    ev_bands = {"5+": 0, "3-5": 0, "2-3": 0, "<2": 0}
+    for item in prepared:
+        q = float(item.get("qualityScore") or 0)
+        pr = float(item.get("calibratedProbability") or item.get("probability") or 0)
+        evv = float(item.get("expectedValuePct") or 0)
+        quality_bands["85+" if q >= 85 else "80-85" if q >= 80 else "75-80" if q >= 75 else "70-75" if q >= 70 else "<70"] += 1
+        probability_bands["80+" if pr >= 80 else "75-80" if pr >= 75 else "70-75" if pr >= 70 else "<70"] += 1
+        ev_bands["5+" if evv >= 5 else "3-5" if evv >= 3 else "2-3" if evv >= 2 else "<2"] += 1
+    _LAST_RANK_DIAGNOSTICS = {
+        "input": len(signals or []), "evaluated": len(prepared),
+        "quality": quality_count, "ev": ev_count,
+        "passed": len(ranked),
+        "rejected": sorted(rejected, key=lambda x: (float(x.get("qualityScore") or 0), float(x.get("expectedValuePct") or -999)), reverse=True)[:8],
+        "qualityBands": quality_bands, "probabilityBands": probability_bands, "evBands": ev_bands,
+    }
     ranked.sort(
         key=lambda x: (
             float(x.get("expectedValuePct") or -999),

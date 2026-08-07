@@ -32,7 +32,7 @@ from core.http_client import http
 from core.logging_setup import get_logger
 from core.settings import settings
 from trade_engine import run_trade_scan
-from trade_market_client import get_provider_health_snapshot, probe_provider_health
+from trade_market_client import get_provider_health_snapshot, probe_provider_health, get_last_universe_summary
 from background_services import AutomationSupervisor, build_automation_status
 from trade_monitor import TradeMonitor
 from trade_signal_report import (
@@ -701,6 +701,10 @@ def analytics_keyboard():
     return {
         "inline_keyboard": [
             [
+                {"text": "🔎 Сканер", "callback_data": "scanner_intelligence"},
+                {"text": "🌍 Universe", "callback_data": "universe_dashboard"},
+            ],
+            [
                 {"text": "🌡 Market Mood", "callback_data": "market_mood"},
                 {"text": "🗺 Heat Map", "callback_data": "heat_map"},
             ],
@@ -1045,6 +1049,109 @@ def build_best_combos_text():
     lines.extend(f"• <b>{html.escape(name)}</b>: {count}" for name, count in top)
     lines.append("\nДля оценки прибыльности используй статистику после накопления закрытых paper-сделок.")
     return "\n".join(lines)
+
+
+def build_scanner_intelligence_text():
+    from scanner_intelligence import get_last_scan_intelligence, aggregate_24h
+    row = get_last_scan_intelligence()
+    if not row:
+        return "🔎 <b>SCANNER INTELLIGENCE</b>\n\nДанных ещё нет. Запусти торговый скан."
+    st = row.get("stages") or {}
+    lines = [
+        "🔎 <b>SCANNER INTELLIGENCE</b>", "",
+        f"Последний скан: <code>{html.escape(str(row.get('runTimeUtc') or '—'))}</code>",
+        f"Проверено: <b>{int(st.get('analyzed') or 0)}</b>", "",
+        "<b>Воронка:</b>",
+        f"• структура/status → <b>{int(st.get('status') or 0)}</b>",
+        f"• Score → <b>{int(st.get('score') or 0)}</b>",
+        f"• R/R → <b>{int(st.get('rr') or 0)}</b>",
+        f"• Probability → <b>{int(st.get('probability') or 0)}</b>",
+        f"• Quality → <b>{int(st.get('quality') or 0)}</b>",
+        f"• EV → <b>{int(st.get('ev') or 0)}</b>",
+        f"• ✅ сигналы → <b>{int(st.get('signals') or 0)}</b>",
+    ]
+    misses = row.get("nearMisses") or []
+    if misses:
+        lines += ["", "<b>Ближе всех:</b>"]
+        for item in misses[:5]:
+            lines.append(
+                f"• <b>{html.escape(str(item.get('symbol') or '?'))}</b> — {html.escape(str(item.get('reason') or 'filter'))} "
+                f"| P {item.get('probability') or '—'}% | Q {item.get('qualityScore') or '—'} | EV {item.get('expectedValuePct') or '—'}"
+            )
+    market_state = row.get("marketState") or {}
+    if market_state:
+        lines += ["", "<b>Состояние анализируемого рынка:</b>",
+                  f"📈 LONG bias: {int(market_state.get('LONG_BIAS') or 0)} · 📉 SHORT bias: {int(market_state.get('SHORT_BIAS') or 0)} · ➖ neutral: {int(market_state.get('NO_TRADE') or 0)}"]
+    dist = row.get("distributions") or {}
+    qbands = dist.get("quality") or {}
+    if qbands:
+        lines += ["", "<b>Quality кандидатов:</b> " + " · ".join(f"{k}:{v}" for k, v in qbands.items() if v)]
+    pbands = dist.get("probability") or {}
+    if pbands:
+        lines += ["<b>Probability:</b> " + " · ".join(f"{k}:{v}" for k, v in pbands.items() if v)]
+    evbands = dist.get("ev") or {}
+    if evbands:
+        lines += ["<b>EV:</b> " + " · ".join(f"{k}:{v}" for k, v in evbands.items() if v)]
+    recommendation = row.get("recommendation")
+    if recommendation:
+        lines += ["", "🧠 <b>Комментарий:</b>", html.escape(str(recommendation))]
+    agg = aggregate_24h()
+    if agg.get("scans"):
+        lines += ["", f"<b>За 24ч:</b> {agg['scans']} сканов · {agg['analyzed']} проверок · {agg['signals']} сигналов"]
+        if agg.get('analyzed'):
+            base = max(1, agg['analyzed'])
+            lines.append(
+                "Проход: "
+                f"status {100*agg['status']/base:.0f}% → score {100*agg['score']/base:.0f}% → "
+                f"P {100*agg['probability']/base:.0f}% → Q {100*agg['quality']/base:.0f}% → EV {100*agg['ev']/base:.0f}%"
+            )
+    return "\n".join(lines)
+
+
+def build_universe_dashboard_text():
+    from scanner_intelligence import get_last_scan_intelligence
+    latest = get_last_scan_intelligence()
+    u = dict(latest.get("universe") or {}) if latest else get_last_universe_summary()
+    providers = latest.get("providerStats") or {} if latest else {}
+    lines = ["🌍 <b>MULTI-EXCHANGE UNIVERSE</b>", ""]
+    if not u:
+        return "\n".join(lines + ["Universe ещё не собран. Запусти торговый скан."])
+    lines += [
+        f"Бирж настроено: <b>{int(u.get('providersConfigured') or 0)}</b>",
+        f"Бирж ответило: <b>{int(u.get('providersOk') or 0)}</b>",
+        f"Контрактов просмотрено: <b>{int(u.get('contractsObserved') or 0)}</b>",
+        f"Уникальных ликвидных символов: <b>{int(u.get('uniqueLiquidSymbols') or 0)}</b>",
+        f"После coverage-фильтра: <b>{int(u.get('coverageEligibleSymbols') or 0)}</b>",
+        f"Анализируется за проход: <b>{int(u.get('selectedSymbols') or 0)}</b>",
+        f"Минимум бирж на символ: <b>{int(u.get('minVenues') or 1)}</b>",
+    ]
+    if providers:
+        lines += ["", "<b>По биржам:</b>"]
+        for name, info in providers.items():
+            icon = "🟢" if info.get("ok") else "🔴"
+            lines.append(
+                f"{icon} {html.escape(str(name).upper())}: contracts {int(info.get('tradable') or 0)} · liquid {int(info.get('eligible') or 0)}"
+            )
+    lines += ["", "Coverage повышает приоритет монет, доступных сразу на нескольких биржах; сам по себе он не ослабляет Quality/EV фильтры."]
+    return "\n".join(lines)
+
+
+def scanner_intelligence_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🔍 Новый скан", "callback_data": "trade_scan"}],
+        [{"text": "🌍 Universe", "callback_data": "universe_dashboard"}],
+        [{"text": "📊 Рынок", "callback_data": "menu_analytics"}],
+        _home_row(),
+    ]}
+
+
+def universe_dashboard_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🔄 Обновить", "callback_data": "universe_dashboard"}],
+        [{"text": "🏦 Биржи", "callback_data": "exchange_status"}],
+        [{"text": "🔎 Сканер", "callback_data": "scanner_intelligence"}],
+        _home_row(),
+    ]}
 
 
 def _format_provider_time(ts):
@@ -2257,6 +2364,14 @@ def process_update(update):
 
         if callback_data == "best_combos":
             send_message(chat_id, build_best_combos_text(), reply_markup=analytics_keyboard())
+            return
+
+        if callback_data == "scanner_intelligence":
+            send_message(chat_id, build_scanner_intelligence_text(), reply_markup=scanner_intelligence_keyboard())
+            return
+
+        if callback_data == "universe_dashboard":
+            send_message(chat_id, build_universe_dashboard_text(), reply_markup=universe_dashboard_keyboard())
             return
 
         if callback_data == "exchange_status":

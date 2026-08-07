@@ -16,7 +16,7 @@ from analyzer import (
     calculate_score,
     parse_klines,
 )
-from trade_market_client import create_trade_market_client, collect_multi_exchange_universe
+from trade_market_client import create_trade_market_client, collect_multi_exchange_universe, get_last_universe_summary
 from main import collect_symbol_data, select_top_symbols
 from rule_engine import evaluate_rules
 
@@ -310,28 +310,46 @@ def row_to_signal(row):
     }
 
 
-def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_results=5, min_probability=65):
+def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_results=5, min_probability=65, diagnostics=None):
     signals = []
+    diag = diagnostics if diagnostics is not None else {}
+    diag.update({"analyzed": 0, "status": 0, "score": 0, "rr": 0, "probability": 0, "nearMisses": []})
+    near = []
     for row in rows:
         if 'error' in row or not row.get('rules'):
             continue
+        diag["analyzed"] += 1
         status = row['rules'].get('finalStatus')
         if status != 'TRADE_CANDIDATE' and not (include_watch and status == 'WATCH'):
             continue
+        diag["status"] += 1
         signal = row_to_signal(row)
         threshold = min_score if status == 'TRADE_CANDIDATE' else min_score + 3
+        reasons = []
         if float(signal.get('score') or 0) < threshold:
-            continue
-        if float(signal.get('rr') or 0) < min_rr:
-            continue
-        # Chronos runs later, only for the best final candidates after Hedge pre-ranking.
-        # This avoids loading PyTorch while dozens of rows and candle payloads are still alive.
-        if float(signal.get('probability') or 0) < min_probability:
+            reasons.append('Score')
+        else:
+            diag["score"] += 1
+        if not reasons and float(signal.get('rr') or 0) < min_rr:
+            reasons.append('R/R')
+        elif not reasons:
+            diag["rr"] += 1
+        if not reasons and float(signal.get('probability') or 0) < min_probability:
+            reasons.append('Probability')
+        elif not reasons:
+            diag["probability"] += 1
+        if reasons:
+            signal['reason'] = ', '.join(reasons)
+            near.append(signal)
             continue
         signals.append(signal)
     signals.sort(key=lambda s: (s['status'] == 'TRADE_CANDIDATE', s['score'], s['rr']), reverse=True)
+    near.sort(key=lambda s: (float(s.get('probability') or 0), float(s.get('score') or 0), float(s.get('rr') or 0)), reverse=True)
+    diag["nearMisses"] = [{
+        "symbol": x.get("symbol"), "reason": x.get("reason"), "score": x.get("score"),
+        "rr": x.get("rr"), "probability": x.get("probability"),
+    } for x in near[:8]]
     return signals[:max_results]
-
 
 def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
     if not _SCAN_LOCK.acquire(blocking=False):
@@ -352,6 +370,9 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
         rows = analyze_snapshot(snapshot)
         run_time = snapshot['runTimeUtc']
         provider = snapshot.get('marketProvider', 'unknown')
+        universe_summary = get_last_universe_summary()
+        universe_summary.setdefault('selectedSymbols', len(snapshot.get('selectedSymbols') or []))
+        provider_stats = dict(snapshot.get('universeProviderStats') or {})
         # Release the largest raw candle structures before ranking/AI.
         snapshot.clear()
         snapshot = None
@@ -360,21 +381,62 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
         min_rr = float(os.getenv('TRADE_MIN_RR', '2.0'))
         min_probability = float(os.getenv('TRADE_MIN_PROBABILITY', '65'))
         candidate_pool = max(max_results * 2, int(os.getenv('HEDGE_CANDIDATE_POOL', '10'))) if apply_ai else max_results
+        filter_diag = {}
         signals = find_trade_signals(
             rows, min_score=min_score, min_rr=min_rr,
             include_watch=include_watch, max_results=candidate_pool, min_probability=min_probability,
+            diagnostics=filter_diag,
         )
+        ai_diag = {"input": len(signals), "quality": len(signals), "ev": len(signals), "passed": len(signals), "rejected": []}
         if apply_ai:
             try:
-                from ai_intelligence import rank_signals
+                from ai_intelligence import rank_signals, get_last_rank_diagnostics
                 signals = rank_signals(signals)[:max_results]
+                ai_diag = get_last_rank_diagnostics()
             except Exception:
                 pass
-        return {
+        stages = {
+            "analyzed": int(filter_diag.get("analyzed") or len(rows)),
+            "status": int(filter_diag.get("status") or 0),
+            "score": int(filter_diag.get("score") or 0),
+            "rr": int(filter_diag.get("rr") or 0),
+            "probability": int(filter_diag.get("probability") or 0),
+            "quality": int(ai_diag.get("quality") or 0),
+            "ev": int(ai_diag.get("ev") or 0),
+            "signals": len(signals),
+        }
+        market_state = {"LONG_BIAS": 0, "SHORT_BIAS": 0, "NO_TRADE": 0}
+        for _row in rows:
+            direction = ((_row.get("score") or {}).get("direction") if isinstance(_row, dict) else None) or "NO_TRADE"
+            market_state[direction if direction in market_state else "NO_TRADE"] += 1
+        distributions = {
+            "quality": dict(ai_diag.get("qualityBands") or {}),
+            "probability": dict(ai_diag.get("probabilityBands") or {}),
+            "ev": dict(ai_diag.get("evBands") or {}),
+        }
+        near_misses = list(ai_diag.get("rejected") or []) + list(filter_diag.get("nearMisses") or [])
+        result = {
             'runTimeUtc': run_time, 'marketProvider': provider, 'signals': signals,
             'rowsAnalyzed': len(rows), 'prioritySymbols': priority,
             'listingPrioritySymbols': listing_priority, 'discoveryPrioritySymbols': discovery_priority,
+            'universeSummary': universe_summary, 'universeProviderStats': provider_stats,
+            'scannerStages': stages, 'nearMisses': near_misses[:8],
+            'scannerDistributions': distributions, 'marketState': market_state,
         }
+        try:
+            from scanner_intelligence import save_scan_intelligence, build_recommendation
+            intelligence = {
+                "runTimeUtc": run_time, "marketProvider": provider,
+                "universe": universe_summary, "providerStats": provider_stats,
+                "stages": stages, "nearMisses": near_misses[:8],
+                "distributions": distributions, "marketState": market_state,
+                "recommendation": "",
+            }
+            intelligence["recommendation"] = build_recommendation(intelligence)
+            save_scan_intelligence(intelligence)
+        except Exception:
+            pass
+        return result
     finally:
         if snapshot is not None:
             snapshot.clear()

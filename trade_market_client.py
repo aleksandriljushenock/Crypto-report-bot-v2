@@ -17,6 +17,7 @@ _PROVIDER_HEALTH = {}
 _PROVIDER_SYMBOLS = {}
 _UNSUPPORTED_SYMBOLS = {}
 _PROVIDER_MARKET_COUNTS = {}
+_LAST_UNIVERSE_SUMMARY = {}
 _PROVIDER_LOCK = threading.Lock()
 
 
@@ -191,7 +192,26 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
         item["liquidityRankScore"] = float(item["quoteVolume"]) * (1.0 + coverage_bonus * max(0, item["exchangeCount"] - 1))
         rows.append(item)
     rows.sort(key=lambda x: (x["liquidityRankScore"], x["quoteVolume"], x["exchangeCount"]), reverse=True)
-    return rows[:max(1, int(top_limit))], provider_stats
+    selected_rows = rows[:max(1, int(top_limit))]
+    with _PROVIDER_LOCK:
+        global _LAST_UNIVERSE_SUMMARY
+        _LAST_UNIVERSE_SUMMARY = {
+            "providersConfigured": len(_provider_order()),
+            "providersOk": sum(1 for v in provider_stats.values() if v.get("ok")),
+            "contractsObserved": sum(int(v.get("tradable") or 0) for v in provider_stats.values()),
+            "uniqueLiquidSymbols": len(merged),
+            "coverageEligibleSymbols": len(rows),
+            "selectedSymbols": len(selected_rows),
+            "minVenues": min_venues,
+            "minQuoteVolumeUsdt": float(min_quote_volume or 0),
+        }
+    return selected_rows, provider_stats
+
+
+
+def get_last_universe_summary():
+    with _PROVIDER_LOCK:
+        return dict(_LAST_UNIVERSE_SUMMARY)
 
 
 class FallbackTradeMarketClient:

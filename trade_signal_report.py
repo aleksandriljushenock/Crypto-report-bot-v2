@@ -1,4 +1,5 @@
 import html
+import os
 from datetime import datetime
 
 
@@ -37,7 +38,10 @@ def build_signal_block(signal, index=None):
     ]
     venues = [str(v).upper() for v in (signal.get('marketExchanges') or []) if v]
     if venues:
-        lines.append(f"Биржи: <b>{', '.join(esc(v) for v in venues[:5])}</b> ({len(venues)})")
+        total_venues = max(1, len([x for x in os.getenv('TRADE_MARKET_PROVIDERS', 'binance,bybit,okx,bitget,gate').split(',') if x.strip()]))
+        filled = min(5, round(5 * len(venues) / total_venues))
+        stars = '★' * filled + '☆' * (5 - filled)
+        lines.append(f"Биржи: <b>{', '.join(esc(v) for v in venues[:5])}</b> ({len(venues)}/{total_venues}) · Coverage {stars}")
     if signal.get('qualityScore') is not None:
         lines.append(
             f"💎 Quality: <b>{esc(signal.get('qualityScore'))}/100</b> | "
@@ -85,8 +89,26 @@ def build_trade_scan_report(result, manual=True):
         f"UTC: {esc(result.get('runTimeUtc'))}",
         f"Проверено: <b>{result.get('rowsAnalyzed', 0)}</b> монет",
     ]
+    stages = result.get('scannerStages') or {}
+    if stages:
+        lines += ['', '<b>Воронка отбора:</b>',
+                  f"Структура/статус: <b>{stages.get('status', 0)}</b>",
+                  f"Score: <b>{stages.get('score', 0)}</b>",
+                  f"R/R: <b>{stages.get('rr', 0)}</b>",
+                  f"Probability: <b>{stages.get('probability', 0)}</b>",
+                  f"Quality: <b>{stages.get('quality', 0)}</b>",
+                  f"EV: <b>{stages.get('ev', 0)}</b>"]
     if not signals:
-        lines += ['', '<b>Подходящих входов сейчас нет.</b>', 'Сканер ждёт подтверждённую структуру, объём и R/R не ниже 1:2.']
+        lines += ['', '<b>Подходящих входов сейчас нет.</b>']
+        misses = result.get('nearMisses') or []
+        if misses:
+            lines += ['', '<b>Ближе всех:</b>']
+            for item in misses[:3]:
+                lines.append(
+                    f"• {esc(item.get('symbol'))}: {esc(item.get('reason') or 'filter')} · "
+                    f"Score {esc(item.get('score'))} · P {esc(item.get('probability'))}% · "
+                    f"Q {esc(item.get('qualityScore') or '—')} · EV {esc(item.get('expectedValuePct') or '—')}"
+                )
         return '\n'.join(lines)
     lines += ['', f"Найдено сетапов: <b>{len(signals)}</b>", '━━━━━━━━━━━━━━━━━━━━']
     for i, signal in enumerate(signals, 1):
