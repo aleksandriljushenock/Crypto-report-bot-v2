@@ -5,7 +5,7 @@ import threading
 import time
 import re
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from listing_cache import get_cache_stats
 from listing_database import get_database_stats
 from pathlib import Path
@@ -554,17 +554,17 @@ def _home_row():
 
 
 def main_keyboard():
-    """Compact UX 2.0: daily actions first, advanced tools one level deeper."""
+    """Final user-first menu: six clear destinations, no technical clutter."""
     return {
         "inline_keyboard": [
             [{"text": "🔍 Сканировать сейчас", "callback_data": "trade_scan"}],
             [
                 {"text": "🎯 Сигналы", "callback_data": "menu_signals"},
-                {"text": "📈 Портфель", "callback_data": "menu_portfolio"},
+                {"text": "📈 Результаты", "callback_data": "menu_performance"},
             ],
             [
                 {"text": "🤖 AI Центр", "callback_data": "menu_ai"},
-                {"text": "📊 Аналитика", "callback_data": "menu_analytics"},
+                {"text": "📊 Рынок", "callback_data": "menu_analytics"},
             ],
             [{"text": "⚙️ Настройки", "callback_data": "menu_system"}],
         ]
@@ -583,7 +583,7 @@ def signals_keyboard():
                 {"text": "⭐ Watchlist", "callback_data": "trade_watchlist"},
             ],
             [
-                {"text": "📈 Результаты", "callback_data": "trade_performance"},
+                {"text": "📈 Точность сигналов", "callback_data": "trade_performance"},
                 {"text": "📰 Новости", "callback_data": "ai_news"},
             ],
             [{"text": "⏱ Статус скана", "callback_data": "scan_status"}],
@@ -667,22 +667,34 @@ def ai_keyboard():
     }
 
 
-def portfolio_keyboard():
+def performance_keyboard():
+    """Most-used trading results in one compact place."""
     return {
         "inline_keyboard": [
-            [{"text": "🧪 Paper Trading", "callback_data": "paper_menu"}],
+            [
+                {"text": "📅 Сегодня", "callback_data": "perf_today"},
+                {"text": "📆 7 дней", "callback_data": "perf_week"},
+            ],
+            [
+                {"text": "🏆 Монеты", "callback_data": "perf_coins"},
+                {"text": "🎚 Фильтры", "callback_data": "perf_filters"},
+            ],
             [
                 {"text": "📂 Открытые", "callback_data": "paper_positions"},
-                {"text": "📜 История", "callback_data": "paper_history"},
+                {"text": "📜 Сделки", "callback_data": "paper_history"},
             ],
             [
-                {"text": "📊 PnL и статистика", "callback_data": "paper_status"},
                 {"text": "🏁 Путь к 50", "callback_data": "paper_goal"},
+                {"text": "🧪 Paper", "callback_data": "paper_menu"},
             ],
-            [{"text": "💼 Ручной портфель", "callback_data": "portfolio"}],
             _home_row(),
         ]
     }
+
+
+def portfolio_keyboard():
+    """Backward-compatible alias for old callbacks."""
+    return performance_keyboard()
 
 
 def analytics_keyboard():
@@ -694,14 +706,10 @@ def analytics_keyboard():
             ],
             [
                 {"text": "💎 Лучший сигнал", "callback_data": "best_signal"},
-                {"text": "🧩 Лучшие комбинации", "callback_data": "best_combos"},
-            ],
-            [
-                {"text": "📈 Результаты", "callback_data": "trade_performance"},
-                {"text": "🧪 Paper PnL", "callback_data": "paper_status"},
-            ],
-            [
                 {"text": "🏦 Биржи", "callback_data": "exchange_status"},
+            ],
+            [
+                {"text": "🧩 Комбинации", "callback_data": "best_combos"},
                 {"text": "🌍 Рынок + новости", "callback_data": "menu_market"},
             ],
             [{"text": "🔭 Discovery", "callback_data": "menu_discovery"}],
@@ -1685,7 +1693,7 @@ def paper_keyboard():
                 {"text": "⏸ Paper OFF", "callback_data": "paper_off"},
             ],
             [{"text": "♻️ Сбросить баланс", "callback_data": "paper_reset_confirm"}],
-            _back_row("menu_portfolio"),
+            _back_row("menu_performance"),
             _home_row(),
         ]
     }
@@ -1743,6 +1751,183 @@ def build_paper_history_text():
         )
     return "\n".join(lines)
 
+
+
+
+def _paper_trade_dt(row):
+    value = row.get("closed_at") or row.get("created_at")
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _trade_metrics(rows, initial_balance=100.0):
+    rows = list(rows or [])
+    pnls = [float(r.get("net_pnl") or 0) for r in rows]
+    wins = [x for x in pnls if x > 0]
+    losses = [x for x in pnls if x <= 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    net = sum(pnls)
+    pf = gross_profit / gross_loss if gross_loss > 1e-12 else (999.0 if gross_profit > 0 else 0.0)
+    win_rate = len(wins) / len(rows) * 100 if rows else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    fees = sum(float(r.get("fees") or 0) for r in rows)
+
+    equity = float(initial_balance)
+    peak = equity
+    max_dd = 0.0
+    max_dd_pct = 0.0
+    best_win_streak = 0
+    worst_loss_streak = 0
+    win_streak = 0
+    loss_streak = 0
+    ordered = sorted(rows, key=lambda r: _paper_trade_dt(r) or datetime.min.replace(tzinfo=timezone.utc))
+    for row in ordered:
+        pnl = float(row.get("net_pnl") or 0)
+        equity += pnl
+        peak = max(peak, equity)
+        dd = peak - equity
+        dd_pct = dd / peak * 100 if peak > 0 else 0.0
+        max_dd = max(max_dd, dd)
+        max_dd_pct = max(max_dd_pct, dd_pct)
+        if pnl > 0:
+            win_streak += 1
+            loss_streak = 0
+            best_win_streak = max(best_win_streak, win_streak)
+        else:
+            loss_streak += 1
+            win_streak = 0
+            worst_loss_streak = max(worst_loss_streak, loss_streak)
+    return {
+        "count": len(rows), "wins": len(wins), "losses": len(losses),
+        "net": net, "win_rate": win_rate, "pf": pf,
+        "avg_win": avg_win, "avg_loss": avg_loss, "fees": fees,
+        "roi": net / initial_balance * 100 if initial_balance else 0.0,
+        "max_dd": max_dd, "max_dd_pct": max_dd_pct,
+        "best_win_streak": best_win_streak, "worst_loss_streak": worst_loss_streak,
+    }
+
+
+def build_performance_center_text():
+    stats = get_paper_performance()
+    account = stats.get("account") or {}
+    rows = stats.get("trades") or []
+    initial = float(account.get("initial_balance") or 100.0)
+    m = _trade_metrics(rows, initial)
+    realized_balance = initial + m["net"]
+    open_count = len(stats.get("open_positions") or [])
+    pf_text = "∞" if m["pf"] >= 999 else f"{m['pf']:.2f}"
+    return (
+        "📈 <b>РЕЗУЛЬТАТЫ СТРАТЕГИИ</b>\n\n"
+        f"💰 Реализованный капитал: <b>${realized_balance:.2f}</b>\n"
+        f"PnL: <b>{m['net']:+.2f} USDT</b> • ROI <b>{m['roi']:+.2f}%</b>\n"
+        f"🎯 Сделок: <b>{m['count']}</b> • открыто <b>{open_count}</b>\n"
+        f"✅ Win Rate: <b>{m['win_rate']:.1f}%</b> • PF <b>{pf_text}</b>\n"
+        f"📉 Max DD: <b>-${m['max_dd']:.2f}</b> ({m['max_dd_pct']:.1f}%)\n"
+        f"💸 Комиссии: <b>${m['fees']:.2f}</b>\n\n"
+        f"Средняя прибыль: <b>{m['avg_win']:+.2f}$</b> • средний убыток: <b>{m['avg_loss']:+.2f}$</b>\n"
+        f"Серии: 🟢 <b>{m['best_win_streak']}</b> / 🔴 <b>{m['worst_loss_streak']}</b>\n\n"
+        "Ниже — только самые полезные разрезы для оценки текущего сетапа."
+    )
+
+
+def _period_rows(days=None, today=False):
+    rows = get_paper_trades(1000)
+    now = datetime.now(timezone.utc)
+    out = []
+    for row in rows:
+        dt = _paper_trade_dt(row)
+        if dt is None:
+            continue
+        if today and dt.date() != now.date():
+            continue
+        if days is not None and dt < now - timedelta(days=days):
+            continue
+        out.append(row)
+    return out
+
+
+def build_period_performance_text(title, rows):
+    account = get_paper_performance().get("account") or {}
+    initial = float(account.get("initial_balance") or 100.0)
+    m = _trade_metrics(rows, initial)
+    if not rows:
+        return f"{title}\n\nЗакрытых сделок за этот период пока нет."
+    best = max(rows, key=lambda r: float(r.get("net_pnl") or 0))
+    worst = min(rows, key=lambda r: float(r.get("net_pnl") or 0))
+    pf_text = "∞" if m["pf"] >= 999 else f"{m['pf']:.2f}"
+    return (
+        f"{title}\n\n"
+        f"Сделок: <b>{m['count']}</b> • Win Rate <b>{m['win_rate']:.1f}%</b>\n"
+        f"PnL: <b>{m['net']:+.2f}$</b> • PF <b>{pf_text}</b>\n"
+        f"Комиссии: <b>${m['fees']:.2f}</b>\n\n"
+        f"🏆 {html.escape(str(best.get('symbol') or '?'))}: <b>{float(best.get('net_pnl') or 0):+.2f}$</b>\n"
+        f"🔻 {html.escape(str(worst.get('symbol') or '?'))}: <b>{float(worst.get('net_pnl') or 0):+.2f}$</b>"
+    )
+
+
+def build_coin_performance_text():
+    rows = get_paper_trades(1000)
+    if not rows:
+        return "🏆 <b>РЕЗУЛЬТАТЫ ПО МОНЕТАМ</b>\n\nЗакрытых сделок пока нет."
+    grouped = {}
+    for row in rows:
+        sym = str(row.get("symbol") or "?").upper()
+        grouped.setdefault(sym, []).append(row)
+    ranking = []
+    for sym, trades in grouped.items():
+        m = _trade_metrics(trades, 100.0)
+        ranking.append((m["net"], sym, m))
+    ranking.sort(reverse=True)
+    lines = ["🏆 <b>РЕЗУЛЬТАТЫ ПО МОНЕТАМ</b>", "", "🟢 <b>Лучшие</b>"]
+    for net, sym, m in ranking[:5]:
+        lines.append(f"• <b>{html.escape(sym)}</b>: {net:+.2f}$ • {m['count']} сделок • WR {m['win_rate']:.0f}%")
+    losers = sorted(ranking, key=lambda x: x[0])[:5]
+    if losers and losers[0][0] < 0:
+        lines.extend(["", "🔴 <b>Худшие</b>"])
+        for net, sym, m in losers:
+            if net >= 0:
+                continue
+            lines.append(f"• <b>{html.escape(sym)}</b>: {net:+.2f}$ • {m['count']} сделок • WR {m['win_rate']:.0f}%")
+    return "\n".join(lines)
+
+
+def _band_summary(rows, key, bands):
+    result = []
+    for label, low, high in bands:
+        selected = []
+        for row in rows:
+            try:
+                value = float(row.get(key))
+            except (TypeError, ValueError):
+                continue
+            if value >= low and (high is None or value < high):
+                selected.append(row)
+        if selected:
+            m = _trade_metrics(selected, 100.0)
+            pf = "∞" if m["pf"] >= 999 else f"{m['pf']:.2f}"
+            result.append(f"• <b>{label}</b>: {m['count']} • WR {m['win_rate']:.0f}% • PnL {m['net']:+.2f}$ • PF {pf}")
+    return result
+
+
+def build_filter_performance_text():
+    rows = get_paper_trades(1000)
+    if not rows:
+        return "🎚 <b>ЭФФЕКТИВНОСТЬ ФИЛЬТРОВ</b>\n\nЗакрытых сделок пока нет."
+    lines = ["🎚 <b>ЭФФЕКТИВНОСТЬ ФИЛЬТРОВ</b>", "", "<b>Quality</b>"]
+    lines += _band_summary(rows, "quality_score", [("85+",85,None),("80–85",80,85),("75–80",75,80),("<75",-1e9,75)])
+    lines += ["", "<b>Probability</b>"]
+    lines += _band_summary(rows, "probability", [("80%+",80,None),("75–80%",75,80),("70–75%",70,75),("<70%",-1e9,70)])
+    lines += ["", "<b>Expected Value</b>"]
+    lines += _band_summary(rows, "expected_value_pct", [("5%+",5,None),("3–5%",3,5),("2–3%",2,3),("<2%",-1e9,2)])
+    lines.append("\nПорог стоит менять только после достаточной выборки; сейчас цель — 50 закрытых paper-сделок.")
+    return "\n".join(lines)
 
 def handle_portfolio_command(chat_id, text):
     parts = text.strip().split()
@@ -1993,8 +2178,8 @@ def process_update(update):
             send_message(chat_id, "🤖 <b>AI ЦЕНТР</b>\nChampion, Learning, Chronos и AI-диагностика.", reply_markup=ai_keyboard())
             return
 
-        if callback_data == "menu_portfolio":
-            send_message(chat_id, build_paper_status_text(), reply_markup=portfolio_keyboard())
+        if callback_data in {"menu_performance", "menu_portfolio"}:
+            send_message(chat_id, build_performance_center_text(), reply_markup=performance_keyboard())
             return
 
         if callback_data == "menu_system":
@@ -2073,6 +2258,22 @@ def process_update(update):
 
         if callback_data == "exchange_status":
             send_message(chat_id, build_exchange_status_text(active_probe=True), reply_markup=exchange_status_keyboard())
+            return
+
+        if callback_data == "perf_today":
+            send_message(chat_id, build_period_performance_text("📅 <b>СЕГОДНЯ (UTC)</b>", _period_rows(today=True)), reply_markup=performance_keyboard())
+            return
+
+        if callback_data == "perf_week":
+            send_message(chat_id, build_period_performance_text("📆 <b>ПОСЛЕДНИЕ 7 ДНЕЙ</b>", _period_rows(days=7)), reply_markup=performance_keyboard())
+            return
+
+        if callback_data == "perf_coins":
+            send_message(chat_id, build_coin_performance_text(), reply_markup=performance_keyboard())
+            return
+
+        if callback_data == "perf_filters":
+            send_message(chat_id, build_filter_performance_text(), reply_markup=performance_keyboard())
             return
 
         if callback_data == "paper_goal":
