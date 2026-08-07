@@ -48,7 +48,7 @@ def build_server_status() -> str:
     disk_total = disk.total / 1024**3
     disk_pct = (disk.total - disk.free) / disk.total * 100 if disk.total else 0
 
-    providers = os.getenv('TRADE_MARKET_PROVIDERS', 'binance,bybit')
+    providers = os.getenv('TRADE_MARKET_PROVIDERS', 'binance,bybit,okx,bitget,gate')
     chronos = os.getenv('CHRONOS_ENABLED', 'false').lower() in {'1','true','yes','on'}
     paper = os.getenv('PAPER_TRADING_ENABLED', 'true').lower() in {'1','true','yes','on'}
 

@@ -16,7 +16,7 @@ from analyzer import (
     calculate_score,
     parse_klines,
 )
-from trade_market_client import create_trade_market_client
+from trade_market_client import create_trade_market_client, collect_multi_exchange_universe
 from main import collect_symbol_data, select_top_symbols
 from rule_engine import evaluate_rules
 
@@ -47,21 +47,32 @@ def _listing_metadata(symbol):
 
 def collect_market_snapshot(extra_symbols=None, top_limit=None):
     client = create_trade_market_client()
-    selected = select_top_symbols(client)
-    if top_limit:
-        selected = selected[:int(top_limit)]
+    use_multi = os.getenv('MULTI_EXCHANGE_UNIVERSE_ENABLED', 'true').strip().lower() in {'1','true','yes','on'}
+    universe_stats = {}
+    if use_multi:
+        from config import MIN_QUOTE_VOLUME_USDT
+        selected, universe_stats = collect_multi_exchange_universe(
+            top_limit=int(top_limit or os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '30')),
+            min_quote_volume=float(os.getenv('MULTI_EXCHANGE_MIN_QUOTE_VOLUME_USDT', str(MIN_QUOTE_VOLUME_USDT))),
+            timeout=int(os.getenv('MULTI_EXCHANGE_UNIVERSE_TIMEOUT', '8')),
+        )
+    else:
+        selected = select_top_symbols(client)
+        if top_limit:
+            selected = selected[:int(top_limit)]
     selected_map = {item['symbol']: item for item in selected}
 
-    tradable = set()
-    try:
-        for item in client.exchange_info().get('symbols', []):
-            if item.get('status') == 'TRADING' and item.get('quoteAsset') == 'USDT' and item.get('contractType') == 'PERPETUAL':
-                tradable.add(item['symbol'])
-    except Exception:
-        tradable = set(selected_map)
+    tradable = set(selected_map)
+    if not use_multi:
+        try:
+            for item in client.exchange_info().get('symbols', []):
+                if item.get('status') == 'TRADING' and item.get('quoteAsset') == 'USDT' and item.get('contractType') == 'PERPETUAL':
+                    tradable.add(item['symbol'])
+        except Exception:
+            tradable = set(selected_map)
 
     for symbol in extra_symbols or []:
-        if symbol in tradable and symbol not in selected_map:
+        if symbol not in selected_map and (use_multi or symbol in tradable):
             try:
                 ticker = client.ticker_24h(symbol)
                 selected_map[symbol] = {
@@ -75,7 +86,9 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
 
     result = {
         'runTimeUtc': datetime.now(timezone.utc).isoformat(),
-        'marketProvider': os.getenv('TRADE_MARKET_PROVIDER', 'bybit').strip().lower(),
+        'marketProvider': 'multi-exchange' if use_multi else os.getenv('TRADE_MARKET_PROVIDER', 'bybit').strip().lower(),
+        'marketProviders': list(getattr(client, 'provider_names', []) or []),
+        'universeProviderStats': universe_stats,
         'selectedSymbols': list(selected_map.values()),
         'symbolsData': {},
     }
@@ -86,7 +99,11 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
         for future in as_completed(futures):
             symbol = futures[future]
             try:
-                result['symbolsData'][symbol] = future.result()
+                payload = future.result()
+                meta = selected_map.get(symbol) or {}
+                payload['marketExchanges'] = list(meta.get('exchanges') or [])
+                payload['exchangeCount'] = int(meta.get('exchangeCount') or len(payload['marketExchanges']))
+                result['symbolsData'][symbol] = payload
             except Exception as exc:
                 result['symbolsData'][symbol] = {'symbol': symbol, 'error': str(exc)}
     return result
@@ -161,7 +178,7 @@ def analyze_snapshot(snapshot):
             score['fundingAnalysis'] = calculate_funding_analysis(symbol_data)
             rules = evaluate_rules(score, levels)
             timeframe = build_timeframe_profile(symbol_data, score.get('direction'))
-            rows.append({'score': score, 'levels': levels, 'rules': rules, 'listing': _listing_metadata(symbol), 'timeframe': timeframe, 'chronosCloses': [c.get('close') for c in symbol_data['parsedKlines'].get(os.getenv('CHRONOS_TIMEFRAME', '15m'), []) if c.get('close') is not None]})
+            rows.append({'score': score, 'levels': levels, 'rules': rules, 'listing': _listing_metadata(symbol), 'timeframe': timeframe, 'marketExchanges': list(symbol_data.get('marketExchanges') or []), 'exchangeCount': int(symbol_data.get('exchangeCount') or 0), 'chronosCloses': [c.get('close') for c in symbol_data['parsedKlines'].get(os.getenv('CHRONOS_TIMEFRAME', '15m'), []) if c.get('close') is not None]})
         except Exception as exc:
             rows.append({'symbol': symbol, 'error': str(exc)})
     rows.sort(key=lambda item: item.get('score', {}).get('score', 0), reverse=True)
@@ -286,6 +303,8 @@ def row_to_signal(row):
         'structure15m': score.get('structure15m'),
         'structure1h': score.get('structure1h'),
         'listing': row.get('listing', {}),
+        'marketExchanges': row.get('marketExchanges', []),
+        'exchangeCount': row.get('exchangeCount', 0),
         # Kept only until final AI ranking; removed before persistence.
         '_chronosCloses': list(row.get('chronosCloses') or []),
     }

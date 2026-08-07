@@ -4,6 +4,8 @@ from pathlib import Path
 import hashlib
 import requests
 
+from market_errors import UnsupportedSymbolError
+
 
 class BybitFuturesClient:
     """Bybit V5 linear-perpetual adapter returning Binance-shaped payloads.
@@ -114,7 +116,7 @@ class BybitFuturesClient:
         result = self._get("/v5/market/tickers", {"category": "linear", "symbol": symbol}, use_cache=False)
         rows = result.get("list", [])
         if not rows:
-            raise RuntimeError(f"Bybit ticker not found: {symbol}")
+            raise UnsupportedSymbolError(f"Bybit ticker not found: {symbol}")
         return self._ticker_row(rows[0])
 
     def klines(self, symbol, interval, limit):

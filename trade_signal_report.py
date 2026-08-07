@@ -35,6 +35,9 @@ def build_signal_block(signal, index=None):
         f"Alignment: <b>{esc(signal.get('alignment'))}%</b> | TF: 1D {esc((signal.get('timeframes') or {}).get('1d'))}, 4H {esc((signal.get('timeframes') or {}).get('4h'))}, 1H {esc((signal.get('timeframes') or {}).get('1h'))}, 15M {esc((signal.get('timeframes') or {}).get('15m'))}, 5M {esc((signal.get('timeframes') or {}).get('5m'))}",
         f"Vol: {compact_number(signal.get('quoteVolume'))} | Taker: {esc(signal.get('takerRatio'))} | Funding: {esc(signal.get('fundingPercent'))}%",
     ]
+    venues = [str(v).upper() for v in (signal.get('marketExchanges') or []) if v]
+    if venues:
+        lines.append(f"Биржи: <b>{', '.join(esc(v) for v in venues[:5])}</b> ({len(venues)})")
     if signal.get('qualityScore') is not None:
         lines.append(
             f"💎 Quality: <b>{esc(signal.get('qualityScore'))}/100</b> | "

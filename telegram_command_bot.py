@@ -1064,7 +1064,7 @@ def build_exchange_status_text(active_probe=True):
     lines = [
         "🏦 <b>БИРЖИ И ИСТОЧНИКИ РЫНКА</b>",
         "",
-        "Монеты мониторятся через fallback-цепочку публичных futures API.",
+        "Universe собирается сразу с нескольких публичных futures API; данные по каждой монете берутся через fallback-цепочку.",
         f"Порядок: <b>{' → '.join(name.upper() for name in configured)}</b>",
         "",
     ]
@@ -1093,6 +1093,9 @@ def build_exchange_status_text(active_probe=True):
             lines.append(f"   ↳ ping: <b>{int(latency)} ms</b>")
         if row.get("last_success_at"):
             lines.append(f"   ↳ последний успех: {_format_provider_time(row.get('last_success_at'))}")
+        if int(row.get("tradable_symbols") or 0):
+            eligible = int(row.get("eligible_symbols") or 0)
+            lines.append(f"   ↳ USDT perpetual: <b>{int(row.get('tradable_symbols') or 0)}</b> · ликвидных: <b>{eligible}</b>")
         if row.get("error") and status != "online":
             err = html.escape(str(row.get("error"))[:180])
             lines.append(f"   ↳ ошибка: <code>{err}</code>")
