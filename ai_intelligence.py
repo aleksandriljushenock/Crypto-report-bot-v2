@@ -86,12 +86,14 @@ def rank_signals(signals):
                 reasons.append("Quality")
             if ev < min_ev:
                 reasons.append("EV")
-            if item.get("antiProfileHits"):
+            if hard_blocked:
                 reasons.append("anti-profile")
             rejected.append({
                 "symbol": item.get("symbol"), "score": item.get("score"),
                 "rr": item.get("rr"), "probability": item.get("probability"),
                 "qualityScore": quality, "expectedValuePct": ev,
+                "profileQualityThreshold": min_quality, "profileEvThreshold": min_ev,
+                "hardBlocked": hard_blocked,
                 "reason": ", ".join(reasons) or "AI gate",
                 "direction": item.get("direction"), "setup": item.get("setup"),
                 "entryPrice": item.get("entryPrice"), "entryText": item.get("entryText"),

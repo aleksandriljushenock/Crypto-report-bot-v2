@@ -1410,12 +1410,44 @@ def build_universe_dashboard_text():
 def build_near_signal_text():
     from near_signal_watchlist import get_rows
     rows = get_rows(limit=12)
-    lines = ['🟡 <b>NEAR-SIGNAL WATCHLIST</b>', '', 'Кандидаты, которым не хватило одного из финальных фильтров. Они пересканируются чаще полного рынка.', '']
+    lines = [
+        '🟡 <b>NEAR-SIGNAL WATCHLIST</b>', '',
+        'Только кандидаты, которым не хватает <b>одного</b> фильтра и которые действительно близки к его порогу.', ''
+    ]
     if not rows:
-        return '\n'.join(lines + ['Сейчас near-signal кандидатов нет.'])
-    for row in rows:
-        lines.append(f"• <b>{html.escape(str(row.get('symbol') or '?'))}</b> — {html.escape(str(row.get('reason') or 'filter'))} | P {float(row.get('probability') or 0):.1f}% | Q {float(row.get('quality') or 0):.1f} | EV {float(row.get('ev') or 0):.2f}")
-    return '\n'.join(lines)
+        return '\n'.join(lines + ['Сейчас реальных near-signal кандидатов нет.'])
+
+    def _metric(value, kind):
+        if value is None:
+            return '—'
+        try:
+            value = float(value)
+        except Exception:
+            return '—'
+        if kind == 'Probability': return f'{value:.1f}%'
+        if kind in ('Quality', 'Score'): return f'{value:.1f}'
+        if kind == 'EV': return f'{value:.2f}%'
+        if kind == 'R/R': return f'{value:.2f}'
+        return f'{value:.2f}'
+
+    for index, row in enumerate(rows, 1):
+        gate = str(row.get('missing_gate') or row.get('reason') or 'filter')
+        current = row.get('current_value')
+        threshold = row.get('threshold_value')
+        distance = float(row.get('distance_score') or 0)
+        q = row.get('quality')
+        ev = row.get('ev')
+        pval = row.get('probability')
+        q_text = '—' if q is None else f'{float(q):.1f}'
+        ev_text = '—' if ev is None else f'{float(ev):.2f}'
+        lines.extend([
+            f"<b>{index}. {html.escape(str(row.get('symbol') or '?'))}</b> — близость <b>{distance:.0f}%</b>",
+            f"└ Не хватает: <b>{html.escape(gate)}</b> {_metric(current, gate)} → {_metric(threshold, gate)}",
+            f"   P {_metric(pval, 'Probability')} · Q {q_text} · EV {ev_text}",
+            ''
+        ])
+    lines.append('🔄 Чем выше близость, тем раньше кандидат попадает в повторный scan.')
+    return '\n'.join(lines).rstrip()
 
 
 def build_shadow_signals_text():

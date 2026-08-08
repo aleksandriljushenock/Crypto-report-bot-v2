@@ -529,6 +529,7 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
         "entryPrice": x.get("entryPrice"), "entryText": x.get("entryText"),
         "stop": x.get("stop"), "tp1": x.get("tp1"), "tp2": x.get("tp2"), "tp3": x.get("tp3"),
         "signalProfile": x.get("signalProfile"), "fingerprint": x.get("fingerprint"),
+        "profileThresholds": dict(x.get("profileThresholds") or {}),
     } for x in near[:12]]
     return signals[:max_results]
 
@@ -601,11 +602,13 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
         near_misses = list(ai_diag.get("rejected") or []) + list(filter_diag.get("nearMisses") or [])
         # v22: near-signal candidates stay hot between full scans, while shadow
         # candidates are tracked without being sent/opened as trades.
+        near_watch = []
         try:
-            from near_signal_watchlist import upsert_near_candidates
-            upsert_near_candidates(near_misses, source=source)
+            from near_signal_watchlist import select_near_candidates, upsert_near_candidates
+            near_watch = select_near_candidates(near_misses)
+            upsert_near_candidates(near_watch, source=source)
         except Exception:
-            pass
+            near_watch = []
         try:
             from shadow_signals import register_shadow_candidates
             register_shadow_candidates(near_misses, source=source)
@@ -617,6 +620,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
             'listingPrioritySymbols': listing_priority, 'discoveryPrioritySymbols': discovery_priority,
             'universeSummary': universe_summary, 'universeProviderStats': provider_stats,
             'scannerStages': stages, 'nearMisses': near_misses[:8],
+            'nearWatch': near_watch[:12], 'nearWatchSymbols': [x.get('symbol') for x in near_watch if x.get('symbol')],
             'scannerDistributions': distributions, 'marketState': market_state,
             'scanSource': source, 'targetedScan': bool(only_symbols),
         }

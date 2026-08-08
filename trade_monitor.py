@@ -102,7 +102,8 @@ class TradeMonitor:
             if result.get('busy'):
                 return 0
             promoted = [s.get('symbol') for s in result.get('signals', []) if s.get('symbol')]
-            mark_checked(symbols, promoted=promoted)
+            retained = result.get('nearWatchSymbols') or []
+            mark_checked(symbols, promoted=promoted, retained=retained)
             new_count = self._process_signals(result, chat_id, 'near_watch')
             self.logger(f"Near-signal rescan: symbols={len(symbols)} promoted={len(promoted)} new={new_count}")
             return new_count
