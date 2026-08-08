@@ -92,7 +92,7 @@ class TradeMonitor:
         if not chat_id:
             self.logger('Монитор пропустил цикл: chat_id не задан.')
             return {'signals': []}
-        result = run_trade_scan(include_watch=False, max_results=5)
+        result = run_trade_scan(include_watch=False, max_results=5, source='monitor')
         new_count = 0
         for signal in result.get('signals', []):
             upsert_watch_candidate(signal, source='monitor')

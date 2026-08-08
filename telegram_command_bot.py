@@ -1807,7 +1807,7 @@ def run_trade_scan_task(chat_id):
     global trade_scan_thread
     try:
         send_message(chat_id, "⏳ <b>Торговый сканер запущен</b>\nПроверяю ликвидный рынок и перспективные недавние листинги.")
-        result = run_trade_scan(include_watch=True, max_results=5)
+        result = run_trade_scan(include_watch=True, max_results=5, source='manual')
         for signal in result.get("signals", []):
             try:
                 fingerprint = signal.get("fingerprint")
@@ -1850,9 +1850,22 @@ def run_trade_scan_task(chat_id):
 
 def start_trade_scan(chat_id):
     global trade_scan_thread
+    from trade_engine import is_trade_scan_running, get_trade_scan_runtime_state
     with trade_scan_lock:
-        if trade_scan_thread is not None and trade_scan_thread.is_alive():
-            send_message(chat_id, "⚠️ Торговый скан уже выполняется. Открой «Статус скана».", reply_markup=trade_keyboard())
+        engine_busy = is_trade_scan_running()
+        manual_busy = trade_scan_thread is not None and trade_scan_thread.is_alive()
+        if engine_busy or manual_busy:
+            st = get_trade_scan_runtime_state()
+            owner = st.get('owner') or ('manual' if manual_busy else 'unknown')
+            owner_text = 'фоновый монитор' if owner == 'monitor' else ('ручной скан' if owner == 'manual' else 'другой цикл')
+            processed = int(st.get('processed') or 0)
+            total = int(st.get('total') or 0)
+            progress = f"\nПрогресс: <b>{processed}/{total}</b> монет" if total else ''
+            send_message(
+                chat_id,
+                f"⏳ <b>Скан уже выполняется</b>\nИсточник: <b>{owner_text}</b>{progress}\n\nНовый проход не запускаю, чтобы не дублировать API и RAM.",
+                reply_markup=trade_keyboard(),
+            )
             return
         trade_scan_thread = threading.Thread(target=run_trade_scan_task, args=(chat_id,), daemon=True)
         trade_scan_thread.start()
@@ -2514,10 +2527,21 @@ def process_update(update):
             return
 
         if callback_data == "scan_status":
-            if trade_scan_thread is not None and trade_scan_thread.is_alive():
-                text = "⏳ <b>Торговый скан выполняется</b>\nДождись итогового отчёта — новый запуск сейчас не требуется."
+            from trade_engine import is_trade_scan_running, get_trade_scan_runtime_state
+            engine_busy = is_trade_scan_running()
+            manual_busy = trade_scan_thread is not None and trade_scan_thread.is_alive()
+            if engine_busy or manual_busy:
+                st = get_trade_scan_runtime_state()
+                owner = st.get('owner') or ('manual' if manual_busy else 'unknown')
+                owner_text = 'фоновый монитор' if owner == 'monitor' else ('ручной скан' if owner == 'manual' else 'другой цикл')
+                phase_map = {'universe':'сбор Universe', 'market_data':'загрузка рынка', 'analysis':'анализ монет', 'ranking':'AI/ранжирование'}
+                phase = phase_map.get(st.get('phase'), st.get('phase') or 'работа')
+                processed = int(st.get('processed') or 0)
+                total = int(st.get('total') or 0)
+                progress = f"\nПрогресс: <b>{processed}/{total}</b> монет" if total else ''
+                text = f"⏳ <b>Сканер занят</b>\nИсточник: <b>{owner_text}</b>\nЭтап: <b>{phase}</b>{progress}"
             else:
-                text = "✅ <b>Сканер готов</b>\nМожно запустить новый поиск входов."
+                text = "✅ <b>Сканер готов</b>\nАктивного ручного или фонового прохода нет. Можно запустить новый поиск входов."
             send_message(chat_id, text, reply_markup=trade_keyboard())
             return
 

@@ -21,6 +21,25 @@ from main import collect_symbol_data, select_top_symbols
 from rule_engine import evaluate_rules
 
 _SCAN_LOCK = threading.Lock()
+_SCAN_STATE_LOCK = threading.Lock()
+_SCAN_STATE = {
+    'running': False,
+    'owner': None,
+    'startedAt': None,
+    'phase': 'idle',
+    'processed': 0,
+    'total': 0,
+}
+
+
+def _set_scan_state(**updates):
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE.update(updates)
+
+
+def get_trade_scan_runtime_state():
+    with _SCAN_STATE_LOCK:
+        return dict(_SCAN_STATE)
 
 
 def is_trade_scan_running():
@@ -111,6 +130,106 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
             except Exception as exc:
                 result['symbolsData'][symbol] = {'symbol': symbol, 'error': str(exc)}
     return result
+
+
+
+def _select_market_symbols(extra_symbols=None, top_limit=None):
+    """Return ranked symbols without retaining candle payloads in memory."""
+    client = create_trade_market_client()
+    use_multi = os.getenv('MULTI_EXCHANGE_UNIVERSE_ENABLED', 'true').strip().lower() in {'1','true','yes','on'}
+    provider_stats = {}
+    limit = int(top_limit or os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '50'))
+    if use_multi:
+        from config import MIN_QUOTE_VOLUME_USDT
+        selected, provider_stats = collect_multi_exchange_universe(
+            top_limit=limit,
+            min_quote_volume=float(os.getenv('MULTI_EXCHANGE_MIN_QUOTE_VOLUME_USDT', str(MIN_QUOTE_VOLUME_USDT))),
+            timeout=int(os.getenv('MULTI_EXCHANGE_UNIVERSE_TIMEOUT', '8')),
+        )
+    else:
+        selected = select_top_symbols(client)[:limit]
+    selected_map = {item['symbol']: dict(item) for item in selected}
+    for symbol in extra_symbols or []:
+        if symbol in selected_map:
+            continue
+        try:
+            ticker = client.ticker_24h(symbol)
+            selected_map[symbol] = {
+                'symbol': symbol,
+                'lastPrice': float(ticker.get('lastPrice') or 0),
+                'priceChangePercent': float(ticker.get('priceChangePercent') or 0),
+                'quoteVolume': float(ticker.get('quoteVolume') or 0),
+                'exchanges': [],
+                'exchangeCount': 0,
+            }
+        except Exception:
+            continue
+    return client, use_multi, selected_map, provider_stats
+
+
+def collect_and_analyze_market(extra_symbols=None, top_limit=None):
+    """Analyze a wider universe in small batches so RAM follows batch size, not universe size."""
+    client, use_multi, selected_map, provider_stats = _select_market_symbols(extra_symbols, top_limit)
+    run_time = datetime.now(timezone.utc).isoformat()
+    items = list(selected_map.items())
+    total = len(items)
+    batch_size = max(2, min(20, int(os.getenv('TRADE_SCAN_BATCH_SIZE', '8'))))
+    max_workers = max(1, min(4, int(os.getenv('TRADE_SCAN_MAX_WORKERS', '2'))))
+    _set_scan_state(phase='market_data', processed=0, total=total)
+
+    btc_data = None
+    try:
+        btc_data = collect_symbol_data(client, 'BTCUSDT')
+        btc_data['marketExchanges'] = list((selected_map.get('BTCUSDT') or {}).get('exchanges') or [])
+        btc_data['exchangeCount'] = int((selected_map.get('BTCUSDT') or {}).get('exchangeCount') or len(btc_data['marketExchanges']))
+    except Exception:
+        btc_data = None
+
+    rows = []
+    processed = 0
+    for start in range(0, total, batch_size):
+        batch = items[start:start + batch_size]
+        payloads = {}
+        with ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(batch)))) as executor:
+            futures = {executor.submit(collect_symbol_data, client, symbol): (symbol, meta) for symbol, meta in batch}
+            for future in as_completed(futures):
+                symbol, meta = futures[future]
+                try:
+                    payload = future.result()
+                    payload['marketExchanges'] = list(meta.get('exchanges') or [])
+                    payload['exchangeCount'] = int(meta.get('exchangeCount') or len(payload['marketExchanges']))
+                    payloads[symbol] = payload
+                except Exception as exc:
+                    payloads[symbol] = {'symbol': symbol, 'error': str(exc)}
+
+        # analyze_snapshot needs BTC context for relative strength. Add it only as context,
+        # then discard its duplicate row unless BTC belongs to this batch.
+        mini_symbols = dict(payloads)
+        batch_symbols = set(payloads)
+        if btc_data is not None and 'BTCUSDT' not in mini_symbols:
+            mini_symbols['BTCUSDT'] = btc_data
+        mini = {'symbolsData': mini_symbols}
+        _set_scan_state(phase='analysis', processed=processed, total=total)
+        batch_rows = analyze_snapshot(mini)
+        for row in batch_rows:
+            sym = ((row.get('score') or {}).get('symbol') if isinstance(row, dict) else None) or row.get('symbol')
+            if sym in batch_symbols:
+                rows.append(row)
+        processed += len(batch)
+        _set_scan_state(phase='analysis', processed=processed, total=total)
+        payloads.clear()
+        mini.clear()
+        del batch_rows
+        gc.collect()
+
+    rows.sort(key=lambda item: item.get('score', {}).get('score', 0), reverse=True)
+    return {
+        'runTimeUtc': run_time,
+        'marketProvider': 'multi-exchange' if use_multi else os.getenv('TRADE_MARKET_PROVIDER', 'bybit').strip().lower(),
+        'marketProviders': list(getattr(client, 'provider_names', []) or []),
+        'universeProviderStats': provider_stats,
+        'selectedSymbols': list(selected_map.values()),
+    }, rows
 
 
 def get_priority_listing_symbols(limit=20):
@@ -355,29 +474,30 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
     } for x in near[:8]]
     return signals[:max_results]
 
-def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
+def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='unknown'):
     if not _SCAN_LOCK.acquire(blocking=False):
         return {
             'runTimeUtc': datetime.now(timezone.utc).isoformat(),
             'marketProvider': os.getenv('TRADE_MARKET_PROVIDER', 'unknown'),
             'signals': [], 'rowsAnalyzed': 0, 'busy': True,
             'prioritySymbols': [], 'listingPrioritySymbols': [], 'discoveryPrioritySymbols': [],
+            'scanState': get_trade_scan_runtime_state(),
         }
+    _set_scan_state(running=True, owner=source, startedAt=datetime.now(timezone.utc).isoformat(), phase='universe', processed=0, total=0)
     snapshot = None
     rows = None
     try:
         listing_priority = get_priority_listing_symbols(limit=int(os.getenv('TRADE_LISTING_PRIORITY_LIMIT', '12')))
         discovery_priority = get_priority_discovery_symbols(limit=int(os.getenv('TRADE_DISCOVERY_PRIORITY_LIMIT', '10')))
         priority = list(dict.fromkeys(listing_priority + discovery_priority))
-        top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '16'))
-        snapshot = collect_market_snapshot(extra_symbols=priority, top_limit=top_limit)
-        rows = analyze_snapshot(snapshot)
+        top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '50'))
+        snapshot, rows = collect_and_analyze_market(extra_symbols=priority, top_limit=top_limit)
         run_time = snapshot['runTimeUtc']
         provider = snapshot.get('marketProvider', 'unknown')
         universe_summary = get_last_universe_summary()
         universe_summary.setdefault('selectedSymbols', len(snapshot.get('selectedSymbols') or []))
         provider_stats = dict(snapshot.get('universeProviderStats') or {})
-        # Release the largest raw candle structures before ranking/AI.
+        _set_scan_state(phase='ranking', processed=len(rows), total=len(snapshot.get('selectedSymbols') or []))
         snapshot.clear()
         snapshot = None
         gc.collect()
@@ -426,6 +546,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
             'universeSummary': universe_summary, 'universeProviderStats': provider_stats,
             'scannerStages': stages, 'nearMisses': near_misses[:8],
             'scannerDistributions': distributions, 'marketState': market_state,
+            'scanSource': source,
         }
         try:
             from scanner_intelligence import save_scan_intelligence, build_recommendation
@@ -451,5 +572,6 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True):
             cleanup()
         except Exception:
             gc.collect()
+        _set_scan_state(running=False, owner=None, phase='idle', processed=0, total=0)
         _SCAN_LOCK.release()
 
