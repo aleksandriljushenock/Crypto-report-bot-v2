@@ -22,6 +22,7 @@ from adaptive_model_manager import train_candidate
 
 
 from core.scheduler import PeriodicWorker
+from core.runtime_state import finish as runtime_finish, start as runtime_start
 
 
 _HEAVY_TASK_LOCK = threading.Lock()
@@ -62,9 +63,11 @@ class AutomationSupervisor:
             if not _HEAVY_TASK_LOCK.acquire(blocking=False):
                 self.logger(f"{name}: skipped because another heavy task is running")
                 return {'status': 'skipped-busy'}
+            runtime_start('heavy_task', name=name)
             try:
                 return callback()
             finally:
+                runtime_finish('heavy_task')
                 cleanup()
                 _HEAVY_TASK_LOCK.release()
         return runner

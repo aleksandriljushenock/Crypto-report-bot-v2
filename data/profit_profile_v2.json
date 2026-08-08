@@ -1,0 +1,600 @@
+{
+  "version": "profit-profile-v2-1144",
+  "overall": {
+    "samples": 1144,
+    "win_rate": 40.21,
+    "avg_return": 0.0114,
+    "avg_win": 16.605,
+    "avg_loss": 11.148,
+    "profit_factor": 1.0017
+  },
+  "groups": {
+    "setup": {
+      "BREAKOUT": {
+        "samples": 586,
+        "win_rate": 36.18,
+        "avg_return": -3.2568,
+        "avg_win": 14.2297,
+        "avg_loss": 13.169,
+        "profit_factor": 0.6125
+      },
+      "PULLBACK": {
+        "samples": 558,
+        "win_rate": 44.44,
+        "avg_return": 3.4436,
+        "avg_win": 18.6354,
+        "avg_loss": 8.7098,
+        "profit_factor": 1.7117
+      }
+    },
+    "regime": {
+      "accumulation": {
+        "samples": 73,
+        "win_rate": 20.55,
+        "avg_return": -4.4993,
+        "avg_win": 7.6508,
+        "avg_loss": 7.6416,
+        "profit_factor": 0.2589
+      },
+      "breakout": {
+        "samples": 87,
+        "win_rate": 39.08,
+        "avg_return": -5.5026,
+        "avg_win": 3.5993,
+        "avg_loss": 11.3416,
+        "profit_factor": 0.2036
+      },
+      "bull_trend": {
+        "samples": 760,
+        "win_rate": 38.95,
+        "avg_return": 1.4694,
+        "avg_win": 23.868,
+        "avg_loss": 12.8194,
+        "profit_factor": 1.1877
+      },
+      "range": {
+        "samples": 224,
+        "win_rate": 51.34,
+        "avg_return": -1.3238,
+        "avg_win": 2.9237,
+        "avg_loss": 5.8052,
+        "profit_factor": 0.5314
+      }
+    },
+    "structure1h": {
+      "BOS_UP": {
+        "samples": 87,
+        "win_rate": 43.68,
+        "avg_return": 1.1757,
+        "avg_win": 11.8248,
+        "avg_loss": 7.0828,
+        "profit_factor": 1.2947
+      },
+      "RANGE": {
+        "samples": 863,
+        "win_rate": 38.35,
+        "avg_return": -1.0926,
+        "avg_win": 16.1579,
+        "avg_loss": 11.8256,
+        "profit_factor": 0.8501
+      },
+      "SWEEP_HIGH": {
+        "samples": 119,
+        "win_rate": 53.78,
+        "avg_return": 8.3736,
+        "avg_win": 25.1912,
+        "avg_loss": 11.196,
+        "profit_factor": 2.6182
+      },
+      "SWEEP_LOW": {
+        "samples": 75,
+        "win_rate": 36.0,
+        "avg_return": -1.9038,
+        "avg_win": 8.4604,
+        "avg_loss": 7.7336,
+        "profit_factor": 0.6154
+      }
+    },
+    "structure15m": {
+      "BOS_UP": {
+        "samples": 75,
+        "win_rate": 40.0,
+        "avg_return": 3.3695,
+        "avg_win": 16.2096,
+        "avg_loss": 5.1906,
+        "profit_factor": 2.0819
+      },
+      "RANGE": {
+        "samples": 880,
+        "win_rate": 40.34,
+        "avg_return": -0.7999,
+        "avg_win": 15.9742,
+        "avg_loss": 12.1424,
+        "profit_factor": 0.8896
+      },
+      "SWEEP_HIGH": {
+        "samples": 104,
+        "win_rate": 49.04,
+        "avg_return": 4.8826,
+        "avg_win": 22.1753,
+        "avg_loss": 11.7575,
+        "profit_factor": 1.8149
+      },
+      "SWEEP_LOW": {
+        "samples": 82,
+        "win_rate": 29.27,
+        "avg_return": -0.282,
+        "avg_win": 14.5919,
+        "avg_loss": 6.4367,
+        "profit_factor": 0.9381
+      }
+    },
+    "tf1d": {
+      "DOWN": {
+        "samples": 317,
+        "win_rate": 46.37,
+        "avg_return": -2.4815,
+        "avg_win": 3.5299,
+        "avg_loss": 7.6796,
+        "profit_factor": 0.3975
+      },
+      "N/A": {
+        "samples": 14,
+        "win_rate": 14.29,
+        "avg_return": -14.6304,
+        "avg_win": 12.2025,
+        "avg_loss": 19.1026,
+        "profit_factor": 0.1065
+      },
+      "RANGE": {
+        "samples": 426,
+        "win_rate": 29.58,
+        "avg_return": -1.0009,
+        "avg_win": 5.8731,
+        "avg_loss": 3.888,
+        "profit_factor": 0.6344
+      },
+      "UP": {
+        "samples": 387,
+        "win_rate": 47.8,
+        "avg_return": 3.6973,
+        "avg_win": 34.3512,
+        "avg_loss": 24.3768,
+        "profit_factor": 1.2906
+      }
+    },
+    "tf4h": {
+      "DOWN": {
+        "samples": 27,
+        "win_rate": 18.52,
+        "avg_return": -12.0064,
+        "avg_win": 2.8049,
+        "avg_loss": 15.3726,
+        "profit_factor": 0.0415
+      },
+      "RANGE": {
+        "samples": 447,
+        "win_rate": 43.85,
+        "avg_return": -1.6402,
+        "avg_win": 3.8474,
+        "avg_loss": 5.9254,
+        "profit_factor": 0.507
+      },
+      "UP": {
+        "samples": 669,
+        "win_rate": 38.57,
+        "avg_return": 1.5704,
+        "avg_win": 26.5519,
+        "avg_loss": 14.1114,
+        "profit_factor": 1.1811
+      }
+    },
+    "tf1h": {
+      "RANGE": {
+        "samples": 65,
+        "win_rate": 35.38,
+        "avg_return": -4.717,
+        "avg_win": 15.6677,
+        "avg_loss": 15.8801,
+        "profit_factor": 0.5403
+      },
+      "UP": {
+        "samples": 1079,
+        "win_rate": 40.5,
+        "avg_return": 0.2962,
+        "avg_win": 16.6543,
+        "avg_loss": 10.8385,
+        "profit_factor": 1.0459
+      }
+    },
+    "tf15m": {
+      "RANGE": {
+        "samples": 343,
+        "win_rate": 35.86,
+        "avg_return": -0.9001,
+        "avg_win": 17.3637,
+        "avg_loss": 11.1112,
+        "profit_factor": 0.8737
+      },
+      "UP": {
+        "samples": 797,
+        "win_rate": 42.16,
+        "avg_return": 0.4105,
+        "avg_win": 16.1529,
+        "avg_loss": 11.0634,
+        "profit_factor": 1.0641
+      }
+    },
+    "tf5m": {
+      "DOWN": {
+        "samples": 177,
+        "win_rate": 32.77,
+        "avg_return": -2.053,
+        "avg_win": 18.3556,
+        "avg_loss": 12.0001,
+        "profit_factor": 0.7455
+      },
+      "RANGE": {
+        "samples": 356,
+        "win_rate": 33.43,
+        "avg_return": -3.8419,
+        "avg_win": 13.089,
+        "avg_loss": 12.3431,
+        "profit_factor": 0.5325
+      },
+      "UP": {
+        "samples": 606,
+        "win_rate": 46.37,
+        "avg_return": 2.8078,
+        "avg_win": 17.6495,
+        "avg_loss": 10.0246,
+        "profit_factor": 1.5223
+      }
+    },
+    "symbol": {
+      "1000RATSUSDT": {
+        "samples": 8,
+        "win_rate": 62.5,
+        "avg_return": -4.6548,
+        "avg_win": 7.7223,
+        "avg_loss": 25.2833,
+        "profit_factor": 0.509
+      },
+      "ADAUSDT": {
+        "samples": 62,
+        "win_rate": 32.26,
+        "avg_return": -0.7184,
+        "avg_win": 1.1204,
+        "avg_loss": 1.594,
+        "profit_factor": 0.3347
+      },
+      "AKEUSDT": {
+        "samples": 86,
+        "win_rate": 82.56,
+        "avg_return": 35.7202,
+        "avg_win": 46.8976,
+        "avg_loss": 17.1862,
+        "profit_factor": 12.9163
+      },
+      "BANKUSDT": {
+        "samples": 134,
+        "win_rate": 44.78,
+        "avg_return": -5.1639,
+        "avg_win": 44.752,
+        "avg_loss": 45.6362,
+        "profit_factor": 0.7951
+      },
+      "BICOUSDT": {
+        "samples": 9,
+        "win_rate": 100.0,
+        "avg_return": 26.1896,
+        "avg_win": 26.1896,
+        "avg_loss": 0,
+        "profit_factor": 99
+      },
+      "BTCUSDT": {
+        "samples": 154,
+        "win_rate": 38.31,
+        "avg_return": -0.621,
+        "avg_win": 0.6554,
+        "avg_loss": 1.4136,
+        "profit_factor": 0.2879
+      },
+      "CLUSDT": {
+        "samples": 30,
+        "win_rate": 33.33,
+        "avg_return": -3.5263,
+        "avg_win": 5.4988,
+        "avg_loss": 8.0389,
+        "profit_factor": 0.342
+      },
+      "COTIUSDT": {
+        "samples": 22,
+        "win_rate": 68.18,
+        "avg_return": 8.8016,
+        "avg_win": 20.9449,
+        "avg_loss": 17.2199,
+        "profit_factor": 2.6064
+      },
+      "DEXEUSDT": {
+        "samples": 11,
+        "win_rate": 0.0,
+        "avg_return": -28.6933,
+        "avg_win": 0,
+        "avg_loss": 28.6933,
+        "profit_factor": 0.0
+      },
+      "DOGEUSDT": {
+        "samples": 16,
+        "win_rate": 0.0,
+        "avg_return": -2.679,
+        "avg_win": 0,
+        "avg_loss": 2.679,
+        "profit_factor": 0.0
+      },
+      "ETHUSDT": {
+        "samples": 85,
+        "win_rate": 44.71,
+        "avg_return": -0.7505,
+        "avg_win": 0.9327,
+        "avg_loss": 2.1114,
+        "profit_factor": 0.3572
+      },
+      "EULUSDT": {
+        "samples": 19,
+        "win_rate": 0.0,
+        "avg_return": -23.3913,
+        "avg_win": 0,
+        "avg_loss": 23.3913,
+        "profit_factor": 0.0
+      },
+      "HEIUSDT": {
+        "samples": 8,
+        "win_rate": 12.5,
+        "avg_return": -23.8734,
+        "avg_win": 56.0208,
+        "avg_loss": 35.2868,
+        "profit_factor": 0.2268
+      },
+      "HOMEUSDT": {
+        "samples": 43,
+        "win_rate": 37.21,
+        "avg_return": -2.8939,
+        "avg_win": 3.2782,
+        "avg_loss": 6.5515,
+        "profit_factor": 0.2965
+      },
+      "HYPEUSDT": {
+        "samples": 167,
+        "win_rate": 48.5,
+        "avg_return": -2.0201,
+        "avg_win": 2.5452,
+        "avg_loss": 6.3199,
+        "profit_factor": 0.3793
+      },
+      "MUUSDT": {
+        "samples": 8,
+        "win_rate": 0.0,
+        "avg_return": -11.112,
+        "avg_win": 0,
+        "avg_loss": 11.112,
+        "profit_factor": 0.0
+      },
+      "SNDKUSDT": {
+        "samples": 55,
+        "win_rate": 41.82,
+        "avg_return": -2.4862,
+        "avg_win": 8.0665,
+        "avg_loss": 10.071,
+        "profit_factor": 0.5757
+      },
+      "SNXXUSDT": {
+        "samples": 11,
+        "win_rate": 0.0,
+        "avg_return": -19.8992,
+        "avg_win": 0,
+        "avg_loss": 19.8992,
+        "profit_factor": 0.0
+      },
+      "SOLUSDT": {
+        "samples": 53,
+        "win_rate": 30.19,
+        "avg_return": -1.6835,
+        "avg_win": 1.476,
+        "avg_loss": 3.0497,
+        "profit_factor": 0.2093
+      },
+      "SOXLUSDT": {
+        "samples": 55,
+        "win_rate": 9.09,
+        "avg_return": -6.3357,
+        "avg_win": 10.9948,
+        "avg_loss": 8.0687,
+        "profit_factor": 0.1363
+      },
+      "XAUUSDT": {
+        "samples": 41,
+        "win_rate": 31.71,
+        "avg_return": -0.5397,
+        "avg_win": 1.2269,
+        "avg_loss": 1.36,
+        "profit_factor": 0.4189
+      },
+      "XRPUSDT": {
+        "samples": 30,
+        "win_rate": 26.67,
+        "avg_return": -0.9914,
+        "avg_win": 0.6451,
+        "avg_loss": 1.5865,
+        "profit_factor": 0.1479
+      }
+    }
+  },
+  "rules": [
+    {
+      "samples": 558,
+      "win_rate": 44.44,
+      "avg_return": 3.4436,
+      "avg_win": 18.6354,
+      "avg_loss": 8.7098,
+      "profit_factor": 1.7117,
+      "kind": "boost",
+      "name": "PULLBACK",
+      "adjustment": 5
+    },
+    {
+      "samples": 586,
+      "win_rate": 36.18,
+      "avg_return": -3.2568,
+      "avg_win": 14.2297,
+      "avg_loss": 13.169,
+      "profit_factor": 0.6125,
+      "kind": "penalty",
+      "name": "BREAKOUT",
+      "adjustment": -5
+    },
+    {
+      "samples": 111,
+      "win_rate": 57.66,
+      "avg_return": 20.3611,
+      "avg_win": 47.8891,
+      "avg_loss": 17.1239,
+      "profit_factor": 3.8082,
+      "kind": "boost",
+      "name": "flow_alignment_volume",
+      "adjustment": 9
+    },
+    {
+      "samples": 45,
+      "win_rate": 62.22,
+      "avg_return": 27.2207,
+      "avg_win": 45.2442,
+      "avg_loss": 2.4651,
+      "profit_factor": 30.2298,
+      "kind": "boost",
+      "name": "smart_pullback_volume",
+      "adjustment": 7
+    },
+    {
+      "samples": 64,
+      "win_rate": 75.0,
+      "avg_return": 28.1958,
+      "avg_win": 38.6443,
+      "avg_loss": 3.1498,
+      "profit_factor": 36.8061,
+      "kind": "boost",
+      "name": "smart_pullback_probability",
+      "adjustment": 6
+    },
+    {
+      "samples": 130,
+      "win_rate": 66.15,
+      "avg_return": 21.5354,
+      "avg_win": 40.1659,
+      "avg_loss": 14.8787,
+      "profit_factor": 5.2764,
+      "kind": "boost",
+      "name": "probability_trend_liquidity",
+      "adjustment": 6
+    },
+    {
+      "samples": 196,
+      "win_rate": 52.04,
+      "avg_return": 9.1857,
+      "avg_win": 37.7161,
+      "avg_loss": 21.7728,
+      "profit_factor": 1.8797,
+      "kind": "boost",
+      "name": "daily_micro_alignment",
+      "adjustment": 5
+    },
+    {
+      "samples": 206,
+      "win_rate": 49.51,
+      "avg_return": 5.3337,
+      "avg_win": 20.2116,
+      "avg_loss": 9.258,
+      "profit_factor": 2.1412,
+      "kind": "boost",
+      "name": "structure_1h_long",
+      "adjustment": 4
+    },
+    {
+      "samples": 385,
+      "win_rate": 35.58,
+      "avg_return": -5.6981,
+      "avg_win": 14.0065,
+      "avg_loss": 16.5833,
+      "profit_factor": 0.4666,
+      "kind": "penalty",
+      "name": "low_liquidity",
+      "adjustment": -8
+    },
+    {
+      "samples": 286,
+      "win_rate": 39.86,
+      "avg_return": -3.7899,
+      "avg_win": 6.5797,
+      "avg_loss": 10.6627,
+      "profit_factor": 0.409,
+      "kind": "penalty",
+      "name": "weak_capital_flow",
+      "adjustment": -8
+    },
+    {
+      "samples": 320,
+      "win_rate": 33.12,
+      "avg_return": -6.3043,
+      "avg_win": 10.7848,
+      "avg_loss": 14.769,
+      "profit_factor": 0.3617,
+      "kind": "penalty",
+      "name": "low_confidence",
+      "adjustment": -7
+    },
+    {
+      "samples": 320,
+      "win_rate": 33.12,
+      "avg_return": -6.3043,
+      "avg_win": 10.7848,
+      "avg_loss": 14.769,
+      "profit_factor": 0.3617,
+      "kind": "penalty",
+      "name": "high_uncertainty",
+      "adjustment": -7
+    },
+    {
+      "samples": 27,
+      "win_rate": 18.52,
+      "avg_return": -12.0064,
+      "avg_win": 2.8049,
+      "avg_loss": 15.3726,
+      "profit_factor": 0.0415,
+      "kind": "penalty",
+      "name": "long_against_4h",
+      "adjustment": -12
+    },
+    {
+      "samples": 341,
+      "win_rate": 32.55,
+      "avg_return": -6.7153,
+      "avg_win": 11.8077,
+      "avg_loss": 15.6546,
+      "profit_factor": 0.364,
+      "kind": "penalty",
+      "name": "weak_breakout",
+      "adjustment": -8
+    },
+    {
+      "samples": 304,
+      "win_rate": 34.21,
+      "avg_return": -2.9446,
+      "avg_win": 14.8936,
+      "avg_loss": 12.2205,
+      "profit_factor": 0.6337,
+      "kind": "penalty",
+      "name": "breakout_micro_weak",
+      "adjustment": -6
+    }
+  ]
+}

@@ -10,7 +10,8 @@ __pycache__
 .env.*
 !.env.example
 logs
-data
+data/*
+!data/profit_profile_v2.json
 *.db
 *.sqlite
 *.sqlite3

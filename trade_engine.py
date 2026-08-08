@@ -21,25 +21,15 @@ from main import collect_symbol_data, select_top_symbols
 from rule_engine import evaluate_rules
 
 _SCAN_LOCK = threading.Lock()
-_SCAN_STATE_LOCK = threading.Lock()
-_SCAN_STATE = {
-    'running': False,
-    'owner': None,
-    'startedAt': None,
-    'phase': 'idle',
-    'processed': 0,
-    'total': 0,
-}
+from core.runtime_state import finish as runtime_finish, get as runtime_get, start as runtime_start, update as runtime_update
 
 
 def _set_scan_state(**updates):
-    with _SCAN_STATE_LOCK:
-        _SCAN_STATE.update(updates)
+    runtime_update('scanner', **updates)
 
 
 def get_trade_scan_runtime_state():
-    with _SCAN_STATE_LOCK:
-        return dict(_SCAN_STATE)
+    return runtime_get('scanner')
 
 
 def is_trade_scan_running():
@@ -542,7 +532,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
             'prioritySymbols': [], 'listingPrioritySymbols': [], 'discoveryPrioritySymbols': [],
             'scanState': get_trade_scan_runtime_state(),
         }
-    _set_scan_state(running=True, owner=source, startedAt=datetime.now(timezone.utc).isoformat(), phase='universe', processed=0, total=0)
+    runtime_start('scanner', owner=source, phase='universe', processed=0, total=0)
     snapshot = None
     rows = None
     try:
@@ -648,6 +638,6 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
             cleanup()
         except Exception:
             gc.collect()
-        _set_scan_state(running=False, owner=None, phase='idle', processed=0, total=0)
+        runtime_finish('scanner')
         _SCAN_LOCK.release()
 

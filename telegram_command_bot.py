@@ -806,19 +806,20 @@ def analytics_keyboard():
 
 
 def system_keyboard():
+    # Daily operations live in one place: the live dashboard. Monitor controls
+    # remain there, so the top-level Settings menu no longer duplicates them.
     return {
         "inline_keyboard": [
             [{"text": "🎛 Настройки стратегии", "callback_data": "strategy_settings"}],
             [
-                {"text": "✅ Статус", "callback_data": "bot_status"},
+                {"text": "📟 Состояние", "callback_data": "dashboard"},
                 {"text": "❤️ Health", "callback_data": "health_check"},
             ],
             [
-                {"text": "📡 Мониторинг", "callback_data": "menu_trade"},
-                {"text": "🧩 Фоновые сервисы", "callback_data": "automation_status"},
+                {"text": "🧩 Сервисы", "callback_data": "automation_status"},
+                {"text": "🖥 Сервер", "callback_data": "server_status"},
             ],
-            [{"text": "🖥 Сервер", "callback_data": "server_status"}],
-            [{"text": "📟 Диагностика", "callback_data": "dashboard"}],
+            [{"text": "🛠 Диагностика", "callback_data": "bot_status"}],
             _home_row(),
         ]
     }
@@ -1058,11 +1059,22 @@ def build_dashboard_text():
         except Exception:
             pass
 
+    try:
+        from core.runtime_state import get as runtime_component
+        heavy_state = runtime_component("heavy_task")
+    except Exception:
+        heavy_state = {}
+
     lines.extend([
         "",
         f"⚡ Ручной запуск: <b>{'занят общим сканером' if engine_busy else ('выполняется' if manual_thread_alive else 'доступен')}</b>",
         f"🧠 Chronos: <b>{_chronos_state_text()}</b>",
     ])
+    if heavy_state.get("running"):
+        heavy_name = str(heavy_state.get("name") or "background task").replace("-", " ")
+        lines.append(f"⚙️ Фоновая задача: <b>🟡 {html.escape(heavy_name)}</b>")
+    else:
+        lines.append("⚙️ Фоновая задача: <b>🟢 нет тяжёлых задач</b>")
 
     extra_tasks = []
     if report_alive:

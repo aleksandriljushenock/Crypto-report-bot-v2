@@ -65,7 +65,7 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec("PAPER_MAX_HOLD_HOURS", "int", 72, "paper", "Макс. удержание, часов", "Закрыть позицию по рынку после этого срока.", 1, 720),
     SettingSpec("PAPER_MIN_FREE_BALANCE_USD", "float", 5, "paper", "Резерв баланса, $", "Минимальная свободная сумма, которую paper-счёт не использует.", 0, 100000),
     SettingSpec("MULTI_EXCHANGE_UNIVERSE_ENABLED", "bool", True, "runtime", "Multi-Exchange Universe", "Собирать рынок сразу с нескольких futures-бирж."),
-    SettingSpec("MULTI_EXCHANGE_MIN_VENUES", "int", 1, "runtime", "Мин. бирж на монету", "Сколько бирж минимум должны поддерживать монету. 1 даёт максимальное покрытие.", 1, 5),
+    SettingSpec("MULTI_EXCHANGE_MIN_VENUES", "int", 1, "runtime", "Мин. бирж на монету", "Сколько бирж минимум должны поддерживать монету. 1 даёт максимальное покрытие.", 1, 10),
     SettingSpec("MULTI_EXCHANGE_MIN_QUOTE_VOLUME_USDT", "float", 50000000, "runtime", "Мин. объём на бирже, $", "Минимальный 24h quote volume для включения монеты в общий universe.", 0, 1000000000000),
     SettingSpec("MULTI_EXCHANGE_COVERAGE_BONUS", "float", 0.08, "runtime", "Бонус покрытия бирж", "Небольшой бонус к рангу монеты за присутствие на нескольких биржах.", 0, 1),
     SettingSpec("TRADE_TOP_LIQUID_SYMBOLS", "int", 50, "runtime", "Монет в скане", "Количество наиболее ликвидных монет для анализа.", 1, 500),
