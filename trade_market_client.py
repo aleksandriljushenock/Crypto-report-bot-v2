@@ -144,10 +144,12 @@ def _provider_supports_symbol(provider, symbol):
 
 
 def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=8):
-    """Build a deduplicated USDT perpetual universe across all configured venues.
+    """Build a deduplicated, diverse USDT perpetual universe across venues.
 
-    Ranking uses the maximum observed quote volume for a symbol plus a small
-    venue-coverage bonus, so the same liquidity is not double-counted.
+    v22 keeps the API-cheap ticker sweep wide, then selects the deep-scan set from
+    multiple buckets instead of pure quote-volume rank: liquidity, gainers,
+    losers, absolute movers and cross-exchange coverage. This increases useful
+    opportunity coverage without loading candles for hundreds of symbols.
     """
     merged = {}
     provider_stats = {}
@@ -177,10 +179,15 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
                 item = merged.setdefault(symbol, {
                     "symbol": symbol, "lastPrice": 0.0, "priceChangePercent": 0.0,
                     "quoteVolume": 0.0, "highPrice": 0.0, "lowPrice": 0.0,
-                    "exchanges": [], "exchangeVolumes": {},
+                    "exchanges": [], "exchangeVolumes": {}, "exchangeChanges": {},
                 })
-                item["exchanges"].append(name)
+                if name not in item["exchanges"]:
+                    item["exchanges"].append(name)
                 item["exchangeVolumes"][name] = quote_volume
+                try:
+                    item["exchangeChanges"][name] = float(row.get("priceChangePercent") or 0)
+                except Exception:
+                    item["exchangeChanges"][name] = 0.0
                 if quote_volume >= float(item.get("quoteVolume") or 0):
                     item["quoteVolume"] = quote_volume
                     for key in ("lastPrice", "priceChangePercent", "highPrice", "lowPrice"):
@@ -204,10 +211,50 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
         item["exchangeCount"] = len(item["exchanges"])
         if item["exchangeCount"] < min_venues:
             continue
+        changes = list(item.get("exchangeChanges", {}).values())
+        if changes:
+            changes_sorted = sorted(changes)
+            item["crossExchangeChangeMedian"] = changes_sorted[len(changes_sorted)//2]
+        else:
+            item["crossExchangeChangeMedian"] = float(item.get("priceChangePercent") or 0)
         item["liquidityRankScore"] = float(item["quoteVolume"]) * (1.0 + coverage_bonus * max(0, item["exchangeCount"] - 1))
         rows.append(item)
-    rows.sort(key=lambda x: (x["liquidityRankScore"], x["quoteVolume"], x["exchangeCount"]), reverse=True)
-    selected_rows = rows[:max(1, int(top_limit))]
+
+    limit = max(1, int(top_limit))
+    wide_limit = max(limit, int(os.getenv("FAST_SCAN_POOL_SIZE", "250")))
+    liquidity_rows = sorted(rows, key=lambda x: (x["liquidityRankScore"], x["exchangeCount"]), reverse=True)[:wide_limit]
+
+    # Dynamic universe buckets. Defaults target ~80 deep symbols while keeping
+    # the same total limit configured by TRADE_TOP_LIQUID_SYMBOLS.
+    liq_n = min(limit, max(1, int(os.getenv("DYNAMIC_UNIVERSE_LIQUID_COUNT", str(max(1, round(limit * 0.58)))))))
+    gain_n = max(0, int(os.getenv("DYNAMIC_UNIVERSE_GAINERS_COUNT", str(max(4, round(limit * 0.14))))))
+    loss_n = max(0, int(os.getenv("DYNAMIC_UNIVERSE_LOSERS_COUNT", str(max(4, round(limit * 0.14))))))
+    cover_n = max(0, int(os.getenv("DYNAMIC_UNIVERSE_COVERAGE_COUNT", str(max(4, round(limit * 0.14))))))
+
+    picked = {}
+    def add_bucket(source, count, tag):
+        for item in source:
+            if len(picked) >= limit or count <= 0:
+                break
+            sym = item["symbol"]
+            if sym not in picked:
+                clone = dict(item)
+                clone["fastScanBucket"] = tag
+                picked[sym] = clone
+                count -= 1
+
+    add_bucket(sorted(liquidity_rows, key=lambda x: x["liquidityRankScore"], reverse=True), liq_n, "liquidity")
+    add_bucket(sorted(liquidity_rows, key=lambda x: float(x.get("crossExchangeChangeMedian") or 0), reverse=True), gain_n, "gainer")
+    add_bucket(sorted(liquidity_rows, key=lambda x: float(x.get("crossExchangeChangeMedian") or 0)), loss_n, "loser")
+    add_bucket(sorted(liquidity_rows, key=lambda x: (int(x.get("exchangeCount") or 0), x["liquidityRankScore"]), reverse=True), cover_n, "coverage")
+    # Fill any remaining slots with high absolute movers, then liquidity.
+    add_bucket(sorted(liquidity_rows, key=lambda x: abs(float(x.get("crossExchangeChangeMedian") or 0)), reverse=True), limit, "mover")
+    add_bucket(liquidity_rows, limit, "liquidity_fill")
+
+    selected_rows = list(picked.values())[:limit]
+    bucket_counts = {}
+    for row in selected_rows:
+        bucket_counts[row.get("fastScanBucket") or "other"] = bucket_counts.get(row.get("fastScanBucket") or "other", 0) + 1
     with _PROVIDER_LOCK:
         global _LAST_UNIVERSE_SUMMARY
         _LAST_UNIVERSE_SUMMARY = {
@@ -216,7 +263,11 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
             "contractsObserved": sum(int(v.get("tradable") or 0) for v in provider_stats.values()),
             "uniqueLiquidSymbols": len(merged),
             "coverageEligibleSymbols": len(rows),
+            "fastPoolSymbols": len(liquidity_rows),
             "selectedSymbols": len(selected_rows),
+            "selectionBuckets": bucket_counts,
+            "activeMarketSymbols": sum(1 for x in liquidity_rows if abs(float(x.get("crossExchangeChangeMedian") or 0)) >= float(os.getenv("ACTIVE_MARKET_CHANGE_PCT", "5"))),
+            "maxAbsChangePct": max([abs(float(x.get("crossExchangeChangeMedian") or 0)) for x in liquidity_rows] or [0.0]),
             "minVenues": min_venues,
             "minQuoteVolumeUsdt": float(min_quote_volume or 0),
         }

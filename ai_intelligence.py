@@ -52,8 +52,8 @@ def rank_signals(signals):
     # Chronos changes probability/confidence, so calculate EV and gate once more.
     ranked = []
     rejected = []
-    min_quality = float(os.getenv("HEDGE_MIN_QUALITY", "70"))
-    min_ev = float(os.getenv("HEDGE_MIN_EV_PCT", "0.20"))
+    base_min_quality = float(os.getenv("HEDGE_MIN_QUALITY", "70"))
+    base_min_ev = float(os.getenv("HEDGE_MIN_EV_PCT", "0.20"))
     quality_count = 0
     ev_count = 0
     for item in prepared:
@@ -65,13 +65,22 @@ def rank_signals(signals):
         save_ai_score(item)
         quality = float(item.get("qualityScore") or 0)
         ev = float(item.get("expectedValuePct") or 0)
+        profile = str(item.get("signalProfile") or item.get("setup") or "BREAKOUT").upper()
+        min_quality = float(os.getenv(f"HEDGE_{profile}_MIN_QUALITY", str(base_min_quality)))
+        min_ev = float(os.getenv(f"HEDGE_{profile}_MIN_EV_PCT", str(base_min_ev)))
+        item["profileQualityThreshold"] = min_quality
+        item["profileEvThreshold"] = min_ev
+        hard_blocked = any(bool(r.get("hard_block")) for r in (item.get("qualityRules") or []) if isinstance(r, dict))
+        profile_passed = quality >= min_quality and ev >= min_ev and not hard_blocked
         if quality >= min_quality:
             quality_count += 1
         if quality >= min_quality and ev >= min_ev:
             ev_count += 1
-        if not gate_enabled or item.get("qualityPassed"):
+        if not gate_enabled or profile_passed:
+            item["qualityPassed"] = True
             ranked.append(item)
         else:
+            item["qualityPassed"] = False
             reasons = []
             if quality < min_quality:
                 reasons.append("Quality")
@@ -84,6 +93,10 @@ def rank_signals(signals):
                 "rr": item.get("rr"), "probability": item.get("probability"),
                 "qualityScore": quality, "expectedValuePct": ev,
                 "reason": ", ".join(reasons) or "AI gate",
+                "direction": item.get("direction"), "setup": item.get("setup"),
+                "entryPrice": item.get("entryPrice"), "entryText": item.get("entryText"),
+                "stop": item.get("stop"), "tp1": item.get("tp1"), "tp2": item.get("tp2"), "tp3": item.get("tp3"),
+                "signalProfile": item.get("signalProfile"), "fingerprint": item.get("fingerprint"),
             })
     quality_bands = {"85+": 0, "80-85": 0, "75-80": 0, "70-75": 0, "<70": 0}
     probability_bands = {"80+": 0, "75-80": 0, "70-75": 0, "<70": 0}

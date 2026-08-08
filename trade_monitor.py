@@ -62,6 +62,54 @@ class TradeMonitor:
                 self._stop_event.wait(10)
         self.logger('Фоновый торговый монитор остановлен.')
 
+    def _process_signals(self, result, chat_id, source):
+        new_count = 0
+        for signal in result.get('signals', []):
+            upsert_watch_candidate(signal, source=source)
+            cooldown = float(os.getenv('TRADE_SIGNAL_COOLDOWN_HOURS', '6'))
+            if signal_recently_sent(signal['fingerprint'], cooldown_hours=cooldown):
+                continue
+            signal_id = save_signal(signal, sent=False)
+            cloud_id = persist_trade_signal(signal, source='automatic_monitor' if source == 'monitor' else source)
+            if not cloud_id:
+                self.logger(f"Monitor signal not confirmed in Supabase: {signal.get('fingerprint')}")
+            message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
+            self.sender(chat_id, message)
+            try:
+                from paper_trading import open_from_signal, format_open_message, format_pending_message, format_missed_message
+                paper_result = open_from_signal(signal, source='automatic_monitor' if source == 'monitor' else source)
+                if paper_result.get('status') == 'opened':
+                    self.sender(chat_id, format_open_message(paper_result))
+                elif paper_result.get('status') == 'pending_entry':
+                    self.sender(chat_id, format_pending_message(paper_result))
+                elif paper_result.get('status') == 'missed_entry':
+                    self.sender(chat_id, format_missed_message(paper_result.get('position') or {}, 'MISSED_BREAKOUT'))
+            except Exception as exc:
+                self.logger(f"Paper trading open error: {exc}")
+            mark_signal_sent(signal_id)
+            new_count += 1
+        return new_count
+
+    def _run_near_signal_cycle(self, chat_id):
+        if os.getenv('NEAR_SIGNAL_WATCH_ENABLED', 'true').strip().lower() not in {'1','true','yes','on'}:
+            return 0
+        try:
+            from near_signal_watchlist import get_due_symbols, mark_checked
+            symbols = get_due_symbols()
+            if not symbols:
+                return 0
+            result = run_trade_scan(include_watch=True, max_results=5, source='near-watch', only_symbols=symbols)
+            if result.get('busy'):
+                return 0
+            promoted = [s.get('symbol') for s in result.get('signals', []) if s.get('symbol')]
+            mark_checked(symbols, promoted=promoted)
+            new_count = self._process_signals(result, chat_id, 'near_watch')
+            self.logger(f"Near-signal rescan: symbols={len(symbols)} promoted={len(promoted)} new={new_count}")
+            return new_count
+        except Exception as exc:
+            self.logger(f"Near-signal rescan error: {exc}")
+            return 0
+
     def _loop(self):
         while not self._stop_event.is_set():
             self.heartbeat_at = datetime.now(timezone.utc).isoformat()
@@ -71,8 +119,9 @@ class TradeMonitor:
                 continue
 
             started = time.time()
+            result = {}
             try:
-                self.run_once(settings)
+                result = self.run_once(settings)
                 self.last_error = None
             except Exception as exc:
                 self.last_error = f'{type(exc).__name__}: {exc}'
@@ -80,11 +129,33 @@ class TradeMonitor:
 
             self.last_run = datetime.now(timezone.utc).isoformat()
             self.heartbeat_at = self.last_run
-            interval = max(5, int(settings.get('interval_minutes') or 15)) * 60
+            base_minutes = max(5, int(settings.get('interval_minutes') or 15))
+            active_minutes = max(5, int(float(os.getenv('TRADE_SCAN_ACTIVE_INTERVAL_MINUTES', '7'))))
+            # More frequent full passes only when there are near-final candidates.
+            market_active = int((result.get('universeSummary') or {}).get('activeMarketSymbols') or 0) >= int(float(os.getenv('ACTIVE_MARKET_SYMBOL_COUNT', '8')))
+            interval_minutes = active_minutes if ((result.get('nearMisses') or []) or market_active) else base_minutes
             elapsed = time.time() - started
-            wait_seconds = max(30, interval - elapsed)
-            self.logger(f'Монитор: следующий цикл через {int(wait_seconds)} сек.')
-            self._stop_event.wait(wait_seconds)
+            wait_seconds = max(30, interval_minutes * 60 - elapsed)
+            near_every = max(60, int(float(os.getenv('NEAR_SIGNAL_RESCAN_MINUTES', '5')) * 60))
+            shadow_every = max(300, int(float(os.getenv('SHADOW_UPDATE_MINUTES', '10')) * 60))
+            next_near = time.time() + near_every
+            next_shadow = time.time() + shadow_every
+            deadline = time.time() + wait_seconds
+            self.logger(f'Монитор: следующий полный цикл через {int(wait_seconds)} сек.; near-watch каждые {near_every//60} мин.')
+            while not self._stop_event.is_set() and time.time() < deadline:
+                now_ts = time.time()
+                if now_ts >= next_near:
+                    self._run_near_signal_cycle(settings.get('chat_id'))
+                    next_near = now_ts + near_every
+                if now_ts >= next_shadow:
+                    try:
+                        from shadow_signals import update_shadow_signals
+                        update_shadow_signals()
+                    except Exception as exc:
+                        self.logger(f'Shadow update error: {exc}')
+                    next_shadow = now_ts + shadow_every
+                self.heartbeat_at = datetime.now(timezone.utc).isoformat()
+                self._stop_event.wait(min(30, max(1, deadline - time.time())))
 
     def run_once(self, settings=None):
         settings = settings or get_monitor_settings()
@@ -93,36 +164,14 @@ class TradeMonitor:
             self.logger('Монитор пропустил цикл: chat_id не задан.')
             return {'signals': []}
         result = run_trade_scan(include_watch=False, max_results=5, source='monitor')
-        new_count = 0
-        for signal in result.get('signals', []):
-            upsert_watch_candidate(signal, source='monitor')
-            cooldown = float(os.getenv('TRADE_SIGNAL_COOLDOWN_HOURS', '6'))
-            if signal_recently_sent(signal['fingerprint'], cooldown_hours=cooldown):
-                continue
-            signal_id = save_signal(signal, sent=False)
-            cloud_id = persist_trade_signal(signal, source="automatic_monitor")
-            if not cloud_id:
-                self.logger(f"Monitor signal not confirmed in Supabase: {signal.get('fingerprint')}")
-            message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
-            self.sender(chat_id, message)
-            try:
-                from paper_trading import open_from_signal, format_open_message, format_pending_message, format_missed_message
-                paper_result = open_from_signal(signal, source="automatic_monitor")
-                if paper_result.get("status") == "opened":
-                    self.sender(chat_id, format_open_message(paper_result))
-                elif paper_result.get("status") == "pending_entry":
-                    self.sender(chat_id, format_pending_message(paper_result))
-                elif paper_result.get("status") == "missed_entry":
-                    self.sender(chat_id, format_missed_message(paper_result.get("position") or {}, "MISSED_BREAKOUT"))
-                elif paper_result.get("status") not in {"disabled", "duplicate", "symbol-already-open"}:
-                    self.logger(f"Paper trading skipped: {paper_result.get('status')} symbol={signal.get('symbol')}")
-            except Exception as exc:
-                self.logger(f"Paper trading open error: {exc}")
-            mark_signal_sent(signal_id)
-            new_count += 1
+        if result.get('busy'):
+            self.logger('Монитор: полный скан пропущен — scan engine уже занят.')
+            return result
+        new_count = self._process_signals(result, chat_id, 'monitor')
         self.logger(
             f"Монитор: проверено={result.get('rowsAnalyzed')}, "
             f"сигналов={len(result.get('signals', []))}, новых={new_count}"
         )
         result['newSignalsSent'] = new_count
         return result
+

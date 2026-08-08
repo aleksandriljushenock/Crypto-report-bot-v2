@@ -80,6 +80,18 @@ def _rule_hits(s):
     if str(s.get('structure1h')) in ('SWEEP_HIGH','BOS_UP'):
         add('structure_1h_confirmed', _rule_weight('RULE_WEIGHT_STRUCTURE_1H', 4))
 
+    # v22 cross-exchange confirmation. Coverage is supportive, never a stand-alone signal.
+    venues = int(s.get('exchangeCount') or len(s.get('marketExchanges') or []))
+    if venues >= 5:
+        add('cross_exchange_coverage_5', _rule_weight('RULE_WEIGHT_CROSS_EXCHANGE_5', 3))
+    elif venues >= 3:
+        add('cross_exchange_coverage_3', _rule_weight('RULE_WEIGHT_CROSS_EXCHANGE_3', 1.5))
+    move = float(s.get('crossExchangeChangeMedian') or 0)
+    if str(s.get('direction')) == 'LONG_BIAS' and move >= 3:
+        add('cross_exchange_momentum_long', _rule_weight('RULE_WEIGHT_CROSS_EXCHANGE_MOMENTUM', 2))
+    elif str(s.get('direction')) == 'SHORT_BIAS' and move <= -3:
+        add('cross_exchange_momentum_short', _rule_weight('RULE_WEIGHT_CROSS_EXCHANGE_MOMENTUM', 2))
+
     # Negative profiles remain configurable too, but defaults preserve the tested behavior.
     if qv<130_000_000:
         add('low_liquidity', _rule_weight('RULE_WEIGHT_LOW_LIQUIDITY', -8), qv<80_000_000)

@@ -28,7 +28,7 @@ def build_signal_block(signal, index=None):
         f"Статус: <b>{esc(signal.get('status'))}</b> | Score: <b>{esc(signal.get('score'))}/100</b>",
         f"Вероятность: <b>{esc(signal.get('probability'))}%</b> | Уверенность: <b>{esc(signal.get('confidence'))}%</b>",
         f"🧠 AI Score: <b>{esc(signal.get('aiScore', 'N/A'))}/100</b> | Tier: <b>{esc(signal.get('aiTier', 'N/A'))}</b>",
-        f"Сетап: <b>{esc(signal.get('setup'))}</b> | R/R: <b>{esc(signal.get('rr'))}</b>",
+        f"Сетап: <b>{esc(signal.get('setup'))}</b> | Профиль: <b>{esc(signal.get('signalProfile') or signal.get('setup'))}</b> | R/R: <b>{esc(signal.get('rr'))}</b>",
         f"Вход: <code>{esc(signal.get('entryText'))}</code>",
         f"Stop: <code>{esc(signal.get('stop'))}</code>",
         f"TP: <code>{esc(signal.get('tp1'))} / {esc(signal.get('tp2'))} / {esc(signal.get('tp3'))}</code>",
@@ -38,7 +38,7 @@ def build_signal_block(signal, index=None):
     ]
     venues = [str(v).upper() for v in (signal.get('marketExchanges') or []) if v]
     if venues:
-        total_venues = max(1, len([x for x in os.getenv('TRADE_MARKET_PROVIDERS', 'binance,bybit,okx,bitget,gate').split(',') if x.strip()]))
+        total_venues = max(1, len([x for x in os.getenv('TRADE_MARKET_PROVIDERS', 'binance,bybit,okx,bitget,gate,mexc,bingx,kucoin,hyperliquid,htx').split(',') if x.strip()]))
         filled = min(5, round(5 * len(venues) / total_venues))
         stars = '★' * filled + '☆' * (5 - filled)
         lines.append(f"Биржи: <b>{', '.join(esc(v) for v in venues[:5])}</b> ({len(venues)}/{total_venues}) · Coverage {stars}")

@@ -133,13 +133,27 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
 
 
 
-def _select_market_symbols(extra_symbols=None, top_limit=None):
+def _select_market_symbols(extra_symbols=None, top_limit=None, only_symbols=None):
     """Return ranked symbols without retaining candle payloads in memory."""
     client = create_trade_market_client()
     use_multi = os.getenv('MULTI_EXCHANGE_UNIVERSE_ENABLED', 'true').strip().lower() in {'1','true','yes','on'}
     provider_stats = {}
-    limit = int(top_limit or os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '50'))
-    if use_multi:
+    limit = int(top_limit or os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '80'))
+    if only_symbols:
+        selected = []
+        for symbol in list(dict.fromkeys(str(x).upper() for x in only_symbols if x)):
+            try:
+                ticker = client.ticker_24h(symbol)
+                selected.append({
+                    'symbol': symbol,
+                    'lastPrice': float(ticker.get('lastPrice') or ticker.get('markPrice') or 0),
+                    'priceChangePercent': float(ticker.get('priceChangePercent') or 0),
+                    'quoteVolume': float(ticker.get('quoteVolume') or 0),
+                    'exchanges': [], 'exchangeCount': 0, 'fastScanBucket': 'near_signal',
+                })
+            except Exception:
+                continue
+    elif use_multi:
         from config import MIN_QUOTE_VOLUME_USDT
         selected, provider_stats = collect_multi_exchange_universe(
             top_limit=limit,
@@ -167,9 +181,9 @@ def _select_market_symbols(extra_symbols=None, top_limit=None):
     return client, use_multi, selected_map, provider_stats
 
 
-def collect_and_analyze_market(extra_symbols=None, top_limit=None):
+def collect_and_analyze_market(extra_symbols=None, top_limit=None, only_symbols=None):
     """Analyze a wider universe in small batches so RAM follows batch size, not universe size."""
-    client, use_multi, selected_map, provider_stats = _select_market_symbols(extra_symbols, top_limit)
+    client, use_multi, selected_map, provider_stats = _select_market_symbols(extra_symbols, top_limit, only_symbols=only_symbols)
     run_time = datetime.now(timezone.utc).isoformat()
     items = list(selected_map.items())
     total = len(items)
@@ -198,6 +212,8 @@ def collect_and_analyze_market(extra_symbols=None, top_limit=None):
                     payload = future.result()
                     payload['marketExchanges'] = list(meta.get('exchanges') or [])
                     payload['exchangeCount'] = int(meta.get('exchangeCount') or len(payload['marketExchanges']))
+                    payload['fastScanBucket'] = meta.get('fastScanBucket')
+                    payload['crossExchangeChangeMedian'] = meta.get('crossExchangeChangeMedian')
                     payloads[symbol] = payload
                 except Exception as exc:
                     payloads[symbol] = {'symbol': symbol, 'error': str(exc)}
@@ -301,7 +317,7 @@ def analyze_snapshot(snapshot):
             score['fundingAnalysis'] = calculate_funding_analysis(symbol_data)
             rules = evaluate_rules(score, levels)
             timeframe = build_timeframe_profile(symbol_data, score.get('direction'))
-            rows.append({'score': score, 'levels': levels, 'rules': rules, 'listing': _listing_metadata(symbol), 'timeframe': timeframe, 'marketExchanges': list(symbol_data.get('marketExchanges') or []), 'exchangeCount': int(symbol_data.get('exchangeCount') or 0), 'chronosCloses': [c.get('close') for c in symbol_data['parsedKlines'].get(os.getenv('CHRONOS_TIMEFRAME', '15m'), []) if c.get('close') is not None]})
+            rows.append({'score': score, 'levels': levels, 'rules': rules, 'listing': _listing_metadata(symbol), 'timeframe': timeframe, 'marketExchanges': list(symbol_data.get('marketExchanges') or []), 'exchangeCount': int(symbol_data.get('exchangeCount') or 0), 'fastScanBucket': symbol_data.get('fastScanBucket'), 'crossExchangeChangeMedian': symbol_data.get('crossExchangeChangeMedian'), 'chronosCloses': [c.get('close') for c in symbol_data['parsedKlines'].get(os.getenv('CHRONOS_TIMEFRAME', '15m'), []) if c.get('close') is not None]})
         except Exception as exc:
             rows.append({'symbol': symbol, 'error': str(exc)})
     rows.sort(key=lambda item: item.get('score', {}).get('score', 0), reverse=True)
@@ -428,8 +444,42 @@ def row_to_signal(row):
         'listing': row.get('listing', {}),
         'marketExchanges': row.get('marketExchanges', []),
         'exchangeCount': row.get('exchangeCount', 0),
+        'priceChange24h': score.get('priceChange24h'),
+        'relativeVolume15m': score.get('relativeVolume15m'),
+        'relativeVolume1h': score.get('relativeVolume1h'),
+        'atr1hPercent': score.get('atr1hPercent'),
+        'rsi1h': score.get('rsi1h'),
+        'fastScanBucket': row.get('fastScanBucket'),
+        'crossExchangeChangeMedian': row.get('crossExchangeChangeMedian'),
         # Kept only until final AI ranking; removed before persistence.
         '_chronosCloses': list(row.get('chronosCloses') or []),
+    }
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return float(default)
+
+
+def _strategy_profile(signal):
+    """Choose a profile without changing the executable setup geometry."""
+    setup = str(signal.get('setup') or '').upper()
+    change = abs(float(signal.get('priceChange24h') or 0))
+    rv = max(float(signal.get('relativeVolume15m') or 0), float(signal.get('relativeVolume1h') or 0))
+    # Momentum is a scoring profile; execution still uses the original breakout/pullback levels.
+    if change >= _env_float('MOMENTUM_PROFILE_MIN_CHANGE_PCT', 4.0) and rv >= _env_float('MOMENTUM_PROFILE_MIN_REL_VOLUME', 1.25):
+        return 'MOMENTUM'
+    return 'PULLBACK' if setup == 'PULLBACK' else 'BREAKOUT'
+
+
+def _profile_thresholds(profile, base_score, base_rr, base_probability):
+    prefix = f'TRADE_{profile}_MIN_'
+    return {
+        'score': _env_float(prefix + 'SCORE', base_score),
+        'rr': _env_float(prefix + 'RR', base_rr),
+        'probability': _env_float(prefix + 'PROBABILITY', base_probability),
     }
 
 
@@ -447,17 +497,21 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
             continue
         diag["status"] += 1
         signal = row_to_signal(row)
-        threshold = min_score if status == 'TRADE_CANDIDATE' else min_score + 3
+        profile = _strategy_profile(signal)
+        signal['signalProfile'] = profile
+        thresholds = _profile_thresholds(profile, min_score, min_rr, min_probability)
+        threshold = thresholds['score'] if status == 'TRADE_CANDIDATE' else thresholds['score'] + 3
+        signal['profileThresholds'] = thresholds
         reasons = []
         if float(signal.get('score') or 0) < threshold:
             reasons.append('Score')
         else:
             diag["score"] += 1
-        if not reasons and float(signal.get('rr') or 0) < min_rr:
+        if not reasons and float(signal.get('rr') or 0) < thresholds['rr']:
             reasons.append('R/R')
         elif not reasons:
             diag["rr"] += 1
-        if not reasons and float(signal.get('probability') or 0) < min_probability:
+        if not reasons and float(signal.get('probability') or 0) < thresholds['probability']:
             reasons.append('Probability')
         elif not reasons:
             diag["probability"] += 1
@@ -471,10 +525,14 @@ def find_trade_signals(rows, min_score=72, min_rr=2.0, include_watch=False, max_
     diag["nearMisses"] = [{
         "symbol": x.get("symbol"), "reason": x.get("reason"), "score": x.get("score"),
         "rr": x.get("rr"), "probability": x.get("probability"),
-    } for x in near[:8]]
+        "direction": x.get("direction"), "setup": x.get("setup"),
+        "entryPrice": x.get("entryPrice"), "entryText": x.get("entryText"),
+        "stop": x.get("stop"), "tp1": x.get("tp1"), "tp2": x.get("tp2"), "tp3": x.get("tp3"),
+        "signalProfile": x.get("signalProfile"), "fingerprint": x.get("fingerprint"),
+    } for x in near[:12]]
     return signals[:max_results]
 
-def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='unknown'):
+def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='unknown', only_symbols=None):
     if not _SCAN_LOCK.acquire(blocking=False):
         return {
             'runTimeUtc': datetime.now(timezone.utc).isoformat(),
@@ -491,7 +549,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
         discovery_priority = get_priority_discovery_symbols(limit=int(os.getenv('TRADE_DISCOVERY_PRIORITY_LIMIT', '10')))
         priority = list(dict.fromkeys(listing_priority + discovery_priority))
         top_limit = int(os.getenv('TRADE_TOP_LIQUID_SYMBOLS', '50'))
-        snapshot, rows = collect_and_analyze_market(extra_symbols=priority, top_limit=top_limit)
+        snapshot, rows = collect_and_analyze_market(extra_symbols=None if only_symbols else priority, top_limit=top_limit, only_symbols=only_symbols)
         run_time = snapshot['runTimeUtc']
         provider = snapshot.get('marketProvider', 'unknown')
         universe_summary = get_last_universe_summary()
@@ -539,6 +597,18 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
             "ev": dict(ai_diag.get("evBands") or {}),
         }
         near_misses = list(ai_diag.get("rejected") or []) + list(filter_diag.get("nearMisses") or [])
+        # v22: near-signal candidates stay hot between full scans, while shadow
+        # candidates are tracked without being sent/opened as trades.
+        try:
+            from near_signal_watchlist import upsert_near_candidates
+            upsert_near_candidates(near_misses, source=source)
+        except Exception:
+            pass
+        try:
+            from shadow_signals import register_shadow_candidates
+            register_shadow_candidates(near_misses, source=source)
+        except Exception:
+            pass
         result = {
             'runTimeUtc': run_time, 'marketProvider': provider, 'signals': signals,
             'rowsAnalyzed': len(rows), 'prioritySymbols': priority,
@@ -546,7 +616,7 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
             'universeSummary': universe_summary, 'universeProviderStats': provider_stats,
             'scannerStages': stages, 'nearMisses': near_misses[:8],
             'scannerDistributions': distributions, 'marketState': market_state,
-            'scanSource': source,
+            'scanSource': source, 'targetedScan': bool(only_symbols),
         }
         try:
             from scanner_intelligence import save_scan_intelligence, build_recommendation

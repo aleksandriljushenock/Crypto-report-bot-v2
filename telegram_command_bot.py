@@ -1137,9 +1137,10 @@ def build_best_combos_text():
 
 def build_scanner_intelligence_text():
     from scanner_intelligence import get_last_scan_intelligence, aggregate_24h, is_previous_process_snapshot
-    from trade_engine import is_trade_scan_running
+    from trade_engine import is_trade_scan_running, get_trade_scan_runtime_state
     row = get_last_scan_intelligence()
     running = is_trade_scan_running()
+    runtime = get_trade_scan_runtime_state()
     if not row:
         if running:
             return (
@@ -1156,9 +1157,15 @@ def build_scanner_intelligence_text():
         "🔎 <b>SCANNER INTELLIGENCE</b>", "",
     ]
     if running:
+        owner = runtime.get('owner') or 'unknown'
+        owner_text = {'monitor':'фоновый монитор','manual':'ручной скан','near-watch':'Near-Signal re-scan'}.get(owner, owner)
+        processed = int(runtime.get('processed') or 0); total = int(runtime.get('total') or 0)
+        phase = runtime.get('phase') or 'scan'
         lines += [
-            "🟡 <b>Новый скан выполняется сейчас</b>",
-            "Свежие цифры появятся после завершения полного прохода.", "",
+            "🟡 <b>Скан выполняется сейчас</b>",
+            f"Источник: <b>{html.escape(str(owner_text))}</b> · этап: <b>{html.escape(str(phase))}</b>",
+            f"Прогресс: <b>{processed}/{total}</b>" if total else "Прогресс: формируется Universe",
+            "Ниже показан последний завершённый проход.", "",
         ]
     if previous_process:
         lines += [
@@ -1229,9 +1236,14 @@ def build_universe_dashboard_text():
         f"Контрактов просмотрено: <b>{int(u.get('contractsObserved') or 0)}</b>",
         f"Уникальных ликвидных символов: <b>{int(u.get('uniqueLiquidSymbols') or 0)}</b>",
         f"После coverage-фильтра: <b>{int(u.get('coverageEligibleSymbols') or 0)}</b>",
-        f"Анализируется за проход: <b>{int(u.get('selectedSymbols') or 0)}</b>",
+        f"⚡ Fast pool: <b>{int(u.get('fastPoolSymbols') or 0)}</b>",
+        f"🧠 Deep scan за проход: <b>{int(u.get('selectedSymbols') or 0)}</b>",
         f"Минимум бирж на символ: <b>{int(u.get('minVenues') or 1)}</b>",
     ]
+    buckets = u.get('selectionBuckets') or {}
+    if buckets:
+        labels = {'liquidity':'ликвидность','gainer':'рост','loser':'падение','coverage':'coverage','mover':'движение','liquidity_fill':'ликвидность+'}
+        lines += ['', '<b>Состав Deep Scan:</b> ' + ' · '.join(f"{labels.get(k,k)} {v}" for k,v in buckets.items())]
     if providers:
         lines += ["", "<b>По биржам:</b>"]
         for name, info in providers.items():
@@ -1243,10 +1255,36 @@ def build_universe_dashboard_text():
     return "\n".join(lines)
 
 
+def build_near_signal_text():
+    from near_signal_watchlist import get_rows
+    rows = get_rows(limit=12)
+    lines = ['🟡 <b>NEAR-SIGNAL WATCHLIST</b>', '', 'Кандидаты, которым не хватило одного из финальных фильтров. Они пересканируются чаще полного рынка.', '']
+    if not rows:
+        return '\n'.join(lines + ['Сейчас near-signal кандидатов нет.'])
+    for row in rows:
+        lines.append(f"• <b>{html.escape(str(row.get('symbol') or '?'))}</b> — {html.escape(str(row.get('reason') or 'filter'))} | P {float(row.get('probability') or 0):.1f}% | Q {float(row.get('quality') or 0):.1f} | EV {float(row.get('ev') or 0):.2f}")
+    return '\n'.join(lines)
+
+
+def build_shadow_signals_text():
+    from shadow_signals import summary
+    st = summary(); counts = st.get('counts') or {}
+    return (
+        '👻 <b>SHADOW SIGNALS</b>\n\n'
+        'Не отправляются как сделки и не влияют на Paper PnL. Нужны, чтобы понять, какие фильтры отсекают потенциально прибыльные идеи.\n\n'
+        f"Ждут вход: <b>{int(counts.get('pending_entry') or 0)}</b>\n"
+        f"Вход подтверждён: <b>{int(counts.get('filled') or 0)}</b>\n"
+        f"Не состоялись: <b>{int(counts.get('expired') or 0)}</b>\n"
+        f"Наблюдение завершено: <b>{int(counts.get('observed') or 0)}</b>\n\n"
+        f"24h выборка: <b>{int(st.get('outcomes24h') or 0)}</b> · WR <b>{float(st.get('winRate24h') or 0):.1f}%</b> · Avg <b>{float(st.get('avgReturn24h') or 0):+.2f}%</b>"
+    )
+
+
 def scanner_intelligence_keyboard():
     return {"inline_keyboard": [
         [{"text": "🔍 Новый скан", "callback_data": "trade_scan"}],
         [{"text": "🌍 Universe", "callback_data": "universe_dashboard"}],
+        [{"text": "🟡 Near Signals", "callback_data": "near_signals"}, {"text": "👻 Shadow", "callback_data": "shadow_signals"}],
         [{"text": "📊 Рынок", "callback_data": "menu_analytics"}],
         _home_row(),
     ]}
@@ -2496,6 +2534,14 @@ def process_update(update):
 
         if callback_data == "universe_dashboard":
             send_message(chat_id, build_universe_dashboard_text(), reply_markup=universe_dashboard_keyboard())
+            return
+
+        if callback_data == "near_signals":
+            send_message(chat_id, build_near_signal_text(), reply_markup=scanner_intelligence_keyboard())
+            return
+
+        if callback_data == "shadow_signals":
+            send_message(chat_id, build_shadow_signals_text(), reply_markup=scanner_intelligence_keyboard())
             return
 
         if callback_data == "exchange_status":
