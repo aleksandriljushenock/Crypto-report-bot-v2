@@ -176,6 +176,24 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     # Robustness penalty for concentration/unknowns and hard blocks.
     hard=[h for h in hits if h['hard_block']]
     quality=_clamp(0.58*calibrated+0.22*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.20*_clamp(50+ev*8))
+
+    # v18 adaptive champion: blend only after the normal deterministic model has
+    # produced a complete feature vector. This preserves the existing strategy
+    # as the majority vote and makes the adaptive layer safe to disable instantly.
+    adaptive={'available':False}
+    try:
+        from adaptive_model_runtime import predict as adaptive_predict
+        adaptive=adaptive_predict(signal, quality, calibrated, ev)
+        if adaptive.get('available'):
+            adaptive_weight=max(0.0,min(0.45,_env_float('ADAPTIVE_MODEL_BLEND_WEIGHT',0.20)))
+            adaptive_prob=_clamp(adaptive.get('probability'),2,92)
+            calibrated=(1.0-adaptive_weight)*calibrated+adaptive_weight*adaptive_prob
+            pwin=calibrated/100.0
+            ev=pwin*win_pct-(1-pwin)*loss_pct
+            quality=_clamp(0.58*calibrated+0.22*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.20*_clamp(50+ev*8))
+    except Exception:
+        adaptive={'available':False}
+
     min_quality=float(os.getenv('HEDGE_MIN_QUALITY','70'))
     min_ev=float(os.getenv('HEDGE_MIN_EV_PCT','0.20'))
     passed=(not hard) and quality>=min_quality and ev>=min_ev
@@ -192,4 +210,7 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
       'positiveProfileHits':positive_hits,
       'suggestedPositionSizeUsd':round(suggested_size,2),
       'recencyEnabled':_env_bool('PROFILE_RECENCY_ENABLED',True),
+      'adaptiveModelAvailable':bool(adaptive.get('available')),
+      'adaptiveModelVersion':adaptive.get('version'),
+      'adaptiveModelProbability':adaptive.get('probability'),
     }

@@ -73,6 +73,8 @@ from strategy_settings import (
     save_setting as save_strategy_setting,
     settings_by_category,
 )
+from ai_optimizer import run_optimizer, get_latest_recommendations, apply_recommendation, reject_recommendation
+from adaptive_model_manager import train_candidate, latest_models
 from trade_signal_store import (
     get_monitor_settings,
     get_recent_signals,
@@ -661,11 +663,90 @@ def ai_keyboard():
                 {"text": "🟢 Chronos ON", "callback_data": "chronos_on"},
                 {"text": "⚪ Chronos OFF", "callback_data": "chronos_off"},
             ],
+            [{"text": "🧠 AI Optimizer", "callback_data": "ai_optimizer"}],
             [{"text": "🐋 Smart Money", "callback_data": "smart_money"}],
             _home_row(),
         ]
     }
 
+
+
+def _fmt_metric(v, digits=2):
+    try:
+        return f"{float(v):.{digits}f}"
+    except Exception:
+        return "—"
+
+
+def build_ai_optimizer_text():
+    recs = get_latest_recommendations(8)
+    models = latest_models(3)
+    lines = ["🧠 <b>AI OPTIMIZER + ADAPTIVE MODELS</b>", ""]
+    try:
+        from paper_trading import get_recent_trades
+        closed = len(get_recent_trades(1000))
+    except Exception:
+        closed = 0
+    lines.append(f"Закрытых Paper-сделок: <b>{closed}</b>")
+    lines.append(f"Optimizer: <b>{'готов к анализу' if closed >= int(float(os.getenv('AI_OPTIMIZER_MIN_TRADES','20'))) else 'накапливает данные'}</b>")
+    lines.append(f"Adaptive model: <b>{'готов к обучению' if closed >= int(float(os.getenv('ADAPTIVE_MODEL_MIN_TRADES','40'))) else 'накапливает данные'}</b>")
+    lines.append("")
+    if models:
+        champion = next((m for m in models if m.get('status') == 'champion'), None)
+        if champion:
+            met = champion.get('metrics') or {}
+            lines += [
+                f"🏆 Champion: <code>{html.escape(str(champion.get('version')))}</code>",
+                f"Validation: <b>{champion.get('samples_validation') or 0}</b> · LogLoss: <b>{_fmt_metric(met.get('log_loss'),3)}</b>",
+                "",
+            ]
+        else:
+            lines += ["🏆 Adaptive Champion: <b>ещё не выбран</b>", ""]
+    else:
+        lines += ["🏆 Adaptive Champion: <b>ещё не обучался</b>", ""]
+    lines.append(f"Рекомендаций на подтверждение: <b>{len(recs)}</b>")
+    if recs:
+        for i, rec in enumerate(recs[:5], 1):
+            metrics = rec.get('metrics') or {}
+            key = rec.get('setting_key') or rec.get('symbol') or rec.get('kind')
+            proposed = rec.get('proposed_value')
+            line = f"{i}. <b>{html.escape(str(key))}</b>"
+            if proposed is not None:
+                line += f" → <code>{html.escape(str(proposed))}</code>"
+            lines.append(line)
+            reason = str(rec.get('reason') or '')
+            if reason:
+                lines.append(f"   {html.escape(reason[:180])}")
+            if metrics.get('estimated_pnl_delta') is not None:
+                lines.append(f"   ΔPnL ≈ <b>{_fmt_metric(metrics.get('estimated_pnl_delta'))}$</b> · сохранено {metrics.get('retention_pct','—')}% сделок")
+    else:
+        lines.append("Новых рекомендаций пока нет. Это нормально: система не меняет стратегию без достаточной статистики.")
+    lines += ["", "Автоприменение выключено: изменения стратегии подтверждаются вручную."]
+    return "\n".join(lines)
+
+
+def ai_optimizer_keyboard():
+    rows = [
+        [
+            {"text": "🔎 Анализ сейчас", "callback_data": "optimizer_run"},
+            {"text": "🧬 Обучить модель", "callback_data": "adaptive_train"},
+        ]
+    ]
+    for rec in get_latest_recommendations(5):
+        rid = str(rec.get('id') or '')
+        if not rid:
+            continue
+        key = str(rec.get('setting_key') or rec.get('symbol') or 'рекомендация')
+        if rec.get('kind') == 'setting':
+            rows.append([
+                {"text": f"✅ {key[:18]}", "callback_data": f"opt_apply:{rid}"},
+                {"text": "✖️", "callback_data": f"opt_reject:{rid}"},
+            ])
+        else:
+            rows.append([{"text": f"✖️ Скрыть {key[:20]}", "callback_data": f"opt_reject:{rid}"}])
+    rows.append([{"text": "⬅️ AI Центр", "callback_data": "menu_ai"}])
+    rows.append(_home_row())
+    return {"inline_keyboard": rows}
 
 def performance_keyboard():
     """Most-used trading results in one compact place."""
@@ -753,6 +834,7 @@ def strategy_settings_keyboard():
             ],
             [{"text": "⚙️ Сканирование", "callback_data": "cfg_cat:runtime"}],
             [{"text": "🧪 Paper Trading", "callback_data": "cfg_cat:paper"}],
+            [{"text": "🧠 AI Optimizer", "callback_data": "cfg_cat:optimizer"}],
             [{"text": "🔄 Загрузить из Supabase", "callback_data": "cfg_reload"}],
             _back_row("menu_system"),
         ]
@@ -2488,6 +2570,45 @@ def process_update(update):
             else:
                 text = "❌ Не удалось сбросить paper-счёт. Проверь Render logs."
             send_message(chat_id, text, reply_markup=paper_keyboard())
+            return
+
+        if callback_data == "ai_optimizer":
+            send_message(chat_id, build_ai_optimizer_text(), reply_markup=ai_optimizer_keyboard())
+            return
+
+        if callback_data == "optimizer_run":
+            result = run_optimizer(trigger=f"telegram:{chat_id}")
+            send_message(
+                chat_id,
+                f"✅ <b>AI Optimizer завершён</b>\nСделок: <b>{result.get('samples',0)}</b>\nРекомендаций: <b>{result.get('recommendations_count',0)}</b>",
+                reply_markup=ai_optimizer_keyboard(),
+            )
+            return
+
+        if callback_data == "adaptive_train":
+            result = train_candidate(trigger=f"telegram:{chat_id}")
+            met = result.get('metrics') or {}
+            text = (
+                "🧬 <b>Adaptive Model</b>\n\n"
+                f"Статус: <b>{html.escape(str(result.get('status')))}</b>\n"
+                f"Версия: <code>{html.escape(str(result.get('version') or '—'))}</code>\n"
+                f"Train: <b>{result.get('samples_train',0)}</b> · Validation: <b>{result.get('samples_validation',0)}</b>\n"
+                f"LogLoss: <b>{_fmt_metric(met.get('log_loss'),3)}</b> · baseline: <b>{_fmt_metric(met.get('baseline_log_loss'),3)}</b>"
+            )
+            send_message(chat_id, text, reply_markup=ai_optimizer_keyboard())
+            return
+
+        if callback_data.startswith("opt_apply:"):
+            rid = callback_data.split(":",1)[1]
+            result = apply_recommendation(rid, updated_by=f"telegram:{chat_id}")
+            text = "✅ Рекомендация применена." if result.get('status') == 'applied' else f"⚠️ {html.escape(str(result.get('status')))}"
+            send_message(chat_id, text, reply_markup=ai_optimizer_keyboard())
+            return
+
+        if callback_data.startswith("opt_reject:"):
+            rid = callback_data.split(":",1)[1]
+            reject_recommendation(rid, updated_by=f"telegram:{chat_id}")
+            send_message(chat_id, "✖️ Рекомендация отклонена.", reply_markup=ai_optimizer_keyboard())
             return
 
         if callback_data == "chronos_on":

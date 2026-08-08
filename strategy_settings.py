@@ -70,6 +70,14 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec("MULTI_EXCHANGE_COVERAGE_BONUS", "float", 0.08, "runtime", "Бонус покрытия бирж", "Небольшой бонус к рангу монеты за присутствие на нескольких биржах.", 0, 1),
     SettingSpec("TRADE_TOP_LIQUID_SYMBOLS", "int", 30, "runtime", "Монет в скане", "Количество наиболее ликвидных монет для анализа.", 1, 500),
     SettingSpec("HEDGE_CANDIDATE_POOL", "int", 8, "runtime", "Hedge-кандидатов", "Количество кандидатов для тяжёлого Hedge-этапа.", 1, 100),
+    SettingSpec("AI_OPTIMIZER_ENABLED", "bool", True, "optimizer", "AI Optimizer", "Ежедневно анализировать Paper Trading и формировать рекомендации."),
+    SettingSpec("AI_OPTIMIZER_INTERVAL_MINUTES", "int", 1440, "optimizer", "Интервал Optimizer, мин", "Как часто выполнять автоматический анализ стратегии.", 60, 10080),
+    SettingSpec("AI_OPTIMIZER_MIN_TRADES", "int", 20, "optimizer", "Мин. сделок Optimizer", "Минимум закрытых Paper-сделок для рекомендаций по фильтрам.", 10, 1000),
+    SettingSpec("AI_OPTIMIZER_MIN_RETENTION", "float", 0.70, "optimizer", "Мин. сохранение сделок", "Минимальная доля сделок, которую должен сохранять предложенный более строгий фильтр.", 0.30, 1.0),
+    SettingSpec("ADAPTIVE_MODEL_ENABLED", "bool", True, "optimizer", "Adaptive Model", "Использовать подтвержденную Paper-модель как небольшой дополнительный голос."),
+    SettingSpec("ADAPTIVE_MODEL_MIN_TRADES", "int", 40, "optimizer", "Мин. сделок модели", "Минимальная выборка для обучения новой adaptive-модели.", 20, 5000),
+    SettingSpec("ADAPTIVE_MODEL_MIN_VALIDATION", "int", 12, "optimizer", "Мин. validation", "Минимум сделок в хронологической проверочной выборке.", 8, 1000),
+    SettingSpec("ADAPTIVE_MODEL_BLEND_WEIGHT", "float", 0.20, "optimizer", "Вес Adaptive Model", "Максимальная доля adaptive probability в итоговой вероятности.", 0.0, 0.45),
 )
 
 SPEC_BY_KEY: Dict[str, SettingSpec] = {spec.key: spec for spec in SPECS}
@@ -80,6 +88,7 @@ CATEGORY_TITLES = {
     "recency": "🕒 Свежесть истории",
     "runtime": "⚙️ Сканирование",
     "paper": "🧪 Paper Trading",
+    "optimizer": "🧠 AI Optimizer",
 }
 
 

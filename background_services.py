@@ -17,6 +17,8 @@ from smart_money_engine import scan_smart_money
 from self_learning_engine import retrain
 from ai_intelligence import run_ai_intelligence, build_signal_ai_block
 from ai_score_engine import claim_ai_alert
+from ai_optimizer import run_optimizer
+from adaptive_model_manager import train_candidate
 
 
 from core.scheduler import PeriodicWorker
@@ -80,6 +82,7 @@ class AutomationSupervisor:
         learning_minutes = self._minutes('SELF_LEARNING_INTERVAL_MINUTES', 360)
         ai_minutes = self._minutes('AI_INTELLIGENCE_INTERVAL_MINUTES', 20)
         checkpoint_minutes = self._minutes('LEARNING_CHECKPOINT_INTERVAL_MINUTES', 10)
+        optimizer_minutes = self._minutes('AI_OPTIMIZER_INTERVAL_MINUTES', 1440)
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
@@ -140,6 +143,11 @@ class AutomationSupervisor:
                 'learning-checkpoint', checkpoint_minutes * 60,
                 self._guarded('learning-checkpoint', self._run_learning_checkpoint), self.logger,
                 enabled=self._bool_env('LEARNING_CHECKPOINT_ENABLED', True), first_delay=240,
+            ),
+            PeriodicWorker(
+                'ai-optimizer-adaptive-models', optimizer_minutes * 60,
+                self._guarded('ai-optimizer-adaptive-models', self._run_optimizer_models), self.logger,
+                enabled=self._bool_env('AI_OPTIMIZER_ENABLED', True), first_delay=600,
             ),
         ]
 
@@ -275,6 +283,15 @@ class AutomationSupervisor:
         self.logger(f"Learning checkpoint: status={result.get('status')}, bytes={result.get('size_bytes', 0)}")
         return result
 
+    def _run_optimizer_models(self):
+        optimizer = run_optimizer(trigger='scheduled')
+        model = train_candidate(trigger='scheduled')
+        self.logger(
+            f"AI Optimizer: samples={optimizer.get('samples')}, recommendations={optimizer.get('recommendations_count')}; "
+            f"adaptive_model={model.get('status')} version={model.get('version')}"
+        )
+        return {'optimizer': optimizer, 'adaptive_model': model}
+
 
 def build_automation_status(supervisor):
     status = supervisor.status() if supervisor else {'runtime': {}, 'stored': {}}
@@ -291,6 +308,7 @@ def build_automation_status(supervisor):
         'smart-money-engine': 'Smart Money Engine',
         'ai-intelligence-engine': 'AI Intelligence v13',
         'self-learning-engine': 'Self Learning Engine',
+        'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
     }
     for name, runtime in status['runtime'].items():
         saved = status['stored'].get(name, {})
