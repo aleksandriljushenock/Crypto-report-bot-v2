@@ -106,10 +106,14 @@ class TradeMonitor:
             message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
             self.sender(chat_id, message)
             try:
-                from paper_trading import open_from_signal, format_open_message
+                from paper_trading import open_from_signal, format_open_message, format_pending_message, format_missed_message
                 paper_result = open_from_signal(signal, source="automatic_monitor")
                 if paper_result.get("status") == "opened":
                     self.sender(chat_id, format_open_message(paper_result))
+                elif paper_result.get("status") == "pending_entry":
+                    self.sender(chat_id, format_pending_message(paper_result))
+                elif paper_result.get("status") == "missed_entry":
+                    self.sender(chat_id, format_missed_message(paper_result.get("position") or {}, "MISSED_BREAKOUT"))
                 elif paper_result.get("status") not in {"disabled", "duplicate", "symbol-already-open"}:
                     self.logger(f"Paper trading skipped: {paper_result.get('status')} symbol={signal.get('symbol')}")
             except Exception as exc:

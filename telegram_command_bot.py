@@ -44,6 +44,8 @@ from trade_outcome_tracker import get_trade_performance, persist_trade_signal
 from paper_trading import (
     ensure_account as ensure_paper_account,
     format_open_message as format_paper_open_message,
+    format_pending_message as format_paper_pending_message,
+    format_missed_message as format_paper_missed_message,
     get_open_positions as get_paper_positions,
     get_recent_trades as get_paper_trades,
     open_from_signal as open_paper_from_signal,
@@ -1827,6 +1829,10 @@ def run_trade_scan_task(chat_id):
                 paper_result = open_paper_from_signal(signal, source="manual_trade_scan")
                 if paper_result.get("status") == "opened":
                     send_message(chat_id, format_paper_open_message(paper_result))
+                elif paper_result.get("status") == "pending_entry":
+                    send_message(chat_id, format_paper_pending_message(paper_result))
+                elif paper_result.get("status") == "missed_entry":
+                    send_message(chat_id, format_paper_missed_message(paper_result.get("position") or {}, "MISSED_BREAKOUT"))
                 elif paper_result.get("status") not in {"disabled", "duplicate", "symbol-already-open"}:
                     log(f"Paper trading skipped: {paper_result.get('status')} symbol={signal.get('symbol')}")
 
