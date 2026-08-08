@@ -917,31 +917,183 @@ def _chronos_state_text():
     return f"{'🟢' if enabled else '⚪'} {'включён' if enabled else 'выключен'} ({mode})"
 
 
+def _runtime_memory_mb():
+    """Return current RSS and process peak RSS without adding a psutil dependency."""
+    current = None
+    peak = None
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8", errors="ignore")
+        for line in status.splitlines():
+            if line.startswith("VmRSS:"):
+                current = float(line.split()[1]) / 1024.0
+            elif line.startswith("VmHWM:"):
+                peak = float(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    if peak is None:
+        try:
+            import resource
+            value = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            # Linux reports KiB; macOS reports bytes. Railway/Linux is the target.
+            peak = value / 1024.0
+        except Exception:
+            pass
+    return current, peak
+
+
+def _format_elapsed(started_at):
+    if not started_at:
+        return None
+    try:
+        start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        now = datetime.now(start.tzinfo) if start.tzinfo else datetime.now()
+        seconds = max(0, int((now - start).total_seconds()))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}ч {minutes:02d}м {seconds:02d}с"
+        return f"{minutes:02d}м {seconds:02d}с"
+    except Exception:
+        return None
+
+
+def _scan_owner_label(owner):
+    value = str(owner or "").strip().lower()
+    mapping = {
+        "automatic_monitor": "фоновый монитор",
+        "monitor": "фоновый монитор",
+        "manual_trade_scan": "ручной скан",
+        "manual": "ручной скан",
+        "near_signal_watch": "Near-Signal re-scan",
+        "near_watch": "Near-Signal re-scan",
+        "shadow": "Shadow update",
+    }
+    return mapping.get(value, value.replace("_", " ") if value else "неизвестно")
+
+
+def _scan_phase_label(phase):
+    value = str(phase or "idle").strip().lower()
+    mapping = {
+        "idle": "ожидание",
+        "universe": "🌍 сбор Universe",
+        "market_data": "⚡ Fast/market data",
+        "analysis": "🔬 Deep Scan",
+        "ranking": "🧠 ranking / AI",
+        "hedge": "🧠 Hedge / AI",
+        "finalizing": "✅ финализация результатов",
+        "chronos": "🧠 Chronos",
+        "near_signal": "🟡 Near Signals",
+        "shadow": "👻 Shadow update",
+    }
+    return mapping.get(value, value.replace("_", " "))
+
+
 def build_dashboard_text():
     monitor_settings = get_monitor_settings()
     monitor_enabled = bool(monitor_settings.get("enabled"))
     monitor_alive = bool(trade_monitor and trade_monitor.is_alive())
-    scan_alive = bool(trade_scan_thread and trade_scan_thread.is_alive())
+    manual_thread_alive = bool(trade_scan_thread and trade_scan_thread.is_alive())
     report_alive = bool(is_report_running())
     listing_alive = bool(new_scan_thread and new_scan_thread.is_alive())
-    services = []
-    if scan_alive:
-        services.append("торговый скан")
+
+    try:
+        from trade_engine import is_trade_scan_running, get_trade_scan_runtime_state
+        scan_state = get_trade_scan_runtime_state() or {}
+        engine_busy = bool(is_trade_scan_running() or scan_state.get("running"))
+    except Exception:
+        scan_state = {}
+        engine_busy = manual_thread_alive
+
+    rss_mb, peak_mb = _runtime_memory_mb()
+    fast_pool = int(os.getenv("FAST_SCAN_POOL_SIZE", "250"))
+    deep_limit = int(os.getenv("TRADE_TOP_LIQUID_SYMBOLS", "80"))
+    batch_size = int(os.getenv("TRADE_SCAN_BATCH_SIZE", "8"))
+    workers = int(os.getenv("TRADE_SCAN_MAX_WORKERS", "2"))
+    hedge_pool = int(os.getenv("HEDGE_CANDIDATE_POOL", "28"))
+
+    lines = [
+        "📟 <b>ПАНЕЛЬ СОСТОЯНИЯ</b>",
+        "",
+        f"📡 Монитор: <b>{'🟢 работает' if monitor_enabled and monitor_alive else ('🟡 включён, процесс не активен' if monitor_enabled else '⚪ остановлен')}</b>",
+    ]
+
+    if engine_busy:
+        owner = _scan_owner_label(scan_state.get("owner"))
+        phase = _scan_phase_label(scan_state.get("phase"))
+        processed = int(scan_state.get("processed") or 0)
+        total = int(scan_state.get("total") or 0)
+        elapsed = _format_elapsed(scan_state.get("startedAt"))
+        lines.extend([
+            "",
+            "🔍 Сканер: <b>🟡 выполняется</b>",
+            f"├ Источник: <b>{html.escape(owner)}</b>",
+            f"├ Этап: <b>{html.escape(phase)}</b>",
+        ])
+        if total > 0:
+            pct = min(100, max(0, int(processed * 100 / total)))
+            lines.append(f"├ Прогресс: <b>{processed}/{total}</b> ({pct}%)")
+        else:
+            lines.append("├ Прогресс: <b>подготовка...</b>")
+        if elapsed:
+            lines.append(f"└ В работе: <b>{elapsed}</b>")
+    else:
+        lines.extend([
+            "",
+            "🔍 Сканер: <b>🟢 готов</b>",
+            "└ Активного ручного или фонового прохода нет",
+        ])
+        try:
+            from scanner_intelligence import get_last_scan_intelligence
+            last = get_last_scan_intelligence() or {}
+            stages = last.get("stages") or {}
+            last_at = last.get("runTimeUtc") or last.get("savedAt")
+            if last_at:
+                dt = datetime.fromisoformat(str(last_at).replace("Z", "+00:00"))
+                lines.append(f"   Последний проход: <b>{dt.astimezone().strftime('%H:%M:%S')}</b>")
+            if stages:
+                lines.append(
+                    f"   Проверено: <b>{int(stages.get('analyzed') or 0)}</b> · "
+                    f"сигналов: <b>{int(stages.get('signals') or 0)}</b>"
+                )
+        except Exception:
+            pass
+
+    lines.extend([
+        "",
+        f"⚡ Ручной запуск: <b>{'занят общим сканером' if engine_busy else ('выполняется' if manual_thread_alive else 'доступен')}</b>",
+        f"🧠 Chronos: <b>{_chronos_state_text()}</b>",
+    ])
+
+    extra_tasks = []
     if report_alive:
-        services.append("market report")
+        extra_tasks.append("market report")
     if listing_alive:
-        services.append("база листингов")
-    active = ", ".join(services) if services else "нет тяжёлых задач"
-    return (
-        "📟 <b>ПАНЕЛЬ СОСТОЯНИЯ</b>\n\n"
-        f"📡 Монитор: <b>{'включён' if monitor_enabled else 'остановлен'}</b> "
-        f"({'процесс активен' if monitor_alive else 'процесс не активен'})\n"
-        f"⚡ Ручной скан: <b>{'выполняется' if scan_alive else 'готов'}</b>\n"
-        f"🧠 Chronos: <b>{_chronos_state_text()}</b>\n"
-        f"⚙️ Активность: <b>{active}</b>\n"
-        f"🕒 Обновлено: <b>{datetime.now().strftime('%H:%M:%S')}</b>\n\n"
-        "Быстрые действия доступны кнопками ниже."
-    )
+        extra_tasks.append("база листингов")
+    if extra_tasks:
+        lines.append(f"⚙️ Другие задачи: <b>{html.escape(', '.join(extra_tasks))}</b>")
+
+    lines.extend([
+        "",
+        "🔎 <b>Параметры сканера</b>",
+        f"Fast pool: <b>{fast_pool}</b> · Deep: <b>{deep_limit}</b>",
+        f"Batch: <b>{batch_size}</b> · Workers: <b>{workers}</b> · Hedge: <b>{hedge_pool}</b>",
+    ])
+    if rss_mb is not None or peak_mb is not None:
+        current_text = f"{rss_mb:.0f} MB" if rss_mb is not None else "N/A"
+        peak_text = f"{peak_mb:.0f} MB" if peak_mb is not None else "N/A"
+        lines.extend([
+            "",
+            "🧠 <b>Процесс бота</b>",
+            f"RAM: <b>{current_text}</b> · Peak: <b>{peak_text}</b>",
+        ])
+
+    lines.extend([
+        "",
+        f"🕒 Обновлено: <b>{datetime.now().strftime('%H:%M:%S')}</b>",
+        "",
+        "Нажми «🔄 Обновить панель» для актуального состояния.",
+    ])
+    return "\n".join(lines)
 
 
 def dashboard_keyboard():

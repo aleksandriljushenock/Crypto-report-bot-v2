@@ -571,12 +571,14 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
         )
         ai_diag = {"input": len(signals), "quality": len(signals), "ev": len(signals), "passed": len(signals), "rejected": []}
         if apply_ai:
+            _set_scan_state(phase='hedge', processed=0, total=len(signals))
             try:
                 from ai_intelligence import rank_signals, get_last_rank_diagnostics
                 signals = rank_signals(signals)[:max_results]
                 ai_diag = get_last_rank_diagnostics()
             except Exception:
                 pass
+        _set_scan_state(phase='finalizing', processed=len(signals), total=max(len(signals), 1))
         stages = {
             "analyzed": int(filter_diag.get("analyzed") or len(rows)),
             "status": int(filter_diag.get("status") or 0),
