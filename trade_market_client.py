@@ -8,6 +8,11 @@ from bybit_futures_client import BybitFuturesClient
 from okx_futures_client import OkxFuturesClient
 from bitget_futures_client import BitgetFuturesClient
 from gate_futures_client import GateFuturesClient
+from mexc_futures_client import MexcFuturesClient
+from bingx_futures_client import BingxFuturesClient
+from kucoin_futures_client import KucoinFuturesClient
+from hyperliquid_futures_client import HyperliquidFuturesClient
+from htx_futures_client import HtxFuturesClient
 from market_errors import UnsupportedSymbolError
 from config import BASE_URL, FUTURES_DATA_URL
 
@@ -22,9 +27,9 @@ _PROVIDER_LOCK = threading.Lock()
 
 
 def _provider_order():
-    raw = os.getenv("TRADE_MARKET_PROVIDERS", "binance,bybit,okx,bitget,gate")
+    raw = os.getenv("TRADE_MARKET_PROVIDERS", "binance,bybit,okx,bitget,gate,mexc,bingx,kucoin,hyperliquid,htx")
     order = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    return order or ["binance", "bybit", "okx", "bitget", "gate"]
+    return order or ["binance", "bybit", "okx", "bitget", "gate", "mexc", "bingx", "kucoin", "hyperliquid", "htx"]
 
 
 def _cooldown_seconds():
@@ -100,6 +105,16 @@ def _build_provider(name, timeout):
         return BitgetFuturesClient(base_url=os.getenv("BITGET_API_BASE", "https://api.bitget.com"), timeout=timeout)
     if name == "gate":
         return GateFuturesClient(base_url=os.getenv("GATE_API_BASE", "https://api.gateio.ws/api/v4"), timeout=timeout)
+    if name == "mexc":
+        return MexcFuturesClient(base_url=os.getenv("MEXC_FUTURES_API_BASE", "https://contract.mexc.com"), timeout=timeout)
+    if name == "bingx":
+        return BingxFuturesClient(base_url=os.getenv("BINGX_API_BASE", "https://open-api.bingx.com"), timeout=timeout)
+    if name == "kucoin":
+        return KucoinFuturesClient(base_url=os.getenv("KUCOIN_FUTURES_API_BASE", "https://api-futures.kucoin.com"), timeout=timeout)
+    if name == "hyperliquid":
+        return HyperliquidFuturesClient(base_url=os.getenv("HYPERLIQUID_API_BASE", "https://api.hyperliquid.xyz"), timeout=timeout)
+    if name == "htx":
+        return HtxFuturesClient(base_url=os.getenv("HTX_FUTURES_API_BASE", "https://api.hbdm.com"), timeout=timeout)
     raise ValueError(f"Unsupported trade market provider: {name}")
 
 
@@ -350,5 +365,5 @@ def probe_provider_health(symbol="BTCUSDT", timeout=5):
 def create_trade_market_client():
     timeout = int(os.getenv("EXCHANGE_HTTP_TIMEOUT", "15"))
     legacy = os.getenv("TRADE_MARKET_PROVIDER", "").strip().lower()
-    providers = [legacy] if legacy in {"binance", "bybit", "okx", "bitget", "gate"} else _provider_order()
+    providers = [legacy] if legacy in {"binance", "bybit", "okx", "bitget", "gate", "mexc", "bingx", "kucoin", "hyperliquid", "htx"} else _provider_order()
     return FallbackTradeMarketClient(providers=providers, timeout=timeout)
