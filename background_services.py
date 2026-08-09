@@ -1,4 +1,3 @@
-import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -23,6 +22,8 @@ from adaptive_model_manager import train_candidate
 
 from core.scheduler import PeriodicWorker
 from core.runtime_state import finish as runtime_finish, start as runtime_start
+from core.runtime_config import boolean, integer, number
+from core.events import emit
 
 
 _HEAVY_TASK_LOCK = threading.Lock()
@@ -38,17 +39,11 @@ class AutomationSupervisor:
 
     @staticmethod
     def _bool_env(name, default=True):
-        value = os.getenv(name)
-        if value is None:
-            return default
-        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+        return boolean(name, default)
 
     @staticmethod
     def _minutes(name, default):
-        try:
-            return max(1, int(os.getenv(name, str(default))))
-        except ValueError:
-            return default
+        return integer(name, default, minimum=1)
 
     def _guarded(self, name, callback):
         def runner():
@@ -64,9 +59,11 @@ class AutomationSupervisor:
                 self.logger(f"{name}: skipped because another heavy task is running")
                 return {'status': 'skipped-busy'}
             runtime_start('heavy_task', name=name)
+            emit('BACKGROUND_TASK_STARTED', name=name)
             try:
                 return callback()
             finally:
+                emit('BACKGROUND_TASK_FINISHED', name=name)
                 runtime_finish('heavy_task')
                 cleanup()
                 _HEAVY_TASK_LOCK.release()
@@ -171,9 +168,9 @@ class AutomationSupervisor:
         return {'runtime': runtime, 'stored': stored}
 
     def _run_discovery(self):
-        limit = int(os.getenv('DISCOVERY_ANALYSIS_LIMIT', '20'))
+        limit = integer('DISCOVERY_ANALYSIS_LIMIT', 20, minimum=1)
         result = run_early_discovery(analysis_limit=max(1, limit))
-        min_score = float(os.getenv('DISCOVERY_NOTIFY_MIN_SCORE', '75'))
+        min_score = number('DISCOVERY_NOTIFY_MIN_SCORE', 75.0)
         sent = 0
         for item in result.get('interesting', []):
             alpha = item.get('alphaV3', {})
@@ -193,7 +190,7 @@ class AutomationSupervisor:
         return {'found': result.get('discoveredNow', 0), 'analyzed': result.get('analyzedNow', 0), 'sent': sent}
 
     def _run_listing_refresh(self):
-        limit = int(os.getenv('LISTING_REFRESH_ANALYSIS_LIMIT', '25'))
+        limit = integer('LISTING_REFRESH_ANALYSIS_LIMIT', 25, minimum=1)
         result = run_incremental_listing_scan(deep_limit=max(1, limit))
         self.logger(f"Listing refresh: saved={result.get('binanceSymbolsSaved')}, analyzed={result.get('deepAnalyzedThisRun')}")
         return {
@@ -223,7 +220,7 @@ class AutomationSupervisor:
         return result
 
     def _run_capital_flows(self):
-        items = scan_capital_flows(int(os.getenv('CAPITAL_FLOW_TOP_SYMBOLS', '25')))
+        items = scan_capital_flows(integer('CAPITAL_FLOW_TOP_SYMBOLS', 25, minimum=1))
         self.logger(f"Capital flows: analyzed={len(items)}")
         return {'analyzed': len(items), 'top': items[:3]}
 
@@ -233,7 +230,7 @@ class AutomationSupervisor:
         # пользователь открывает новости только через отдельную кнопку /news.
         items = scan_news()
         notify_enabled = self._bool_env('NEWS_AUTO_NOTIFICATIONS', False)
-        threshold = float(os.getenv('NEWS_NOTIFY_MIN_IMPACT', '75'))
+        threshold = number('NEWS_NOTIFY_MIN_IMPACT', 75.0)
         sent = 0
         if notify_enabled:
             for item in items:
@@ -258,13 +255,13 @@ class AutomationSupervisor:
         return {'count': len(items), 'top': items[:3]}
 
     def _run_ai_intelligence(self):
-        result = run_ai_intelligence(max_results=int(os.getenv('AI_INTELLIGENCE_MAX_RESULTS', '15')))
-        threshold = float(os.getenv('AI_ALERT_MIN_SCORE', '88'))
+        result = run_ai_intelligence(max_results=integer('AI_INTELLIGENCE_MAX_RESULTS', 15, minimum=1, maximum=100))
+        threshold = number('AI_ALERT_MIN_SCORE', 88.0)
         sent = 0
         for signal in result.get('signals', []):
             if float(signal.get('aiScore') or 0) < threshold or not self.chat_id:
                 continue
-            if claim_ai_alert(signal, int(os.getenv('AI_ALERT_COOLDOWN_HOURS', '12'))):
+            if claim_ai_alert(signal, integer('AI_ALERT_COOLDOWN_HOURS', 12, minimum=1)):
                 text = (
                     f"<b>🔥 AI ALERT v13 — {signal.get('symbol')}</b>\n\n"
                     + build_signal_ai_block(signal)

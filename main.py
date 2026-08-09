@@ -79,42 +79,35 @@ def safe_call(name, func):
         }
 
 
+def _market_call(client, method, *args, **kwargs):
+    """Call a normalized market capability without inventing numeric zero.
+
+    FallbackTradeMarketClient exposes explicit capability status. Legacy clients
+    still use safe_call, keeping app.py/backfills compatible.
+    """
+    capability = getattr(client, "capability", None)
+    if callable(capability):
+        result = capability(method, *args, **kwargs)
+        if result.available:
+            return result.value
+        return {"error": result.error or result.status, "capability": result.status}
+    return safe_call(method, lambda: getattr(client, method)(*args, **kwargs))
+
+
 def collect_symbol_data(client, symbol):
     data = {
         "symbol": symbol,
-        "ticker24h": safe_call("ticker24h", lambda: client.ticker_24h(symbol)),
-        "openInterest": safe_call("openInterest", lambda: client.open_interest(symbol)),
-        "openInterestHistory": safe_call(
-            "openInterestHistory",
-            lambda: client.open_interest_history(symbol, period="1h", limit=24),
-        ),
-        "premiumIndex": safe_call("premiumIndex", lambda: client.premium_index(symbol)),
-        "depth": safe_call("depth", lambda: client.depth(symbol, ORDERBOOK_LIMIT)),
-        "longShortRatio": safe_call(
-            "longShortRatio",
-            lambda: client.global_long_short_ratio(
-                symbol=symbol,
-                period=LONG_SHORT_PERIOD,
-                limit=24,
-            ),
-        ),
-        "takerBuySellVolume": safe_call(
-            "takerBuySellVolume",
-            lambda: client.taker_buy_sell_volume(
-                symbol=symbol,
-                period=TAKER_VOLUME_PERIOD,
-                limit=24,
-            ),
-        ),
+        "ticker24h": _market_call(client, "ticker_24h", symbol),
+        "openInterest": _market_call(client, "open_interest", symbol),
+        "openInterestHistory": _market_call(client, "open_interest_history", symbol, period="1h", limit=24),
+        "premiumIndex": _market_call(client, "premium_index", symbol),
+        "depth": _market_call(client, "depth", symbol, ORDERBOOK_LIMIT),
+        "longShortRatio": _market_call(client, "global_long_short_ratio", symbol=symbol, period=LONG_SHORT_PERIOD, limit=24),
+        "takerBuySellVolume": _market_call(client, "taker_buy_sell_volume", symbol=symbol, period=TAKER_VOLUME_PERIOD, limit=24),
         "klines": {},
     }
-
     for interval, limit in INTERVALS.items():
-        data["klines"][interval] = safe_call(
-            f"klines_{interval}",
-            lambda interval=interval, limit=limit: client.klines(symbol, interval, limit),
-        )
-
+        data["klines"][interval] = _market_call(client, "klines", symbol, interval, limit)
     return data
 
 

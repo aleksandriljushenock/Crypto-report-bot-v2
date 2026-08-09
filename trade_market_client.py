@@ -1,20 +1,11 @@
 import logging
-import os
 import threading
 import time
 
-from binance_client import BinanceFuturesClient
-from bybit_futures_client import BybitFuturesClient
-from okx_futures_client import OkxFuturesClient
-from bitget_futures_client import BitgetFuturesClient
-from gate_futures_client import GateFuturesClient
-from mexc_futures_client import MexcFuturesClient
-from bingx_futures_client import BingxFuturesClient
-from kucoin_futures_client import KucoinFuturesClient
-from hyperliquid_futures_client import HyperliquidFuturesClient
-from htx_futures_client import HtxFuturesClient
+from exchanges.registry import configured_names, create as create_provider, supported_names
+from exchanges.capabilities import CapabilityValue
+from core.runtime_config import integer, number, string
 from market_errors import UnsupportedSymbolError
-from config import BASE_URL, FUTURES_DATA_URL
 
 logger = logging.getLogger("trade_market_client")
 
@@ -27,13 +18,11 @@ _PROVIDER_LOCK = threading.Lock()
 
 
 def _provider_order():
-    raw = os.getenv("TRADE_MARKET_PROVIDERS", "binance,bybit,okx,bitget,gate,mexc,bingx,kucoin,hyperliquid,htx")
-    order = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    return order or ["binance", "bybit", "okx", "bitget", "gate", "mexc", "bingx", "kucoin", "hyperliquid", "htx"]
+    return configured_names()
 
 
 def _cooldown_seconds():
-    return max(60, int(os.getenv("EXCHANGE_PROVIDER_COOLDOWN_SECONDS", "900")))
+    return integer("EXCHANGE_PROVIDER_COOLDOWN_SECONDS", 900, minimum=60, strategy=False)
 
 
 def _mark_failed(provider, exc):
@@ -92,31 +81,7 @@ def _available(provider):
 
 
 def _build_provider(name, timeout):
-    if name == "binance":
-        return BinanceFuturesClient(BASE_URL, FUTURES_DATA_URL, timeout=timeout)
-    if name == "bybit":
-        return BybitFuturesClient(
-            base_url=os.getenv("BYBIT_API_BASE", "https://api.bybit.com"),
-            timeout=timeout,
-        )
-    if name == "okx":
-        return OkxFuturesClient(base_url=os.getenv("OKX_API_BASE", "https://www.okx.com"), timeout=timeout)
-    if name == "bitget":
-        return BitgetFuturesClient(base_url=os.getenv("BITGET_API_BASE", "https://api.bitget.com"), timeout=timeout)
-    if name == "gate":
-        return GateFuturesClient(base_url=os.getenv("GATE_API_BASE", "https://api.gateio.ws/api/v4"), timeout=timeout)
-    if name == "mexc":
-        return MexcFuturesClient(base_url=os.getenv("MEXC_FUTURES_API_BASE", "https://contract.mexc.com"), timeout=timeout)
-    if name == "bingx":
-        return BingxFuturesClient(base_url=os.getenv("BINGX_API_BASE", "https://open-api.bingx.com"), timeout=timeout)
-    if name == "kucoin":
-        return KucoinFuturesClient(base_url=os.getenv("KUCOIN_FUTURES_API_BASE", "https://api-futures.kucoin.com"), timeout=timeout)
-    if name == "hyperliquid":
-        return HyperliquidFuturesClient(base_url=os.getenv("HYPERLIQUID_API_BASE", "https://api.hyperliquid.xyz"), timeout=timeout)
-    if name == "htx":
-        return HtxFuturesClient(base_url=os.getenv("HTX_FUTURES_API_BASE", "https://api.hbdm.com"), timeout=timeout)
-    raise ValueError(f"Unsupported trade market provider: {name}")
-
+    return create_provider(name, timeout)
 
 def _mark_symbol_unsupported(provider, symbol):
     if not symbol:
@@ -204,8 +169,8 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
             provider_stats[name] = {"ok": False, "tradable": 0, "eligible": 0, "error": str(exc)}
             logger.warning("Universe provider failed: provider=%s error=%s", name, exc)
 
-    min_venues = max(1, int(os.getenv("MULTI_EXCHANGE_MIN_VENUES", "1")))
-    coverage_bonus = max(0.0, float(os.getenv("MULTI_EXCHANGE_COVERAGE_BONUS", "0.08")))
+    min_venues = integer("MULTI_EXCHANGE_MIN_VENUES", 1, minimum=1, maximum=len(supported_names()))
+    coverage_bonus = number("MULTI_EXCHANGE_COVERAGE_BONUS", 0.08, minimum=0.0, maximum=2.0)
     rows = []
     for item in merged.values():
         item["exchangeCount"] = len(item["exchanges"])
@@ -221,15 +186,15 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
         rows.append(item)
 
     limit = max(1, int(top_limit))
-    wide_limit = max(limit, int(os.getenv("FAST_SCAN_POOL_SIZE", "250")))
+    wide_limit = max(limit, integer("FAST_SCAN_POOL_SIZE", 250, minimum=1, maximum=2000))
     liquidity_rows = sorted(rows, key=lambda x: (x["liquidityRankScore"], x["exchangeCount"]), reverse=True)[:wide_limit]
 
     # Dynamic universe buckets. Defaults target ~80 deep symbols while keeping
     # the same total limit configured by TRADE_TOP_LIQUID_SYMBOLS.
-    liq_n = min(limit, max(1, int(os.getenv("DYNAMIC_UNIVERSE_LIQUID_COUNT", str(max(1, round(limit * 0.58)))))))
-    gain_n = max(0, int(os.getenv("DYNAMIC_UNIVERSE_GAINERS_COUNT", str(max(4, round(limit * 0.14))))))
-    loss_n = max(0, int(os.getenv("DYNAMIC_UNIVERSE_LOSERS_COUNT", str(max(4, round(limit * 0.14))))))
-    cover_n = max(0, int(os.getenv("DYNAMIC_UNIVERSE_COVERAGE_COUNT", str(max(4, round(limit * 0.14))))))
+    liq_n = min(limit, max(1, integer("DYNAMIC_UNIVERSE_LIQUID_COUNT", max(1, round(limit * 0.58)), minimum=1)))
+    gain_n = max(0, integer("DYNAMIC_UNIVERSE_GAINERS_COUNT", max(4, round(limit * 0.14)), minimum=0))
+    loss_n = max(0, integer("DYNAMIC_UNIVERSE_LOSERS_COUNT", max(4, round(limit * 0.14)), minimum=0))
+    cover_n = max(0, integer("DYNAMIC_UNIVERSE_COVERAGE_COUNT", max(4, round(limit * 0.14)), minimum=0))
 
     picked = {}
     def add_bucket(source, count, tag):
@@ -266,7 +231,7 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
             "fastPoolSymbols": len(liquidity_rows),
             "selectedSymbols": len(selected_rows),
             "selectionBuckets": bucket_counts,
-            "activeMarketSymbols": sum(1 for x in liquidity_rows if abs(float(x.get("crossExchangeChangeMedian") or 0)) >= float(os.getenv("ACTIVE_MARKET_CHANGE_PCT", "5"))),
+            "activeMarketSymbols": sum(1 for x in liquidity_rows if abs(float(x.get("crossExchangeChangeMedian") or 0)) >= number("ACTIVE_MARKET_CHANGE_PCT", 5.0, minimum=0.0)),
             "maxAbsChangePct": max([abs(float(x.get("crossExchangeChangeMedian") or 0)) for x in liquidity_rows] or [0.0]),
             "minVenues": min_venues,
             "minQuoteVolumeUsdt": float(min_quote_volume or 0),
@@ -354,6 +319,16 @@ class FallbackTradeMarketClient:
         self.last_errors = errors
         raise RuntimeError(f"No trade market provider succeeded for {method}: {'; '.join(errors)}")
 
+    def capability(self, method, *args, **kwargs):
+        """Return explicit availability instead of coercing missing data to zero."""
+        try:
+            value = self._call(method, *args, **kwargs)
+            return CapabilityValue("supported", value=value, provider=self.last_provider)
+        except RuntimeError as exc:
+            text = str(exc).lower()
+            status = "unsupported" if "unsupported" in text else "unavailable"
+            return CapabilityValue(status, value=None, provider=None, error=str(exc))
+
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
@@ -414,7 +389,7 @@ def probe_provider_health(symbol="BTCUSDT", timeout=5):
     return results
 
 def create_trade_market_client():
-    timeout = int(os.getenv("EXCHANGE_HTTP_TIMEOUT", "15"))
-    legacy = os.getenv("TRADE_MARKET_PROVIDER", "").strip().lower()
-    providers = [legacy] if legacy in {"binance", "bybit", "okx", "bitget", "gate", "mexc", "bingx", "kucoin", "hyperliquid", "htx"} else _provider_order()
+    timeout = integer("EXCHANGE_HTTP_TIMEOUT", 15, minimum=1, maximum=60, strategy=False)
+    legacy = string("TRADE_MARKET_PROVIDER", "", strategy=False).lower()
+    providers = [legacy] if legacy in set(supported_names()) else _provider_order()
     return FallbackTradeMarketClient(providers=providers, timeout=timeout)

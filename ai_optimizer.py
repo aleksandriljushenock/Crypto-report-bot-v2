@@ -8,12 +8,14 @@ stored in Supabase and require explicit Telegram approval by default.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from core.logging_setup import get_logger
+from core.runtime_config import boolean, integer, number
+from core.events import emit
+from repositories.paper_repository import load_valid_closed_positions
 from strategy_settings import current_value, save_setting
 
 log = get_logger("ai_optimizer")
@@ -29,41 +31,22 @@ def _now() -> str:
 
 
 def _float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return float(default)
+    return number(name, default)
 
 
 def _int(name: str, default: int) -> int:
-    try:
-        return int(float(os.getenv(name, str(default))))
-    except Exception:
-        return int(default)
+    return integer(name, default)
 
 
 def _bool(name: str, default: bool = True) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on", "да"}
-
+    return boolean(name, default)
 
 def _rows(limit: int = 1000) -> List[Dict[str, Any]]:
     try:
-        response = (
-            _client().table("paper_positions")
-            .select("id,symbol,net_pnl,margin_usd,quality_score,probability,expected_value_pct,signal_payload,opened_at,closed_at,close_reason,strategy_version")
-            .eq("status", "closed")
-            .order("closed_at", desc=True)
-            .limit(max(1, min(limit, 5000)))
-            .execute()
-        )
-        return response.data or []
+        return load_valid_closed_positions(limit, ascending=False)
     except Exception:
-        log.exception("Optimizer could not load paper positions")
+        log.exception("Optimizer could not load valid filled paper positions")
         return []
-
 
 def _num(value: Any, default: float = 0.0) -> float:
     try:
@@ -216,6 +199,7 @@ def _universe_recommendation() -> Optional[Dict[str, Any]]:
 
 
 def run_optimizer(trigger: str = "scheduled") -> Dict[str, Any]:
+    emit("OPTIMIZER_STARTED", trigger=trigger)
     rows = _rows(_int("AI_OPTIMIZER_MAX_TRADES", 1000))
     min_samples = _int("AI_OPTIMIZER_MIN_TRADES", 20)
     now = _now()

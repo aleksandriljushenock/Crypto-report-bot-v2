@@ -6,15 +6,19 @@ liquidation prices are conservative approximations, not exchange guarantees.
 from __future__ import annotations
 
 import math
-import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from core.logging_setup import get_logger
+from core.runtime_config import boolean, integer, number
+from core.events import emit
+from repositories.paper_repository import repository as paper_repo
 from trade_market_client import create_trade_market_client
 
 log = get_logger("paper_trading")
 ACCOUNT_ID = "main"
+_PAPER_LOCK = threading.RLock()
 
 
 def _now() -> datetime:
@@ -26,25 +30,15 @@ def _iso(dt: Optional[datetime] = None) -> str:
 
 
 def _bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on", "да"}
+    return boolean(name, default)
 
 
 def _float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return float(default)
+    return number(name, default)
 
 
 def _int(name: str, default: int) -> int:
-    try:
-        return int(float(os.getenv(name, str(default))))
-    except (TypeError, ValueError):
-        return int(default)
-
+    return integer(name, default)
 
 def _client():
     from cloud_client import get_supabase_client
@@ -80,9 +74,9 @@ def _side(direction: Any) -> str:
 def ensure_account() -> dict[str, Any]:
     initial = max(1.0, _float("PAPER_INITIAL_BALANCE_USD", 100.0))
     try:
-        response = _client().table("paper_accounts").select("*").eq("id", ACCOUNT_ID).limit(1).execute()
-        if response.data:
-            return response.data[0]
+        existing = paper_repo.account(ACCOUNT_ID)
+        if existing:
+            return existing
         row = {
             "id": ACCOUNT_ID,
             "initial_balance": initial,
@@ -94,8 +88,7 @@ def ensure_account() -> dict[str, Any]:
             "created_at": _iso(),
             "updated_at": _iso(),
         }
-        response = _client().table("paper_accounts").insert(row).execute()
-        return (response.data or [row])[0]
+        return paper_repo.insert_account(row)
     except Exception:
         log.exception("Paper account initialization failed")
         return {
@@ -115,8 +108,7 @@ def get_account() -> dict[str, Any]:
 
 def _open_positions() -> list[dict[str, Any]]:
     try:
-        response = _client().table("paper_positions").select("*").eq("status", "open").order("opened_at").execute()
-        return response.data or []
+        return paper_repo.positions_by_status("open", "opened_at")
     except Exception:
         log.exception("Paper positions load failed")
         return []
@@ -128,8 +120,7 @@ def get_open_positions() -> list[dict[str, Any]]:
 
 def _pending_positions() -> list[dict[str, Any]]:
     try:
-        response = _client().table("paper_positions").select("*").eq("status", "pending_entry").order("created_at").execute()
-        return response.data or []
+        return paper_repo.positions_by_status("pending_entry", "created_at")
     except Exception:
         log.exception("Paper pending positions load failed")
         return []
@@ -141,8 +132,7 @@ def get_pending_positions() -> list[dict[str, Any]]:
 
 def get_recent_trades(limit: int = 20) -> list[dict[str, Any]]:
     try:
-        response = _client().table("paper_trades").select("*").order("closed_at", desc=True).limit(max(1, min(limit, 1000))).execute()
-        return response.data or []
+        return paper_repo.recent_trades(limit)
     except Exception:
         log.exception("Paper trade history load failed")
         return []
@@ -216,17 +206,24 @@ def _fill_pending_position(position: dict[str, Any], fill_price: float, fill_sou
         "entry_fee": entry_fee, "fill_price_source": fill_source, "opened_at": now, "last_checked_at": now,
         "max_hold_until": (_now() + timedelta(hours=max(1, _int("PAPER_MAX_HOLD_HOURS", 72)))).isoformat(),
         "updated_at": now,
+        "execution_audit": {**(position.get("execution_audit") or {}), "actual_fill": fill_price, "fill_source": fill_source, "filled_at": now},
     }
     try:
-        response = _client().table("paper_positions").update(values).eq("id", position.get("id")).eq("status", "pending_entry").execute()
-        updated = (response.data or [{**position, **values}])[0]
-        new_balance = float(account.get("balance") or 0) - margin - entry_fee
-        _client().table("paper_accounts").update({
-            "balance": new_balance,
-            "equity": float(account.get("equity") or account.get("balance") or 0) - entry_fee,
-            "fees_paid": float(account.get("fees_paid") or 0) + entry_fee,
-            "updated_at": now,
-        }).eq("id", ACCOUNT_ID).execute()
+        with _PAPER_LOCK:
+            # Compare-and-set is critical: if another worker already filled/cancelled
+            # this pending order, do not debit the account a second time.
+            updated = paper_repo.update_position(position.get("id"), values, expected_status="pending_entry")
+            if not updated:
+                return {"status": "already-processed"}
+            account = ensure_account()
+            new_balance = float(account.get("balance") or 0) - margin - entry_fee
+            paper_repo.update_account(ACCOUNT_ID, {
+                "balance": new_balance,
+                "equity": float(account.get("equity") or account.get("balance") or 0) - entry_fee,
+                "fees_paid": float(account.get("fees_paid") or 0) + entry_fee,
+                "updated_at": now,
+            })
+        emit("PAPER_FILLED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), side=side, fill_price=fill_price, fill_source=fill_source)
         return {"status": "opened", "position": updated}
     except Exception:
         log.exception("Paper pending fill failed: %s", position.get("fingerprint"))
@@ -257,9 +254,9 @@ def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str
         return {"status": "invalid-geometry"}
 
     try:
-        existing = _client().table("paper_positions").select("id,status").eq("fingerprint", fingerprint).limit(1).execute()
-        if existing.data:
-            return {"status": "duplicate", "position": existing.data[0]}
+        existing = paper_repo.position_by_fingerprint(fingerprint)
+        if existing:
+            return {"status": "duplicate", "position": existing}
     except Exception:
         log.exception("Paper dedupe lookup failed")
         return {"status": "error"}
@@ -296,10 +293,14 @@ def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str
         "pending_until": (now_dt + timedelta(hours=wait_hours)).isoformat(),
         "pending_reason": "WAIT_PULLBACK" if setup == "PULLBACK" else "WAIT_BREAKOUT",
         "opened_at": now, "last_checked_at": now, "created_at": now, "updated_at": now,
+        "execution_audit": {
+            "signal_price": signal.get("marketPriceAtSignal") or signal.get("market_price_at_signal"),
+            "target_entry": target_entry, "signal_at": now, "source": source, "setup": setup,
+        },
     }
     try:
-        response = _client().table("paper_positions").insert(row).execute()
-        position = (response.data or [row])[0]
+        position = paper_repo.insert_position(row)
+        emit("PAPER_PENDING", symbol=symbol, fingerprint=fingerprint, side=side, target_entry=target_entry, source=source)
     except Exception:
         log.exception("Paper pending order create failed: %s", fingerprint)
         return {"status": "error"}
@@ -329,10 +330,10 @@ def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str
         max_dev = max(0.0, _float("PAPER_MAX_ENTRY_DEVIATION_PCT", 0.50))
         if deviation > max_dev:
             try:
-                _client().table("paper_positions").update({
+                paper_repo.update_position(position.get("id"), {
                     "status": "cancelled", "close_reason": "MISSED_BREAKOUT",
                     "pending_reason": f"deviation={deviation:.4f}%", "updated_at": _iso(), "closed_at": _iso(),
-                }).eq("id", position.get("id")).execute()
+                })
             except Exception:
                 pass
             return {"status": "missed_entry", "position": position, "market_price": market}
@@ -389,28 +390,39 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
         "created_at": now,
     }
     try:
-        _client().table("paper_trades").insert(trade).execute()
-        _client().table("paper_positions").update({
-            "status": "closed",
-            "exit_price": adjusted_exit,
-            "close_reason": reason,
-            "gross_pnl": gross_pnl,
-            "net_pnl": net_pnl,
-            "closed_at": now,
-            "last_checked_at": now,
-            "updated_at": now,
-        }).eq("id", position.get("id")).execute()
-        new_balance = float(account.get("balance") or 0) + released
-        realized = float(account.get("realized_pnl") or 0) + net_pnl
-        fees = float(account.get("fees_paid") or 0) + exit_fee
-        _client().table("paper_accounts").update({
-            "balance": new_balance,
-            "equity": new_balance,
-            "realized_pnl": realized,
-            "fees_paid": fees,
-            "updated_at": now,
-        }).eq("id", ACCOUNT_ID).execute()
+        with _PAPER_LOCK:
+            # Close is a compare-and-set operation. This prevents duplicate PnL/fees
+            # if overlapping background ticks observe the same TP/SL candle.
+            changed = paper_repo.update_position(position.get("id"), {
+                "status": "closed",
+                "exit_price": adjusted_exit,
+                "close_reason": reason,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "closed_at": now,
+                "last_checked_at": now,
+                "updated_at": now,
+            }, expected_status="open")
+            if not changed:
+                return {}
+            paper_repo.upsert_trade(trade)
+            account = ensure_account()
+            new_balance = float(account.get("balance") or 0) + released
+            realized = float(account.get("realized_pnl") or 0) + net_pnl
+            fees = float(account.get("fees_paid") or 0) + exit_fee
+            # Equity is account value, not free balance. Preserve other reserved
+            # positions by applying only this trade's realized delta to prior equity.
+            prior_equity = float(account.get("equity") or account.get("balance") or 0)
+            new_equity = prior_equity + gross_pnl - exit_fee
+            paper_repo.update_account(ACCOUNT_ID, {
+                "balance": new_balance,
+                "equity": new_equity,
+                "realized_pnl": realized,
+                "fees_paid": fees,
+                "updated_at": now,
+            })
         trade["balance_after"] = new_balance
+        emit("POSITION_CLOSED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason=reason, net_pnl=net_pnl)
         return trade
     except Exception:
         log.exception("Paper position close failed: %s", position.get("id"))
@@ -465,15 +477,16 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     continue
             pending_until = _parse_ts(position.get("pending_until")) if position.get("pending_until") else None
             if pending_until and _now() >= pending_until:
-                _client().table("paper_positions").update({
+                paper_repo.update_position(position.get("id"), {
                     "status": "cancelled", "close_reason": "ENTRY_EXPIRED", "pending_reason": "price_never_reached_entry",
                     "closed_at": _iso(), "last_checked_at": _iso(), "updated_at": _iso(),
-                }).eq("id", position.get("id")).execute()
+                })
+                emit("PAPER_ENTRY_CANCELLED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason="ENTRY_EXPIRED")
                 pending_cancelled += 1
                 if notifier:
                     notifier(format_missed_message(position, "ENTRY_EXPIRED"))
             else:
-                _client().table("paper_positions").update({"last_checked_at": _iso(), "updated_at": _iso()}).eq("id", position.get("id")).execute()
+                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()})
         except Exception as exc:
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             pending_errors.append(text)
@@ -527,7 +540,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     if notifier:
                         notifier(format_close_message(trade))
             else:
-                _client().table("paper_positions").update({"last_checked_at": _iso(), "updated_at": _iso()}).eq("id", position.get("id")).execute()
+                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()})
         except Exception as exc:
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             errors.append(text)
@@ -563,8 +576,7 @@ def reset_account(initial_balance: Optional[float] = None) -> dict[str, Any]:
         return {"status": "open-positions-exist"}
     amount = max(1.0, float(initial_balance or _float("PAPER_INITIAL_BALANCE_USD", 100.0)))
     try:
-        _client().table("paper_trades").delete().eq("account_id", ACCOUNT_ID).execute()
-        _client().table("paper_positions").delete().eq("account_id", ACCOUNT_ID).execute()
+        paper_repo.delete_account_history(ACCOUNT_ID)
         now = _iso()
         row = {
             "initial_balance": amount,
@@ -575,7 +587,7 @@ def reset_account(initial_balance: Optional[float] = None) -> dict[str, Any]:
             "status": "active",
             "updated_at": now,
         }
-        _client().table("paper_accounts").upsert({"id": ACCOUNT_ID, **row}, on_conflict="id").execute()
+        paper_repo.upsert_account(ACCOUNT_ID, row)
         return {"status": "reset", "balance": amount}
     except Exception:
         log.exception("Paper account reset failed")

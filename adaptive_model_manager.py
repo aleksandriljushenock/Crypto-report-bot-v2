@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.logging_setup import get_logger
+from core.runtime_config import integer, number
+from core.events import emit
+from repositories.paper_repository import load_valid_closed_positions
 
 log = get_logger("adaptive_model_manager")
 FEATURES = (
@@ -31,14 +33,11 @@ def _now() -> str:
 
 
 def _int(name: str, default: int) -> int:
-    try: return int(float(os.getenv(name, str(default))))
-    except Exception: return default
+    return integer(name, default)
 
 
 def _float(name: str, default: float) -> float:
-    try: return float(os.getenv(name, str(default)))
-    except Exception: return default
-
+    return number(name, default)
 
 def _num(v: Any, default: float = 0.0) -> float:
     try: return float(v)
@@ -77,13 +76,10 @@ def _extract(row: Dict[str, Any]) -> Tuple[List[float], int]:
 
 def _load_rows(limit: int) -> List[Dict[str, Any]]:
     try:
-        return (_client().table("paper_positions")
-            .select("id,net_pnl,quality_score,probability,expected_value_pct,signal_payload,closed_at")
-            .eq("status", "closed").order("closed_at").limit(limit).execute().data or [])
+        return load_valid_closed_positions(limit, ascending=True)
     except Exception:
-        log.exception("Adaptive model could not load paper positions")
+        log.exception("Adaptive model could not load valid filled paper positions")
         return []
-
 
 def _standardize(xs: List[List[float]]) -> Tuple[List[List[float]], List[float], List[float]]:
     n = len(xs); d = len(FEATURES)
@@ -142,6 +138,7 @@ def _metrics(rows: List[Dict[str, Any]], model: Dict[str, Any]) -> Dict[str, flo
 
 
 def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
+    emit("MODEL_TRAIN_STARTED", trigger=trigger)
     rows = _load_rows(_int("ADAPTIVE_MODEL_MAX_TRADES", 1500))
     min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 40)
     min_validation = _int("ADAPTIVE_MODEL_MIN_VALIDATION", 12)
@@ -170,6 +167,7 @@ def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
         _client().table("adaptive_model_versions").insert(row).execute()
     except Exception:
         log.exception("Adaptive model persistence failed")
+    emit("MODEL_PROMOTED" if promote else "MODEL_CANDIDATE", version=version, improvement=improvement, samples_validation=len(val_rows))
     return {"status": "promoted" if promote else "candidate", "version": version, "metrics": metrics,
             "samples_train": len(train_rows), "samples_validation": len(val_rows), "improvement": improvement}
 

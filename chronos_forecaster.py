@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import urllib.request
+from core.runtime_config import boolean, integer, number, string
 from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
@@ -19,31 +20,33 @@ _FORECAST_COUNT = 0
 
 
 def _bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return boolean(name, default)
 
 
 def _enabled() -> bool:
-    default = _bool('CHRONOS_ENABLED', False)
+    # strategy_settings is loaded from Supabase at runtime startup and mirrored to
+    # os.environ. current_value also preserves the ENV fallback for local runs.
     try:
-        from automation_store import get_runtime_bool
-        return get_runtime_bool('chronos_enabled', default)
+        from strategy_settings import current_value
+        return str(current_value("CHRONOS_ENABLED")).lower() == "true"
     except Exception:
-        return default
+        return boolean("CHRONOS_ENABLED", False)
 
 def chronos_enabled() -> bool:
     return _enabled()
 
 def set_chronos_enabled(enabled: bool) -> bool:
+    state = bool(enabled)
     try:
-        from automation_store import set_runtime_bool
-        state = bool(set_runtime_bool('chronos_enabled', enabled))
+        from strategy_settings import save_setting
+        save_setting("CHRONOS_ENABLED", state, updated_by="telegram")
     except Exception:
-        state = bool(enabled)
+        # Supabase may be temporarily unavailable. Keep a process-local fallback
+        # so the user can still disable a memory-heavy model immediately.
+        import os
+        os.environ["CHRONOS_ENABLED"] = "true" if state else "false"
     if not state:
-        unload_pipeline('telegram-disabled')
+        unload_pipeline("telegram-disabled")
     return state
 
 
@@ -66,8 +69,8 @@ def _memory_allows_load() -> bool:
         from memory_guard import cleanup, rss_mb
         cleanup()
         current = rss_mb()
-        hard = float(os.getenv('MEMORY_HARD_LIMIT_MB', '500'))
-        headroom = float(os.getenv('CHRONOS_REQUIRED_HEADROOM_MB', '230'))
+        hard = number('MEMORY_HARD_LIMIT_MB', 500.0, strategy=False)
+        headroom = number('CHRONOS_REQUIRED_HEADROOM_MB', 230.0, strategy=False)
         allowed = current + headroom < hard
         if not allowed:
             logger.warning('Chronos skipped by memory guard: rss=%.1fMB required_headroom=%.1fMB hard=%.1fMB', current, headroom, hard)
@@ -97,16 +100,16 @@ def unload_pipeline(reason: str = 'batch-complete') -> dict[str, Any]:
 
 
 def _remote_forecast(clean: list[float], horizon: int) -> dict[str, Any] | None:
-    endpoint = os.getenv('CHRONOS_REMOTE_URL', '').strip()
+    endpoint = string('CHRONOS_REMOTE_URL', '', strategy=False)
     if not endpoint:
         return None
     payload = json.dumps({'context': clean, 'prediction_length': horizon}).encode('utf-8')
     headers = {'Content-Type': 'application/json'}
-    token = os.getenv('CHRONOS_REMOTE_TOKEN', '').strip()
+    token = string('CHRONOS_REMOTE_TOKEN', '', strategy=False)
     if token:
         headers['Authorization'] = f'Bearer {token}'
     request = urllib.request.Request(endpoint, data=payload, headers=headers, method='POST')
-    timeout = max(5, int(os.getenv('CHRONOS_REMOTE_TIMEOUT_SECONDS', '45')))
+    timeout = max(5, integer('CHRONOS_REMOTE_TIMEOUT_SECONDS', 45, minimum=5, strategy=False))
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read().decode('utf-8'))
     return data if isinstance(data, dict) else None
@@ -114,7 +117,7 @@ def _remote_forecast(clean: list[float], horizon: int) -> dict[str, Any] | None:
 
 
 def _subprocess_forecast(clean: list[float], horizon: int) -> dict[str, Any] | None:
-    timeout = max(30, int(os.getenv('CHRONOS_SUBPROCESS_TIMEOUT_SECONDS', '150')))
+    timeout = max(30, integer('CHRONOS_SUBPROCESS_TIMEOUT_SECONDS', 150, minimum=30, strategy=False))
     worker = os.path.join(os.path.dirname(__file__), 'chronos_worker.py')
     payload = json.dumps({'context': clean, 'prediction_length': horizon})
     env = os.environ.copy()
@@ -150,8 +153,8 @@ def _load_pipeline():
         try:
             import torch
             from chronos import BaseChronosPipeline
-            model_name = os.getenv('CHRONOS_MODEL', 'amazon/chronos-bolt-tiny').strip()
-            dtype_name = os.getenv('CHRONOS_TORCH_DTYPE', 'float32').strip().lower()
+            model_name = string('CHRONOS_MODEL', 'amazon/chronos-bolt-tiny', strategy=False)
+            dtype_name = string('CHRONOS_TORCH_DTYPE', 'float32', strategy=False).lower()
             dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}.get(dtype_name, torch.float32)
             _MODEL = BaseChronosPipeline.from_pretrained(model_name, device_map='cpu', torch_dtype=dtype)
             logger.info('Chronos loaded: model=%s dtype=%s', model_name, dtype_name)
@@ -167,17 +170,17 @@ def forecast_closes(closes: Sequence[float], prediction_length: int | None = Non
     global _FORECAST_COUNT
     if not _enabled():
         return None
-    min_context = max(32, int(os.getenv('CHRONOS_MIN_CONTEXT', '64')))
-    max_context = max(min_context, int(os.getenv('CHRONOS_CONTEXT_LENGTH', '128')))
+    min_context = max(32, integer('CHRONOS_MIN_CONTEXT', 64, minimum=32, strategy=False))
+    max_context = max(min_context, integer('CHRONOS_CONTEXT_LENGTH', 128, minimum=32, strategy=False))
     clean = [_safe_float(x, float('nan')) for x in closes]
     clean = [x for x in clean if math.isfinite(x) and x > 0]
     if len(clean) < min_context:
         return None
     clean = clean[-max_context:]
-    horizon = prediction_length or int(os.getenv('CHRONOS_PREDICTION_LENGTH', '8'))
+    horizon = prediction_length or integer('CHRONOS_PREDICTION_LENGTH', 8, minimum=1, maximum=32, strategy=False)
     horizon = max(1, min(32, int(horizon)))
 
-    mode = os.getenv('CHRONOS_MODE', 'subprocess').strip().lower()
+    mode = string('CHRONOS_MODE', 'subprocess', strategy=False).lower()
     if mode == 'remote':
         try:
             return _remote_forecast(clean, horizon)
@@ -218,7 +221,7 @@ def forecast_closes(closes: Sequence[float], prediction_length: int | None = Non
         strength = min(100.0, abs(median_return) / max(uncertainty_pct, 0.05) * 50.0)
         _FORECAST_COUNT += 1
         return {
-            'provider': 'amazon-chronos-bolt', 'model': os.getenv('CHRONOS_MODEL', 'amazon/chronos-bolt-tiny'),
+            'provider': 'amazon-chronos-bolt', 'model': string('CHRONOS_MODEL', 'amazon/chronos-bolt-tiny', strategy=False),
             'contextPoints': len(clean), 'predictionLength': horizon, 'lastPrice': round(last, 10),
             'forecastPrice': round(q50, 10), 'meanForecastPrice': round(mean_last, 10),
             'forecastReturnPct': round(median_return, 4), 'meanReturnPct': round(mean_return, 4),
@@ -246,7 +249,7 @@ def blend_signal(signal: dict[str, Any], forecast: dict[str, Any] | None) -> dic
     else:
         chronos_probability, aligned_return = 50.0, 0.0
     uncertainty = _safe_float(forecast.get('uncertaintyPct'), 100.0)
-    max_weight = max(0.0, min(0.35, float(os.getenv('CHRONOS_MAX_WEIGHT', '0.18'))))
+    max_weight = max(0.0, min(0.35, number('CHRONOS_MAX_WEIGHT', 0.18, minimum=0.0, maximum=0.35)))
     reliability = max(0.10, min(1.0, 2.0 / max(uncertainty, 0.25)))
     weight = max_weight * reliability
     old_probability = _safe_float(signal.get('probability'), 50.0)
@@ -273,7 +276,7 @@ def apply_to_finalists(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for signal in signals:
             signal.pop('_chronosCloses', None)
         return signals
-    limit = max(1, min(5, int(os.getenv('CHRONOS_FINALISTS', '1'))))
+    limit = max(1, min(5, integer('CHRONOS_FINALISTS', 3, minimum=1, maximum=5)))
     for index, signal in enumerate(signals):
         closes = signal.pop('_chronosCloses', None) or []
         if index >= limit:

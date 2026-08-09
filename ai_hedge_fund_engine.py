@@ -5,27 +5,28 @@ precomputed from durable Supabase observations and combined with live factors.
 """
 from __future__ import annotations
 import json, math, os
+from core.runtime_config import boolean, integer, number, string
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-PROFILE_PATH=Path(os.getenv('PROFIT_PROFILE_PATH','data/profit_profile_v2.json'))
+PROFILE_PATH=Path(string('PROFIT_PROFILE_PATH','data/profit_profile_v2.json', strategy=False))
 _CACHE=None
 
 
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)))
+        return number(name, float(default))
     except (TypeError, ValueError):
         return float(default)
 
 def _env_int(name: str, default: int) -> int:
     try:
-        return int(float(os.getenv(name, str(default))))
+        return integer(name, int(default))
     except (TypeError, ValueError):
         return int(default)
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
+    raw = string(name, '', strategy=True)
     if raw is None:
         return default
     return str(raw).strip().lower() in {'1','true','yes','on','y'}
@@ -173,7 +174,7 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     # Ensemble: local model + historical context. Chronos contribution is already in live probability when enabled.
     calibrated=0.58*live_prob+0.42*hist_prob
     hits=_rule_hits(signal); adjustment=sum(h['adjustment'] for h in hits)
-    cap=float(os.getenv('HEDGE_MAX_RULE_ADJUSTMENT','24')); adjustment=max(-cap,min(cap,adjustment))
+    cap=number('HEDGE_MAX_RULE_ADJUSTMENT',24.0); adjustment=max(-cap,min(cap,adjustment))
     calibrated=_clamp(calibrated+adjustment*0.45,2,92)
     rr=max(0.01,float(signal.get('rr') or 0))
     # Prefer actual TP/SL geometry when available, fallback to RR-normalized payoffs.
@@ -182,7 +183,7 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         direction=signal.get('direction')
         win_pct=abs(tp-entry)/entry*100; loss_pct=abs(entry-stop)/entry*100
     else:
-        loss_pct=float(os.getenv('HEDGE_DEFAULT_RISK_PCT','1.0')); win_pct=loss_pct*rr
+        loss_pct=number('HEDGE_DEFAULT_RISK_PCT',1.0); win_pct=loss_pct*rr
     pwin=calibrated/100.0
     ev=pwin*win_pct-(1-pwin)*loss_pct
     # Robustness penalty for concentration/unknowns and hard blocks.
@@ -206,8 +207,8 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     except Exception:
         adaptive={'available':False}
 
-    min_quality=float(os.getenv('HEDGE_MIN_QUALITY','70'))
-    min_ev=float(os.getenv('HEDGE_MIN_EV_PCT','0.20'))
+    min_quality=number('HEDGE_MIN_QUALITY',70.0)
+    min_ev=number('HEDGE_MIN_EV_PCT',2.0)
     passed=(not hard) and quality>=min_quality and ev>=min_ev
     decision='HIGH_QUALITY' if passed and quality>=80 else ('TRADE_CANDIDATE' if passed else 'NO_TRADE')
     positive_hits=[h['name'] for h in hits if h['adjustment']>0]

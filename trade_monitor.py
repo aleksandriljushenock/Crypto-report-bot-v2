@@ -1,4 +1,5 @@
 import os
+from core.runtime_config import boolean, integer, number, near_signal_config
 import threading
 import time
 from datetime import datetime, timezone
@@ -41,6 +42,9 @@ class TradeMonitor:
             self._thread.start()
             return True
 
+    def is_running(self):
+        return bool(self._thread is not None and self._thread.is_alive() and not self._stop_event.is_set())
+
     def stop(self):
         self._stop_event.set()
 
@@ -66,7 +70,7 @@ class TradeMonitor:
         new_count = 0
         for signal in result.get('signals', []):
             upsert_watch_candidate(signal, source=source)
-            cooldown = float(os.getenv('TRADE_SIGNAL_COOLDOWN_HOURS', '6'))
+            cooldown = number('TRADE_SIGNAL_COOLDOWN_HOURS', 6.0)
             if signal_recently_sent(signal['fingerprint'], cooldown_hours=cooldown):
                 continue
             signal_id = save_signal(signal, sent=False)
@@ -91,7 +95,7 @@ class TradeMonitor:
         return new_count
 
     def _run_near_signal_cycle(self, chat_id):
-        if os.getenv('NEAR_SIGNAL_WATCH_ENABLED', 'true').strip().lower() not in {'1','true','yes','on'}:
+        if not near_signal_config().enabled:
             return 0
         try:
             from near_signal_watchlist import get_due_symbols, mark_checked
@@ -131,14 +135,14 @@ class TradeMonitor:
             self.last_run = datetime.now(timezone.utc).isoformat()
             self.heartbeat_at = self.last_run
             base_minutes = max(5, int(settings.get('interval_minutes') or 15))
-            active_minutes = max(5, int(float(os.getenv('TRADE_SCAN_ACTIVE_INTERVAL_MINUTES', '7'))))
+            active_minutes = integer('TRADE_SCAN_ACTIVE_INTERVAL_MINUTES', 7, minimum=5)
             # More frequent full passes only when there are near-final candidates.
-            market_active = int((result.get('universeSummary') or {}).get('activeMarketSymbols') or 0) >= int(float(os.getenv('ACTIVE_MARKET_SYMBOL_COUNT', '8')))
+            market_active = int((result.get('universeSummary') or {}).get('activeMarketSymbols') or 0) >= integer('ACTIVE_MARKET_SYMBOL_COUNT', 8, minimum=1)
             interval_minutes = active_minutes if ((result.get('nearMisses') or []) or market_active) else base_minutes
             elapsed = time.time() - started
             wait_seconds = max(30, interval_minutes * 60 - elapsed)
-            near_every = max(60, int(float(os.getenv('NEAR_SIGNAL_RESCAN_MINUTES', '5')) * 60))
-            shadow_every = max(300, int(float(os.getenv('SHADOW_UPDATE_MINUTES', '10')) * 60))
+            near_every = max(60, near_signal_config().rescan_minutes * 60)
+            shadow_every = max(300, integer('SHADOW_UPDATE_MINUTES', 10, minimum=5) * 60)
             next_near = time.time() + near_every
             next_shadow = time.time() + shadow_every
             deadline = time.time() + wait_seconds

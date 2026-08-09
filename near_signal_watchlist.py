@@ -6,8 +6,9 @@ available to Shadow Signals but do not consume frequent near-watch rescans.
 """
 from __future__ import annotations
 
+from core.runtime_config import boolean, integer, number, raw
+
 import json
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -84,10 +85,10 @@ def _threshold_for_gate(item, gate):
 
     def env_profile(suffix, base_name, default):
         if profile:
-            value = os.getenv(f'{base_name}_{profile}_{suffix}')
+            value = raw(f'{base_name}_{profile}_{suffix}', None)
             if value not in (None, ''):
                 return _float(value)
-        return _float(os.getenv(f'{base_name}_{suffix}', str(default)))
+        return _float(raw(f'{base_name}_{suffix}', default))
 
     if gate == 'Score':
         return _float(profile_thresholds.get('score') or item.get('scoreThreshold')) or env_profile('MIN_SCORE', 'TRADE', 72)
@@ -141,7 +142,7 @@ def classify_near_candidate(item):
     if current >= threshold:
         return None
     distance = max(0.0, min(100.0, current / threshold * 100.0))
-    min_distance = float(os.getenv('NEAR_SIGNAL_MIN_DISTANCE_PCT', '85'))
+    min_distance = float(str(number('NEAR_SIGNAL_MIN_DISTANCE_PCT', 85.0)))
     if distance < min_distance:
         return None
 
@@ -174,8 +175,8 @@ def select_near_candidates(items):
 def upsert_near_candidates(items, source='scan'):
     initialize()
     selected = select_near_candidates(items)
-    ttl_hours = max(1.0, float(os.getenv('NEAR_SIGNAL_TTL_HOURS', '12')))
-    check_minutes = max(1, int(float(os.getenv('NEAR_SIGNAL_RESCAN_MINUTES', '5'))))
+    ttl_hours = max(1.0, number('NEAR_SIGNAL_TTL_HOURS', 12.0, minimum=1.0))
+    check_minutes = max(1, int(float(str(integer('NEAR_SIGNAL_RESCAN_MINUTES', 5)))))
     now = _now()
     count = 0
     with _conn() as conn:
@@ -221,7 +222,7 @@ def upsert_near_candidates(items, source='scan'):
 
 def get_due_symbols(limit=None):
     initialize()
-    limit = max(1, int(limit or os.getenv('NEAR_SIGNAL_RESCAN_LIMIT', '24')))
+    limit = max(1, int(limit or str(integer('NEAR_SIGNAL_RESCAN_LIMIT', 24))))
     now = _iso()
     with _conn() as conn:
         conn.execute('DELETE FROM near_signals WHERE expires_at < ?', (now,))
@@ -241,7 +242,7 @@ def mark_checked(symbols, promoted=None, retained=None):
     initialize()
     promoted = {str(x).upper() for x in (promoted or [])}
     retained = None if retained is None else {str(x).upper() for x in retained}
-    minutes = max(1, int(float(os.getenv('NEAR_SIGNAL_RESCAN_MINUTES', '5'))))
+    minutes = max(1, int(float(str(integer('NEAR_SIGNAL_RESCAN_MINUTES', 5)))))
     next_time = _iso(_now() + timedelta(minutes=minutes))
     with _conn() as conn:
         for symbol in symbols or []:

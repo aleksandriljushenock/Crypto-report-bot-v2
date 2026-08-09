@@ -6,9 +6,10 @@ observed in 5m candles before return/outcome measurements are valid.
 """
 from __future__ import annotations
 
+from core.runtime_config import boolean, integer, number, string
+
 import hashlib
 import json
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ HORIZONS = (6, 12, 24)
 _RESTORED = False
 
 def _cloud_enabled():
-    return os.getenv('SHADOW_CLOUD_ENABLED','true').lower() in {'1','true','yes','on'} and bool(os.getenv('SUPABASE_URL')) and bool(os.getenv('SUPABASE_SERVICE_KEY'))
+    return boolean('SHADOW_CLOUD_ENABLED', True) and bool(string('SUPABASE_URL', '', strategy=False)) and bool(string('SUPABASE_SERVICE_KEY', '', strategy=False))
 
 def _cloud():
     from cloud_client import get_supabase_client
@@ -100,8 +101,8 @@ def _entry(item):
     except Exception:return None
 
 def register_shadow_candidates(items, source='scan'):
-    if os.getenv('SHADOW_SIGNALS_ENABLED','true').lower() not in {'1','true','yes','on'}: return 0
-    initialize(); now=_now(); ttl=max(6,float(os.getenv('SHADOW_SIGNAL_TTL_HOURS','24'))); count=0
+    if not boolean('SHADOW_SIGNALS_ENABLED', True): return 0
+    initialize(); now=_now(); ttl=max(6, number('SHADOW_SIGNAL_TTL_HOURS', 24.0)); count=0
     with _conn() as c:
         for item in items or []:
             symbol=str(item.get('symbol') or '').upper(); entry=_entry(item)
