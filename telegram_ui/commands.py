@@ -2,6 +2,7 @@ from __future__ import annotations
 from telegram_ui.client import telegram_request
 
 BOT_COMMANDS = [
+    {"command": "start", "description": "Открыть главное меню"},
     {"command": "report", "description": "Запустить полный анализ рынка"},
     {"command": "status", "description": "Проверить состояние анализа"},
     {"command": "help", "description": "Показать доступные команды"},
