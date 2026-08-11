@@ -21,6 +21,12 @@ from telegram_ui.renderers import (
     _paper_snapshot, _signal_direction, _signal_symbol, _signal_quality, _signal_ev, _trade_metrics, _paper_trade_dt, _band_summary, _period_rows, _num, _fmt_metric,
 )
 from telegram_ui.system_handlers import handle as handle_system_callback
+from strategies.service import run_scan as run_fib_strategy_scan, update_outcomes as update_fib_strategy_outcomes
+from strategies.reports import (
+    strategy_home_text as build_strategies_home_text, fib_home_text as build_fib_strategy_home_text,
+    scan_report as build_fib_scan_report, candidates_text as build_fib_candidates_text,
+    winrate_text as build_fib_winrate_text, history_text as build_fib_history_text, rules_text as build_fib_rules_text,
+)
 from application.system_service import runtime_context
 from application.diagnostics_service import snapshot_report as diagnostics_snapshot
 from telegram_ui.diagnostics import render_diagnostics
@@ -122,6 +128,8 @@ automation_supervisor = None
 runtime_health_monitor = None
 cloud_store = CloudLearningStore()
 strategy_edit_pending = {}
+fib_strategy_thread = None
+fib_strategy_lock = threading.Lock()
 
 
 def log(message):
@@ -301,6 +309,10 @@ def _home_row():
     return ui_keyboards.home_row()
 def main_keyboard():
     return ui_keyboards.main_keyboard()
+def strategies_keyboard():
+    return ui_keyboards.strategies_keyboard()
+def fib_strategy_keyboard():
+    return ui_keyboards.fib_strategy_keyboard()
 def signals_keyboard():
     return ui_keyboards.signals_keyboard()
 def market_keyboard():
@@ -952,10 +964,11 @@ def start_trade_scan(chat_id):
     with trade_scan_lock:
         engine_busy = is_trade_scan_running()
         manual_busy = trade_scan_thread is not None and trade_scan_thread.is_alive()
-        if engine_busy or manual_busy:
+        fib_busy = fib_strategy_thread is not None and fib_strategy_thread.is_alive()
+        if engine_busy or manual_busy or fib_busy:
             st = get_trade_scan_runtime_state()
-            owner = st.get('owner') or ('manual' if manual_busy else 'unknown')
-            owner_text = 'фоновый монитор' if owner == 'monitor' else ('ручной скан' if owner == 'manual' else 'другой цикл')
+            owner = st.get('owner') or ('strategy_fib' if fib_busy else ('manual' if manual_busy else 'unknown'))
+            owner_text = 'фоновый монитор' if owner == 'monitor' else ('Fib 0.5 Strategy' if owner == 'strategy_fib' else ('ручной скан' if owner == 'manual' else 'другой цикл'))
             processed = int(st.get('processed') or 0)
             total = int(st.get('total') or 0)
             progress = f"\nПрогресс: <b>{processed}/{total}</b> монет" if total else ''
@@ -967,6 +980,46 @@ def start_trade_scan(chat_id):
             return
         trade_scan_thread = threading.Thread(target=run_trade_scan_task, args=(chat_id,), daemon=True)
         trade_scan_thread.start()
+
+
+def run_fib_strategy_task(chat_id):
+    global fib_strategy_thread
+    try:
+        send_message(chat_id, "⏳ <b>Fib 0.5 анализ запущен</b>\nСобираю все ликвидные USDT perpetual ≥ $100M/24h, затем D1 и H4.")
+        result = run_fib_strategy_scan()
+        send_message(chat_id, build_fib_scan_report(result), reply_markup=fib_strategy_keyboard())
+    except Exception as exc:
+        log(f"Fib strategy scan error: {exc}")
+        send_message(chat_id, f"❌ <b>Ошибка Fib 0.5 анализа</b>\n<code>{html.escape(str(exc)[:700])}</code>", reply_markup=fib_strategy_keyboard())
+    finally:
+        with fib_strategy_lock:
+            fib_strategy_thread = None
+
+
+def start_fib_strategy_scan(chat_id):
+    global fib_strategy_thread
+    from trade_engine import is_trade_scan_running
+    with fib_strategy_lock:
+        if is_trade_scan_running():
+            send_message(chat_id, "⏳ <b>Основной сканер сейчас занят.</b>\nFib-анализ не запускаю параллельно, чтобы не удваивать API/RAM.", reply_markup=fib_strategy_keyboard())
+            return
+        if fib_strategy_thread is not None and fib_strategy_thread.is_alive():
+            send_message(chat_id, "⏳ <b>Fib 0.5 анализ уже выполняется.</b>", reply_markup=fib_strategy_keyboard())
+            return
+        fib_strategy_thread = threading.Thread(target=run_fib_strategy_task, args=(chat_id,), daemon=True)
+        fib_strategy_thread.start()
+
+def refresh_fib_strategy_outcomes(chat_id):
+    try:
+        result = update_fib_strategy_outcomes(60)
+        text = (
+            "🔄 <b>Outcomes обновлены</b>\n"
+            f"Проверено: {result.get('checked',0)} · открыто: {result.get('opened',0)} · "
+            f"TP: {result.get('won',0)} · SL: {result.get('lost',0)} · expired: {result.get('expired',0)}"
+        )
+        send_message(chat_id, text + "\n\n" + build_fib_winrate_text(), reply_markup=fib_strategy_keyboard())
+    except Exception as exc:
+        send_message(chat_id, f"❌ Ошибка обновления outcomes: <code>{html.escape(str(exc)[:500])}</code>", reply_markup=fib_strategy_keyboard())
 
 
 def enable_monitor(chat_id):
@@ -1072,6 +1125,14 @@ def handle_command(chat_id, text):
 
     if command == "/trade":
         start_trade_scan(chat_id)
+        return
+
+    if command == "/strategies":
+        send_message(chat_id, build_strategies_home_text(), reply_markup=strategies_keyboard())
+        return
+
+    if command == "/fib":
+        send_message(chat_id, build_fib_strategy_home_text(), reply_markup=fib_strategy_keyboard())
         return
 
     if command == "/monitor_on":

@@ -22,10 +22,37 @@ def main_keyboard():
             {"text": "📈 Результаты", "callback_data": "menu_performance"},
         ],
         [
+            {"text": "🧭 Стратегии", "callback_data": "menu_strategies"},
             {"text": "🤖 AI Центр", "callback_data": "menu_ai"},
-            {"text": "📊 Рынок", "callback_data": "menu_analytics"},
         ],
-        [{"text": "⚙️ Настройки", "callback_data": "menu_system"}],
+        [
+            {"text": "📊 Рынок", "callback_data": "menu_analytics"},
+            {"text": "⚙️ Настройки", "callback_data": "menu_system"},
+        ],
+    ]}
+
+
+def strategies_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🟦 Fib 0.5 Pullback", "callback_data": "strategy_fib05"}],
+        home_row(),
+    ]}
+
+
+def fib_strategy_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🔍 Анализировать монеты", "callback_data": "fib05_scan"}],
+        [
+            {"text": "📈 Анализ Win Rate", "callback_data": "fib05_winrate"},
+            {"text": "🟡 Кандидаты", "callback_data": "fib05_candidates"},
+        ],
+        [
+            {"text": "📜 История", "callback_data": "fib05_history"},
+            {"text": "🔄 Outcomes", "callback_data": "fib05_outcomes"},
+        ],
+        [{"text": "📐 Правила стратегии", "callback_data": "fib05_rules"}],
+        [{"text": "⬅️ Стратегии", "callback_data": "menu_strategies"}],
+        home_row(),
     ]}
 
 

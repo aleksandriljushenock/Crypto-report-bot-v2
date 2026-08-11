@@ -9,6 +9,8 @@ BOT_COMMANDS = [
     {"command": "progress", "description": "Показать прогресс базы листингов"},
     {"command": "hunter", "description": "Проверить новые анонсы листингов"},
     {"command": "trade", "description": "Найти торговые входы сейчас"},
+    {"command": "strategies", "description": "Открыть лабораторию стратегий"},
+    {"command": "fib", "description": "Fib 0.5 Pullback стратегия"},
     {"command": "monitor_on", "description": "Включить фоновый мониторинг"},
     {"command": "monitor_off", "description": "Остановить фоновый мониторинг"},
     {"command": "monitor_status", "description": "Статус фонового мониторинга"},
