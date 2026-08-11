@@ -97,7 +97,8 @@ class TradeMonitor:
     def _run_near_signal_cycle(self, chat_id):
         try:
             from core.runtime_state import get as runtime_get
-            if runtime_get("strategy_fib").get("running"):
+            from strategies.catalog import STRATEGIES
+            if any(runtime_get(f"strategy_{spec.short}").get("running") for spec in STRATEGIES):
                 return 0
         except Exception:
             pass
@@ -171,9 +172,11 @@ class TradeMonitor:
     def run_once(self, settings=None):
         try:
             from core.runtime_state import get as runtime_get
-            if runtime_get("strategy_fib").get("running"):
-                self.logger("Монитор: полный скан пропущен — выполняется Fib 0.5 Strategy scan.")
-                return {"signals": [], "busy": True, "busyOwner": "strategy_fib"}
+            from strategies.catalog import STRATEGIES
+            active = next((spec for spec in STRATEGIES if runtime_get(f"strategy_{spec.short}").get("running")), None)
+            if active is not None:
+                self.logger(f"Монитор: полный скан пропущен — выполняется Strategy Lab: {active.title}.")
+                return {"signals": [], "busy": True, "busyOwner": f"strategy_{active.short}"}
         except Exception:
             pass
         settings = settings or get_monitor_settings()

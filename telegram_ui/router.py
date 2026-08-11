@@ -6,7 +6,7 @@ trading state or background workers.
 """
 from __future__ import annotations
 
-_BOT_EXPORTS = ['CATEGORY_TITLES', 'SPEC_BY_KEY', '_chronos_state_text', '_fmt_metric', '_period_rows', 'ai_keyboard', 'ai_optimizer_keyboard', 'analytics_keyboard', 'apply_recommendation', 'automation_supervisor', 'build_ai_history_report', 'build_ai_optimizer_text', 'build_automation_status', 'build_best_combos_text', 'build_best_signal_text', 'build_capital_flow_report', 'build_coin_performance_text', 'build_exchange_status_text', 'build_explain_signal_text', 'build_filter_performance_text', 'build_heat_map_text', 'build_home_text', 'build_learning_report', 'build_listing_progress_message', 'build_market_mood_text', 'build_model_status_report', 'build_narrative_report', 'build_near_signal_text', 'build_news_report', 'build_paper_goal_text', 'build_paper_history_text', 'build_paper_positions_text', 'build_paper_status_text', 'build_performance_center_text', 'build_period_performance_text', 'build_professional_report', 'build_scanner_intelligence_text', 'build_sentiment_report', 'build_shadow_signals_text', 'build_smart_money_report', 'build_strategy_category_text', 'build_strategy_edit_text', 'build_strategy_settings_text', 'build_top_ai_report', 'build_universe_dashboard_text', 'disable_monitor', 'enable_monitor', 'ensure_paper_account', 'exc', 'exchange_status_keyboard', 'get_monitor_settings', 'handle_command', 'handle_system_callback', 'html', 'is_authorized', 'load_strategy_settings', 'log', 'main_keyboard', 'market_keyboard', 'new_scan_thread', 'paper_keyboard', 'performance_keyboard', 'portfolio_keyboard', 'portfolio_report', 'reject_recommendation', 'report_thread', 'reset_paper_account', 'reset_strategy_setting', 'run_optimizer', 'save_strategy_setting', 'scanner_intelligence_keyboard', 'send_message', 'send_monitor_status', 'send_recent_signals', 'send_trade_performance', 'send_v8_report', 'send_watchlist', 'signals_keyboard', 'start_early_discovery', 'start_listing_hunter', 'start_new_listings_scan', 'start_report', 'start_trade_scan', 'strategy_category_keyboard', 'strategy_edit_keyboard', 'strategy_edit_pending', 'strategy_settings_keyboard', 'system_keyboard', 'telegram_request', 'trade_keyboard', 'trade_monitor', 'trade_scan_thread', 'train_candidate', 'universe_dashboard_keyboard', 'strategies_keyboard', 'fib_strategy_keyboard', 'build_strategies_home_text', 'build_fib_strategy_home_text', 'build_fib_candidates_text', 'build_fib_winrate_text', 'build_fib_history_text', 'build_fib_rules_text', 'start_fib_strategy_scan', 'refresh_fib_strategy_outcomes']
+_BOT_EXPORTS = ['CATEGORY_TITLES', 'SPEC_BY_KEY', '_chronos_state_text', '_fmt_metric', '_period_rows', 'ai_keyboard', 'ai_optimizer_keyboard', 'analytics_keyboard', 'apply_recommendation', 'automation_supervisor', 'build_ai_history_report', 'build_ai_optimizer_text', 'build_automation_status', 'build_best_combos_text', 'build_best_signal_text', 'build_capital_flow_report', 'build_coin_performance_text', 'build_exchange_status_text', 'build_explain_signal_text', 'build_filter_performance_text', 'build_heat_map_text', 'build_home_text', 'build_learning_report', 'build_listing_progress_message', 'build_market_mood_text', 'build_model_status_report', 'build_narrative_report', 'build_near_signal_text', 'build_news_report', 'build_paper_goal_text', 'build_paper_history_text', 'build_paper_positions_text', 'build_paper_status_text', 'build_performance_center_text', 'build_period_performance_text', 'build_professional_report', 'build_scanner_intelligence_text', 'build_sentiment_report', 'build_shadow_signals_text', 'build_smart_money_report', 'build_strategy_category_text', 'build_strategy_edit_text', 'build_strategy_settings_text', 'build_top_ai_report', 'build_universe_dashboard_text', 'disable_monitor', 'enable_monitor', 'ensure_paper_account', 'exc', 'exchange_status_keyboard', 'get_monitor_settings', 'handle_command', 'handle_system_callback', 'html', 'is_authorized', 'load_strategy_settings', 'log', 'main_keyboard', 'market_keyboard', 'new_scan_thread', 'paper_keyboard', 'performance_keyboard', 'portfolio_keyboard', 'portfolio_report', 'reject_recommendation', 'report_thread', 'reset_paper_account', 'reset_strategy_setting', 'run_optimizer', 'save_strategy_setting', 'scanner_intelligence_keyboard', 'send_message', 'send_monitor_status', 'send_recent_signals', 'send_trade_performance', 'send_v8_report', 'send_watchlist', 'signals_keyboard', 'start_early_discovery', 'start_listing_hunter', 'start_new_listings_scan', 'start_report', 'start_trade_scan', 'strategy_category_keyboard', 'strategy_edit_keyboard', 'strategy_edit_pending', 'strategy_settings_keyboard', 'system_keyboard', 'telegram_request', 'trade_keyboard', 'trade_monitor', 'trade_scan_thread', 'train_candidate', 'universe_dashboard_keyboard', 'strategies_keyboard', 'fib_strategy_keyboard', 'build_strategies_home_text', 'build_fib_strategy_home_text', 'build_fib_candidates_text', 'build_fib_winrate_text', 'build_fib_history_text', 'build_fib_rules_text', 'start_fib_strategy_scan', 'refresh_fib_strategy_outcomes', 'strategy_lab_keyboard', 'build_strategy_lab_home_text', 'build_strategy_candidates_text', 'build_strategy_winrate_text', 'build_strategy_history_text', 'build_strategy_rules_text', 'build_strategy_leaderboard_text', 'start_strategy_lab_scan', 'refresh_strategy_lab_outcomes', 'get_lab_strategy']
 
 def process_update(update, bot):
     target = globals()
@@ -86,32 +86,71 @@ def _process_update(update):
             send_message(chat_id, build_strategies_home_text(), reply_markup=strategies_keyboard())
             return
 
+        if callback_data == "strategy_leaderboard":
+            send_message(chat_id, build_strategy_leaderboard_text(), reply_markup=strategies_keyboard())
+            return
+
+        if callback_data.startswith("strategy_"):
+            short = callback_data[len("strategy_"):]
+            try:
+                spec = get_lab_strategy(short)
+            except Exception:
+                spec = None
+            if spec is not None:
+                send_message(chat_id, build_strategy_lab_home_text(spec.key), reply_markup=strategy_lab_keyboard(spec.key))
+                return
+
+        if callback_data.startswith("lab_"):
+            payload = callback_data[len("lab_"):]
+            action = None
+            short = None
+            for suffix in ("_candidates", "_winrate", "_history", "_outcomes", "_rules", "_scan"):
+                if payload.endswith(suffix):
+                    short = payload[:-len(suffix)]
+                    action = suffix[1:]
+                    break
+            if short and action:
+                try:
+                    spec = get_lab_strategy(short)
+                except Exception:
+                    spec = None
+                if spec is not None:
+                    keyboard = strategy_lab_keyboard(spec.key)
+                    if action == "scan":
+                        start_strategy_lab_scan(chat_id, spec.key)
+                    elif action == "winrate":
+                        send_message(chat_id, build_strategy_winrate_text(spec.key), reply_markup=keyboard)
+                    elif action == "candidates":
+                        send_message(chat_id, build_strategy_candidates_text(spec.key), reply_markup=keyboard)
+                    elif action == "history":
+                        send_message(chat_id, build_strategy_history_text(spec.key), reply_markup=keyboard)
+                    elif action == "rules":
+                        send_message(chat_id, build_strategy_rules_text(spec.key), reply_markup=keyboard)
+                    elif action == "outcomes":
+                        refresh_strategy_lab_outcomes(chat_id, spec.key)
+                    return
+
+        # Backward-compatible callbacks from v25 messages.
         if callback_data == "strategy_fib05":
-            send_message(chat_id, build_fib_strategy_home_text(), reply_markup=fib_strategy_keyboard())
+            send_message(chat_id, build_strategy_lab_home_text("fib_05_pullback"), reply_markup=strategy_lab_keyboard("fib_05_pullback"))
             return
-
         if callback_data == "fib05_scan":
-            start_fib_strategy_scan(chat_id)
+            start_strategy_lab_scan(chat_id, "fib_05_pullback")
             return
-
         if callback_data == "fib05_winrate":
-            send_message(chat_id, build_fib_winrate_text(), reply_markup=fib_strategy_keyboard())
+            send_message(chat_id, build_strategy_winrate_text("fib_05_pullback"), reply_markup=strategy_lab_keyboard("fib_05_pullback"))
             return
-
         if callback_data == "fib05_candidates":
-            send_message(chat_id, build_fib_candidates_text(), reply_markup=fib_strategy_keyboard())
+            send_message(chat_id, build_strategy_candidates_text("fib_05_pullback"), reply_markup=strategy_lab_keyboard("fib_05_pullback"))
             return
-
         if callback_data == "fib05_history":
-            send_message(chat_id, build_fib_history_text(), reply_markup=fib_strategy_keyboard())
+            send_message(chat_id, build_strategy_history_text("fib_05_pullback"), reply_markup=strategy_lab_keyboard("fib_05_pullback"))
             return
-
         if callback_data == "fib05_rules":
-            send_message(chat_id, build_fib_rules_text(), reply_markup=fib_strategy_keyboard())
+            send_message(chat_id, build_strategy_rules_text("fib_05_pullback"), reply_markup=strategy_lab_keyboard("fib_05_pullback"))
             return
-
         if callback_data == "fib05_outcomes":
-            refresh_fib_strategy_outcomes(chat_id)
+            refresh_strategy_lab_outcomes(chat_id, "fib_05_pullback")
             return
 
         if callback_data == "menu_signals":

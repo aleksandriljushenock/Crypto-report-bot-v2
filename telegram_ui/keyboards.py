@@ -33,28 +33,42 @@ def main_keyboard():
 
 
 def strategies_keyboard():
+    from strategies.catalog import STRATEGIES
+    rows = [[{"text": "🏆 Leaderboard", "callback_data": "strategy_leaderboard"}]]
+    pending = []
+    for spec in STRATEGIES:
+        pending.append({"text": f"{spec.emoji} {spec.title}", "callback_data": f"strategy_{spec.short}"})
+        if len(pending) == 2:
+            rows.append(pending)
+            pending = []
+    if pending:
+        rows.append(pending)
+    rows.append(home_row())
+    return {"inline_keyboard": rows}
+
+
+def strategy_lab_keyboard(strategy):
+    from strategies.catalog import get_strategy
+    spec = get_strategy(strategy)
+    prefix = f"lab_{spec.short}"
     return {"inline_keyboard": [
-        [{"text": "🟦 Fib 0.5 Pullback", "callback_data": "strategy_fib05"}],
+        [{"text": "🔍 Анализировать монеты", "callback_data": f"{prefix}_scan"}],
+        [
+            {"text": "📈 Статистика", "callback_data": f"{prefix}_winrate"},
+            {"text": "🟡 Кандидаты", "callback_data": f"{prefix}_candidates"},
+        ],
+        [
+            {"text": "📜 История", "callback_data": f"{prefix}_history"},
+            {"text": "🔄 Outcomes", "callback_data": f"{prefix}_outcomes"},
+        ],
+        [{"text": "📐 Правила стратегии", "callback_data": f"{prefix}_rules"}],
+        [{"text": "⬅️ Стратегии", "callback_data": "menu_strategies"}],
         home_row(),
     ]}
 
 
 def fib_strategy_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "🔍 Анализировать монеты", "callback_data": "fib05_scan"}],
-        [
-            {"text": "📈 Анализ Win Rate", "callback_data": "fib05_winrate"},
-            {"text": "🟡 Кандидаты", "callback_data": "fib05_candidates"},
-        ],
-        [
-            {"text": "📜 История", "callback_data": "fib05_history"},
-            {"text": "🔄 Outcomes", "callback_data": "fib05_outcomes"},
-        ],
-        [{"text": "📐 Правила стратегии", "callback_data": "fib05_rules"}],
-        [{"text": "⬅️ Стратегии", "callback_data": "menu_strategies"}],
-        home_row(),
-    ]}
-
+    return strategy_lab_keyboard("fib_05_pullback")
 
 def signals_keyboard():
     return {"inline_keyboard": [
