@@ -7,6 +7,8 @@ from statistics import mean, pstdev
 from typing import Any
 
 from strategies.fib_pullback import analyze_symbol as analyze_fib_symbol, atr, normalize_klines, pivots
+from order_block_analyzer import analyze_order_blocks
+from fvg_analyzer import analyze_fvg
 
 
 def _f(value, default=0.0):
@@ -142,6 +144,167 @@ def _confirmation(candles: list[dict[str, float]], direction: str) -> dict[str, 
         reject = bear and upper_wick > body * 0.8
     return {"bull": bull, "bear": bear, "engulf": engulf, "bos": bos, "reject": reject}
 
+
+
+def _legacy_candles(candles: list[dict[str, float]]) -> list[dict[str, float]]:
+    """Adapt normalized Strategy Lab candles to legacy OB/FVG analyzers."""
+    return [
+        {
+            "open_time": x.get("ts"),
+            "open": x["open"], "high": x["high"], "low": x["low"],
+            "close": x["close"], "volume": x.get("volume", 0.0),
+        }
+        for x in candles
+    ]
+
+
+def _zone_for_direction(report: dict[str, Any], direction: str, kind: str) -> dict[str, Any] | None:
+    if not isinstance(report, dict) or not report.get("available"):
+        return None
+    if kind == "ob":
+        return report.get("nearestBullish") if direction == "LONG" else report.get("nearestBearish")
+    return report.get("nearestBullish") if direction == "LONG" else report.get("nearestBearish")
+
+
+def _zone_near_market(zone: dict[str, Any] | None, max_distance_pct: float = 1.5) -> bool:
+    if not zone:
+        return False
+    try:
+        return bool(zone.get("insideNow")) or float(zone.get("distancePercent") or 999) <= max_distance_pct
+    except Exception:
+        return False
+
+
+def analyze_smart_money_confluence(symbol, quote_volume, d1_rows, h4_rows, provider=None, derivatives=None):
+    """Rule-based SMC strategy.
+
+    SMC labels are treated as testable price-action features, not proof of
+    institutional intent. READY requires confluence instead of a single FVG/OB.
+    """
+    d1 = _closed(d1_rows, 90)
+    h4 = _closed(h4_rows, 90)
+    h1 = _closed((derivatives or {}).get("h1_rows") or [], 100)
+    if len(d1) < 80 or len(h4) < 70 or len(h1) < 80:
+        return {"strategy":"smart_money_confluence","symbol":symbol,"status":"NO_SETUP","reason":"Недостаточно D1/H4/H1 данных"}
+
+    tr = _trend(d1)
+    a4 = atr(h4, 14)
+    a1 = atr(h1, 14)
+    cur4 = h4[-1]
+    cur1 = h1[-1]
+    prior4 = h4[-60:-4]
+    external_low = min(x["low"] for x in prior4)
+    external_high = max(x["high"] for x in prior4)
+    range_mid = (external_low + external_high) / 2.0
+
+    # Detect sweep/reclaim over the last three closed H4 bars so a valid event
+    # is not lost just because the newest bar is the confirmation bar.
+    sweep_long = None
+    sweep_short = None
+    for x in h4[-3:]:
+        if x["low"] < external_low - a4 * 0.08 and x["close"] > external_low:
+            sweep_long = x
+        if x["high"] > external_high + a4 * 0.08 and x["close"] < external_high:
+            sweep_short = x
+
+    # Direction preference: actual sweep wins; otherwise HTF bias + proximity.
+    if sweep_long and not sweep_short:
+        direction = "LONG"
+    elif sweep_short and not sweep_long:
+        direction = "SHORT"
+    elif tr["direction"] == "UP":
+        direction = "LONG"
+    elif tr["direction"] == "DOWN":
+        direction = "SHORT"
+    else:
+        direction = "LONG" if cur4["close"] <= range_mid else "SHORT"
+
+    ob = analyze_order_blocks(_legacy_candles(h1))
+    fvg = analyze_fvg(_legacy_candles(h1))
+    ob_zone = _zone_for_direction(ob, direction, "ob")
+    fvg_zone = _zone_for_direction(fvg, direction, "fvg")
+    ob_near = _zone_near_market(ob_zone, 1.8)
+    fvg_near = _zone_near_market(fvg_zone, 1.8)
+    conf = _confirmation(h1, direction)
+    structure_shift = bool(conf.get("bos") or conf.get("engulf") or conf.get("reject"))
+    sweep = bool(sweep_long if direction == "LONG" else sweep_short)
+    premium_discount = cur4["close"] <= range_mid if direction == "LONG" else cur4["close"] >= range_mid
+
+    # Optional derivatives confirmation; never fabricate zero when unavailable.
+    funding = _extract_funding((derivatives or {}).get("premium"))
+    oi_change = _oi_change_pct(derivatives or {})
+    derivatives_support = False
+    if funding is not None:
+        derivatives_support |= (direction == "LONG" and funding <= 0) or (direction == "SHORT" and funding >= 0)
+    if oi_change is not None:
+        derivatives_support |= oi_change > 0
+
+    # Prefer the overlap/nearest institutional zone as context, but trigger entry
+    # only after H1 structure confirmation. That avoids a historical limit fill.
+    zones = [z for z in (ob_zone, fvg_zone) if z]
+    if zones:
+        zone_low = max(0.0, min(float(z.get("low") or cur1["close"]) for z in zones))
+        zone_high = max(float(z.get("high") or cur1["close"]) for z in zones)
+    else:
+        zone_low = cur1["close"] - a1 * 0.35
+        zone_high = cur1["close"] + a1 * 0.35
+
+    if direction == "LONG":
+        sweep_extreme = min((sweep_long or cur4)["low"], external_low)
+        entry = max(cur1["high"], cur1["close"]) + a1 * 0.03
+        stop = sweep_extreme - a1 * 0.25
+        target_liquidity = external_high - a4 * 0.10
+        tp = max(target_liquidity, entry + 2.2 * max(entry - stop, a1 * 0.5))
+    else:
+        sweep_extreme = max((sweep_short or cur4)["high"], external_high)
+        entry = min(cur1["low"], cur1["close"]) - a1 * 0.03
+        stop = sweep_extreme + a1 * 0.25
+        target_liquidity = external_low + a4 * 0.10
+        tp = min(target_liquidity, entry - 2.2 * max(stop - entry, a1 * 0.5))
+
+    risk = abs(entry - stop)
+    reward = abs(tp - entry)
+    rr = reward / risk if risk > 0 else 0.0
+    confluence_count = sum((sweep, structure_shift, ob_near, fvg_near, premium_discount))
+    zone_confluence = ob_near or fvg_near
+    ready = sweep and structure_shift and zone_confluence and rr >= 2.0
+    near = confluence_count >= 3 or (zone_confluence and premium_discount)
+    status = "READY" if ready else ("WATCH" if near else "WAITING")
+    if not sweep and not zone_confluence and confluence_count < 2:
+        status = "NO_SETUP"
+
+    score = 20.0
+    score += 22 if sweep else 0
+    score += 22 if structure_shift else 0
+    score += 12 if ob_near else 0
+    score += 12 if fvg_near else 0
+    score += 7 if premium_discount else 0
+    score += 5 if derivatives_support else 0
+    score += min(8, max(0, rr - 1.5) * 4)
+
+    if status == "READY":
+        reason = "Liquidity sweep + H1 structure shift + OB/FVG confluence"
+    elif status == "WATCH":
+        reason = "SMC confluence формируется; ждём полный sweep/structure trigger"
+    elif status == "WAITING":
+        reason = "HTF context есть, цена/структура ещё не дали SMC trigger"
+    else:
+        reason = "Недостаточно независимых SMC подтверждений"
+
+    return _base(
+        "smart_money_confluence", symbol, direction, status, reason, quote_volume, provider,
+        entry, stop, tp, score, cur1["close"], "STOP",
+        entry_zone_low=zone_low, entry_zone_high=zone_high,
+        external_liquidity_low=external_low, external_liquidity_high=external_high,
+        premium_discount="discount" if cur4["close"] <= range_mid else "premium",
+        liquidity_sweep=sweep, structure_shift=structure_shift,
+        order_block_near=ob_near, fvg_near=fvg_near,
+        order_block=ob_zone, fvg=fvg_zone,
+        funding_rate=funding, oi_change_pct=oi_change,
+        derivatives_support=derivatives_support,
+        confluence_count=confluence_count,
+        confirmation=conf,
+    )
 
 def analyze_liquidity_sweep(symbol, quote_volume, d1_rows, h4_rows, provider=None, derivatives=None):
     d1, h4 = _closed(d1_rows, 60), _closed(h4_rows, 40)
@@ -484,6 +647,7 @@ def analyze_rsi_divergence(symbol, quote_volume, d1_rows, h4_rows, provider=None
 
 
 ANALYZERS = {
+    "smart_money_confluence": analyze_smart_money_confluence,
     "liquidity_sweep_reclaim": analyze_liquidity_sweep,
     "ema_trend_pullback": analyze_ema_pullback,
     "breakout_retest": analyze_breakout_retest,

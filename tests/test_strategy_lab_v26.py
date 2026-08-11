@@ -19,10 +19,10 @@ def _rows(count, start=100.0, step=0.35, volume=1_000_000.0):
 
 
 def test_catalog_contains_all_strategy_lab_hypotheses():
-    assert len(STRATEGIES) == 11
+    assert len(STRATEGIES) == 12
     keys={s.key for s in STRATEGIES}
     assert {
-        "fib_05_pullback","liquidity_sweep_reclaim","ema_trend_pullback","breakout_retest",
+        "fib_05_pullback","smart_money_confluence","liquidity_sweep_reclaim","ema_trend_pullback","breakout_retest",
         "range_mean_reversion","anchored_vwap_pullback","volatility_squeeze","donchian_trend",
         "funding_oi_squeeze","oi_price_divergence","rsi_divergence_structure",
     } == keys
@@ -73,7 +73,7 @@ def test_directional_forward_execution_helpers_are_conservative():
 
 def test_strategy_reports_are_generated_for_every_strategy():
     home=strategy_home_text()
-    assert "11" in home
+    assert "12" in home
     for spec in STRATEGIES:
         assert spec.title.upper() in strategy_detail_text(spec.key)
         rules=rules_text(spec.key)

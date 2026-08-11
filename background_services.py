@@ -18,6 +18,7 @@ from ai_intelligence import run_ai_intelligence, build_signal_ai_block
 from ai_score_engine import claim_ai_alert
 from ai_optimizer import run_optimizer
 from adaptive_model_manager import train_candidate
+from strategies.scheduler import run_scheduled_cycle as run_strategy_lab_scheduled_cycle
 
 
 from core.scheduler import PeriodicWorker
@@ -83,6 +84,7 @@ class AutomationSupervisor:
         ai_minutes = self._minutes('AI_INTELLIGENCE_INTERVAL_MINUTES', 20)
         checkpoint_minutes = self._minutes('LEARNING_CHECKPOINT_INTERVAL_MINUTES', 10)
         optimizer_minutes = self._minutes('AI_OPTIMIZER_INTERVAL_MINUTES', 1440)
+        strategy_lab_minutes = self._minutes('STRATEGY_LAB_AUTO_INTERVAL_MINUTES', 30)
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
@@ -143,6 +145,11 @@ class AutomationSupervisor:
                 'learning-checkpoint', checkpoint_minutes * 60,
                 self._guarded('learning-checkpoint', self._run_learning_checkpoint), self.logger,
                 enabled=self._bool_env('LEARNING_CHECKPOINT_ENABLED', True), first_delay=240,
+            ),
+            PeriodicWorker(
+                'strategy-lab-auto', strategy_lab_minutes * 60,
+                self._guarded('strategy-lab-auto', self._run_strategy_lab_auto), self.logger,
+                enabled=self._bool_env('STRATEGY_LAB_AUTO_ENABLED', True), first_delay=300, jitter_seconds=15,
             ),
             PeriodicWorker(
                 'ai-optimizer-adaptive-models', optimizer_minutes * 60,
@@ -281,6 +288,17 @@ class AutomationSupervisor:
         initialize()
         result = save_checkpoint(DB_PATH, reason="periodic")
         self.logger(f"Learning checkpoint: status={result.get('status')}, bytes={result.get('size_bytes', 0)}")
+        return result
+
+    def _run_strategy_lab_auto(self):
+        result = run_strategy_lab_scheduled_cycle()
+        runs = result.get('runs') or []
+        ready = sum(int(x.get('ready') or 0) for x in runs)
+        analyzed = sum(int(x.get('analyzed') or 0) for x in runs)
+        self.logger(f"Strategy Lab auto: status={result.get('status')} runs={len(runs)} analyzed={analyzed} ready={ready}")
+        if ready and self._bool_env('STRATEGY_LAB_AUTO_NOTIFY_READY', False) and self.chat_id:
+            titles = [f"{x.get('title')}: {x.get('ready')} READY" for x in runs if int(x.get('ready') or 0) > 0]
+            self.sender(self.chat_id, "🧭 <b>Strategy Lab auto</b>\n" + "\n".join(titles))
         return result
 
     def _run_optimizer_models(self):

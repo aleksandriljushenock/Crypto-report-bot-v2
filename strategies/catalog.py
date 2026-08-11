@@ -12,6 +12,7 @@ class StrategySpec:
     description: str
     rules: tuple[str, ...]
     needs_derivatives: bool = False
+    needs_h1: bool = False
 
 
 STRATEGIES: tuple[StrategySpec, ...] = (
@@ -25,6 +26,21 @@ STRATEGIES: tuple[StrategySpec, ...] = (
             "На H4 нужен bullish trigger около зоны.",
             "SL ниже support с ATR buffer, TP перед D1 swing high.",
         ),
+    ),
+    StrategySpec(
+        "smart_money_confluence", "Smart Money Confluence", "🐋", "smc",
+        "SMC confluence: liquidity sweep + market structure shift + Order Block/FVG + premium/discount context.",
+        (
+            "На D1/H4 определяется рыночный bias и внешняя ликвидность.",
+            "Нужен liquidity sweep/reclaim значимого H4 swing либо цена должна находиться рядом с активной liquidity-zone.",
+            "На H1 ищется market structure shift (BOS/CHoCH/rejection) в сторону сделки.",
+            "Order Block или FVG должны подтверждать направление; лучший setup — их overlap/confluence.",
+            "LONG предпочтителен в discount, SHORT — в premium части H4 range.",
+            "Funding/OI используются только как дополнительный голос, отсутствие данных не превращается в zero.",
+            "Entry после подтверждения, SL за sweep/extreme, TP к противоположной внешней ликвидности; минимум около 2R.",
+        ),
+        needs_derivatives=True,
+        needs_h1=True,
     ),
     StrategySpec(
         "liquidity_sweep_reclaim", "Liquidity Sweep + Reclaim", "🟪", "sweep",

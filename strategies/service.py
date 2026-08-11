@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -14,6 +15,11 @@ from strategies.repository import repository
 
 logger = logging.getLogger("strategy_lab")
 DEFAULT_STRATEGY = "fib_05_pullback"
+_RUN_LOCK = threading.Lock()
+
+
+def is_strategy_scan_running() -> bool:
+    return _RUN_LOCK.locked()
 
 
 def _iso_ms(ts: float) -> datetime:
@@ -139,7 +145,7 @@ def _derivatives_snapshot(client, symbol: str) -> dict[str, Any]:
     return out
 
 
-def run_strategy_scan(strategy: str, progress=None) -> dict[str, Any]:
+def _run_strategy_scan_unlocked(strategy: str, progress=None) -> dict[str, Any]:
     spec = get_strategy(strategy)
     common_min = number("STRATEGY_LAB_MIN_VOLUME_USDT", 100_000_000, minimum=1_000_000)
     if spec.key == "fib_05_pullback":
@@ -170,6 +176,8 @@ def run_strategy_scan(strategy: str, progress=None) -> dict[str, Any]:
             provider_d1 = client.last_provider
             h4 = client.klines(symbol, "4h", h4_limit)
             derivatives = _derivatives_snapshot(client, symbol) if spec.needs_derivatives else {}
+            if spec.needs_h1:
+                derivatives["h1_rows"] = client.klines(symbol, "1h", integer("STRATEGY_LAB_H1_LIMIT", 260, minimum=100, maximum=600))
             analysis = analyze_strategy(spec.key, symbol, float(item.get("quoteVolume") or 0), d1, h4, provider_d1 or client.last_provider, derivatives)
             analysis["exchange_count"] = int(item.get("exchangeCount") or 0)
             results.append(analysis)
@@ -221,6 +229,21 @@ def run_strategy_scan(strategy: str, progress=None) -> dict[str, Any]:
     _safe_repo(lambda: repository.save_run(spec.key, summary, results[:50]), None)
     runtime_state.finish(state_name, phase="idle", processed=len(universe), total=len(universe), lastSummary=summary)
     return {"strategy": spec.key, "summary": summary, "results": results, "errors": errors}
+
+
+def run_strategy_scan(strategy: str, progress=None) -> dict[str, Any]:
+    spec = get_strategy(strategy)
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {
+            "strategy": spec.key,
+            "summary": {"strategy": spec.key, "busy": True, "analyzed": 0, "ready": 0, "watch": 0, "waiting": 0, "errors": 0},
+            "results": [],
+            "errors": [{"error": "Strategy Lab busy"}],
+        }
+    try:
+        return _run_strategy_scan_unlocked(spec.key, progress=progress)
+    finally:
+        _RUN_LOCK.release()
 
 
 def run_scan(progress=None):

@@ -4,6 +4,7 @@ import html
 
 from strategies.catalog import STRATEGIES, get_strategy
 from strategies.service import latest_run, stats, leaderboard
+from strategies.scheduler import status as scheduler_status
 
 
 def _p(v):
@@ -19,11 +20,16 @@ def _p(v):
 
 
 def strategy_home_text():
+    auto = scheduler_status()
+    state = "🟢 ON" if auto.get("enabled") else "⚪ OFF"
+    mode = "по одной стратегии (round-robin)" if auto.get("mode") == "round_robin" else "все стратегии за цикл"
     return (
         "🧭 <b>STRATEGY LAB</b>\n"
         "Независимые торговые гипотезы с отдельным forward-tracking и статистикой.\n\n"
         f"Доступно стратегий: <b>{len(STRATEGIES)}</b>.\n"
-        "Каждая стратегия анализируется отдельно и пока не смешивается с основным Paper Trading.\n\n"
+        f"⏱ Автоанализ: <b>{state}</b> · каждые <b>{auto.get('interval_minutes')} мин</b> · {mode}.\n"
+        "Автоскан не запускается параллельно с основным Deep Scan и тяжёлыми фоновыми задачами.\n\n"
+        "Каждая стратегия анализируется отдельно и пока не смешивается с основным Paper Trading.\n"
         "🏆 Leaderboard сравнивает Win Rate, Profit Factor и expectancy только по реально завершённым forward-setups."
     )
 
