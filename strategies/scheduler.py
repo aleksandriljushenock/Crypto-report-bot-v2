@@ -28,11 +28,21 @@ def mode() -> str:
     return raw if raw in {"round_robin", "all"} else "round_robin"
 
 
+def parallel_with_main() -> bool:
+    return boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True)
+
+
+def sync_with_main() -> bool:
+    return boolean("STRATEGY_LAB_SYNC_WITH_MAIN", True)
+
+
 def status() -> dict[str, Any]:
     return {
         "enabled": enabled(),
         "interval_minutes": interval_minutes(),
         "mode": mode(),
+        "parallel_with_main": parallel_with_main(),
+        "sync_with_main": sync_with_main(),
         "running": is_strategy_scan_running(),
         "last": dict(_LAST),
         "runtime": runtime_state.get("strategy_auto"),
@@ -46,10 +56,10 @@ def _next_spec():
     return spec
 
 
-def run_scheduled_cycle() -> dict[str, Any]:
+def run_scheduled_cycle(force_parallel_budget: bool = False) -> dict[str, Any]:
     if not enabled():
         return {"status": "disabled"}
-    if is_trade_scan_running():
+    if is_trade_scan_running() and not parallel_with_main():
         return {"status": "skipped-main-scanner"}
     if is_strategy_scan_running():
         return {"status": "skipped-strategy-busy"}
@@ -61,11 +71,11 @@ def run_scheduled_cycle() -> dict[str, Any]:
         specs = list(STRATEGIES) if mode() == "all" else [_next_spec()]
         outputs = []
         for idx, spec in enumerate(specs, 1):
-            if is_trade_scan_running():
+            if is_trade_scan_running() and not parallel_with_main():
                 outputs.append({"strategy": spec.key, "status": "skipped-main-scanner"})
                 break
             runtime_state.update("strategy_auto", phase="scan", name=spec.key, processed=idx-1, total=len(specs))
-            result = run_strategy_scan(spec.key)
+            result = run_strategy_scan(spec.key, force_parallel_budget=force_parallel_budget)
             summary = result.get("summary") or {}
             outputs.append({
                 "strategy": spec.key,

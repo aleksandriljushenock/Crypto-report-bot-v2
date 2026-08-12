@@ -23,12 +23,15 @@ def strategy_home_text():
     auto = scheduler_status()
     state = "🟢 ON" if auto.get("enabled") else "⚪ OFF"
     mode = "по одной стратегии (round-robin)" if auto.get("mode") == "round_robin" else "все стратегии за цикл"
+    parallel = "🟢 параллельно с основным сканом" if auto.get("parallel_with_main") else "⚪ отдельно от основного скана"
+    sync = "синхронно с полным scan" if auto.get("sync_with_main") else f"по таймеру {auto.get('interval_minutes')} мин"
     return (
         "🧭 <b>STRATEGY LAB</b>\n"
         "Независимые торговые гипотезы с отдельным forward-tracking и статистикой.\n\n"
         f"Доступно стратегий: <b>{len(STRATEGIES)}</b>.\n"
-        f"⏱ Автоанализ: <b>{state}</b> · каждые <b>{auto.get('interval_minutes')} мин</b> · {mode}.\n"
-        "Автоскан не запускается параллельно с основным Deep Scan и тяжёлыми фоновыми задачами.\n\n"
+        f"⏱ Автоанализ: <b>{state}</b> · {mode}.\n"
+        f"⚡ Режим: <b>{parallel}</b> · {sync}.\n"
+        "При совместной работе Strategy Lab получает отдельный ограниченный бюджет монет и throttle, чтобы не забивать API/RAM.\n\n"
         "Каждая стратегия анализируется отдельно и пока не смешивается с основным Paper Trading.\n"
         "🏆 Leaderboard сравнивает Win Rate, Profit Factor и expectancy только по реально завершённым forward-setups."
     )

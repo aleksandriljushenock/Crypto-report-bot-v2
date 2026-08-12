@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from core.runtime_config import integer, number
+from core.runtime_config import boolean, integer, number
 from core import runtime_state
 from trade_market_client import collect_multi_exchange_universe, create_trade_market_client
 from strategies.analyzers import analyze_strategy
@@ -145,7 +146,7 @@ def _derivatives_snapshot(client, symbol: str) -> dict[str, Any]:
     return out
 
 
-def _run_strategy_scan_unlocked(strategy: str, progress=None) -> dict[str, Any]:
+def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_budget: bool = False) -> dict[str, Any]:
     spec = get_strategy(strategy)
     common_min = number("STRATEGY_LAB_MIN_VOLUME_USDT", 100_000_000, minimum=1_000_000)
     if spec.key == "fib_05_pullback":
@@ -156,6 +157,19 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None) -> dict[str, Any]:
         min_volume = number(f"STRATEGY_{spec.short.upper()}_MIN_VOLUME_USDT", common_min, minimum=1_000_000)
         legacy_max = 120
     max_symbols = integer("STRATEGY_LAB_MAX_SYMBOLS", legacy_max, minimum=10, maximum=300)
+    main_scanner_running = False
+    try:
+        from scanner.pipeline import is_trade_scan_running
+        main_scanner_running = bool(is_trade_scan_running())
+    except Exception:
+        main_scanner_running = False
+    parallel_mode = bool(force_parallel_budget) or (main_scanner_running and boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True))
+    if parallel_mode:
+        max_symbols = min(
+            max_symbols,
+            integer("STRATEGY_LAB_PARALLEL_MAX_SYMBOLS", 80, minimum=10, maximum=300),
+        )
+    parallel_throttle_ms = integer("STRATEGY_LAB_PARALLEL_THROTTLE_MS", 100, minimum=0, maximum=5000) if parallel_mode else 0
     d1_limit = integer("STRATEGY_LAB_D1_LIMIT", 240, minimum=90, maximum=500)
     h4_limit = integer("STRATEGY_LAB_H4_LIMIT", 220, minimum=80, maximum=500)
     state_name = f"strategy_{spec.short}"
@@ -207,9 +221,11 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None) -> dict[str, Any]:
                 _safe_repo(lambda r=row: repository.upsert_setup(r), None)
         except Exception as exc:
             errors.append({"symbol": symbol, "error": str(exc)[:240]})
-        runtime_state.update(state_name, processed=idx)
+        runtime_state.update(state_name, processed=idx, parallelWithMain=parallel_mode)
         if progress:
             progress(idx, len(universe), symbol)
+        if parallel_throttle_ms:
+            time.sleep(parallel_throttle_ms / 1000.0)
 
     rank = {"READY": 0, "WATCH": 1, "WAITING": 2, "NO_SETUP": 3}
     results.sort(key=lambda x: (rank.get(x.get("status"), 9), -float(x.get("score") or 0), float(x.get("distance_to_zone_pct") or 999)))
@@ -225,13 +241,15 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None) -> dict[str, Any]:
         "min_volume_usdt": min_volume,
         "providers_ok": sum(1 for x in providers.values() if x.get("ok")),
         "run_at": datetime.now(timezone.utc).isoformat(),
+        "parallel_with_main": parallel_mode,
+        "parallel_budget_symbols": max_symbols if parallel_mode else None,
     }
     _safe_repo(lambda: repository.save_run(spec.key, summary, results[:50]), None)
     runtime_state.finish(state_name, phase="idle", processed=len(universe), total=len(universe), lastSummary=summary)
     return {"strategy": spec.key, "summary": summary, "results": results, "errors": errors}
 
 
-def run_strategy_scan(strategy: str, progress=None) -> dict[str, Any]:
+def run_strategy_scan(strategy: str, progress=None, force_parallel_budget: bool = False) -> dict[str, Any]:
     spec = get_strategy(strategy)
     if not _RUN_LOCK.acquire(blocking=False):
         return {
@@ -241,7 +259,7 @@ def run_strategy_scan(strategy: str, progress=None) -> dict[str, Any]:
             "errors": [{"error": "Strategy Lab busy"}],
         }
     try:
-        return _run_strategy_scan_unlocked(spec.key, progress=progress)
+        return _run_strategy_scan_unlocked(spec.key, progress=progress, force_parallel_budget=force_parallel_budget)
     finally:
         _RUN_LOCK.release()
 

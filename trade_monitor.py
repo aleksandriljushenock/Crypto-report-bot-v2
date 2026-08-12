@@ -98,7 +98,7 @@ class TradeMonitor:
         try:
             from core.runtime_state import get as runtime_get
             from strategies.catalog import STRATEGIES
-            if any(runtime_get(f"strategy_{spec.short}").get("running") for spec in STRATEGIES):
+            if (not boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True)) and any(runtime_get(f"strategy_{spec.short}").get("running") for spec in STRATEGIES):
                 return 0
         except Exception:
             pass
@@ -169,21 +169,42 @@ class TradeMonitor:
                 self.heartbeat_at = datetime.now(timezone.utc).isoformat()
                 self._stop_event.wait(min(30, max(1, deadline - time.time())))
 
-    def run_once(self, settings=None):
+    def _start_parallel_strategy_cycle(self):
+        if not boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True):
+            return False
+        if not boolean("STRATEGY_LAB_SYNC_WITH_MAIN", True):
+            return False
         try:
-            from core.runtime_state import get as runtime_get
-            from strategies.catalog import STRATEGIES
-            active = next((spec for spec in STRATEGIES if runtime_get(f"strategy_{spec.short}").get("running")), None)
-            if active is not None:
-                self.logger(f"Монитор: полный скан пропущен — выполняется Strategy Lab: {active.title}.")
-                return {"signals": [], "busy": True, "busyOwner": f"strategy_{active.short}"}
-        except Exception:
-            pass
+            from strategies.scheduler import run_scheduled_cycle
+            def _runner():
+                try:
+                    result = run_scheduled_cycle(force_parallel_budget=True)
+                    self.logger(f"Strategy Lab parallel cycle: status={result.get('status')} runs={len(result.get('runs') or [])}")
+                except Exception as exc:
+                    self.logger(f"Strategy Lab parallel cycle error: {exc}")
+            threading.Thread(target=_runner, daemon=True, name="strategy-lab-parallel").start()
+            return True
+        except Exception as exc:
+            self.logger(f"Strategy Lab parallel start error: {exc}")
+            return False
+
+    def run_once(self, settings=None):
+        if not boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True):
+            try:
+                from core.runtime_state import get as runtime_get
+                from strategies.catalog import STRATEGIES
+                active = next((spec for spec in STRATEGIES if runtime_get(f"strategy_{spec.short}").get("running")), None)
+                if active is not None:
+                    self.logger(f"Монитор: полный скан пропущен — выполняется Strategy Lab: {active.title}.")
+                    return {"signals": [], "busy": True, "busyOwner": f"strategy_{active.short}"}
+            except Exception:
+                pass
         settings = settings or get_monitor_settings()
         chat_id = settings.get('chat_id')
         if not chat_id:
             self.logger('Монитор пропустил цикл: chat_id не задан.')
             return {'signals': []}
+        self._start_parallel_strategy_cycle()
         result = run_trade_scan(include_watch=False, max_results=5, source='monitor')
         if result.get('busy'):
             self.logger('Монитор: полный скан пропущен — scan engine уже занят.')

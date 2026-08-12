@@ -149,7 +149,7 @@ class AutomationSupervisor:
             PeriodicWorker(
                 'strategy-lab-auto', strategy_lab_minutes * 60,
                 self._guarded('strategy-lab-auto', self._run_strategy_lab_auto), self.logger,
-                enabled=self._bool_env('STRATEGY_LAB_AUTO_ENABLED', True), first_delay=300, jitter_seconds=15,
+                enabled=(self._bool_env('STRATEGY_LAB_AUTO_ENABLED', True) and not self._bool_env('STRATEGY_LAB_SYNC_WITH_MAIN', True)), first_delay=300, jitter_seconds=15,
             ),
             PeriodicWorker(
                 'ai-optimizer-adaptive-models', optimizer_minutes * 60,

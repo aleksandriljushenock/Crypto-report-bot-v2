@@ -971,7 +971,8 @@ def start_trade_scan(chat_id):
         engine_busy = is_trade_scan_running()
         manual_busy = trade_scan_thread is not None and trade_scan_thread.is_alive()
         fib_busy = strategy_lab_thread is not None and strategy_lab_thread.is_alive()
-        if engine_busy or manual_busy or fib_busy:
+        strategy_blocks_main = fib_busy and not boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True)
+        if engine_busy or manual_busy or strategy_blocks_main:
             st = get_trade_scan_runtime_state()
             owner = st.get('owner') or ('strategy_lab' if fib_busy else ('manual' if manual_busy else 'unknown'))
             owner_text = 'фоновый монитор' if owner == 'monitor' else ('Strategy Lab' if owner == 'strategy_lab' else ('ручной скан' if owner == 'manual' else 'другой цикл'))
@@ -1018,11 +1019,11 @@ def start_strategy_lab_scan(chat_id, strategy):
     from trade_engine import is_trade_scan_running
     spec = get_lab_strategy(strategy)
     with strategy_lab_lock:
-        if is_trade_scan_running():
+        if is_trade_scan_running() and not boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True):
             send_message(
                 chat_id,
                 "⏳ <b>Основной сканер сейчас занят.</b>\n"
-                "Strategy Lab не запускаю параллельно, чтобы не удваивать API/RAM.",
+                "Параллельный Strategy Lab отключён в настройках.",
                 reply_markup=strategy_lab_keyboard(spec.key),
             )
             return
