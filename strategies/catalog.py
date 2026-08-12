@@ -28,6 +28,34 @@ STRATEGIES: tuple[StrategySpec, ...] = (
         ),
     ),
     StrategySpec(
+        "ma_ribbon_cross", "MA Ribbon 8/13/21/55", "📶", "maribbon",
+        "H4 bullish MA-ribbon reversal: EMA8 + SMA13/SMA21 подтверждённо переходят выше SMA55 на ликвидных монетах.",
+        (
+            "Universe: USDT perpetual с 24h quote volume от $100M.",
+            "Рабочий таймфрейм H4; D1 используется как фильтр старшего тренда.",
+            "EMA8 и SMA13/SMA21 должны перейти из-под SMA55 выше неё в небольшом временном окне.",
+            "Для BUY нужен чистый bullish stack: price > EMA8 > SMA13 > SMA21 > SMA55.",
+            "SMA55 должна иметь положительный slope; D1 не должен быть медвежьим, READY требует D1 UP.",
+            "Дополнительные фильтры качества: volume expansion, RSI без перекупленности и H4 structure confirmation.",
+            "Entry — stop-confirmation выше сигнальной H4 свечи; SL ниже локальной структуры/MA55 с ATR buffer; TP около 2.5R или D1 high.",
+            "Важно: буквальный рост SMA55 сквозь EMA8/SMA13/SMA21 обычно является медвежьим событием; он отслеживается, но не создаёт BUY.",
+        ),
+    ),
+    StrategySpec(
+        "ma55_cycle", "MA55 Cycle 8/13/21/55", "🔄", "ma55cycle",
+        "Циклическая LONG-стратегия: BUY, когда SMA55 проходит EMA8/SMA13/SMA21 сверху вниз; выход — обратное пересечение снизу вверх.",
+        (
+            "Universe: USDT perpetual с 24h quote volume от $100M.",
+            "Рабочий таймфрейм H4; используются EMA8 и SMA13/SMA21/SMA55.",
+            "BUY-event: SMA55 была выше всех трёх быстрых линий и в течение максимум 12 закрытых H4 свечей оказалась ниже всех трёх.",
+            "Для READY требуется D1 UP, bullish stack price > EMA8 > SMA13 > SMA21 > SMA55, положительный slope SMA55 и отсутствие сильной перекупленности/перерастяжения.",
+            "После BUY сигнал отправляется в Telegram; forward-entry фиксируется по первой будущей 1H свече, чтобы не использовать цену задним числом.",
+            "Обычный EXIT: SMA55 проходит EMA8/SMA13/SMA21 снизу вверх. На этом событии отправляется сигнал закрыть LONG.",
+            "Защитный аварийный SL остаётся под H4 structure/MA55: он нужен только для ограничения риска, если рынок обвалится раньше обратного MA-cross.",
+            "Статистика считает фактический return от forward-entry до reverse-cross/SL, Win Rate, Profit Factor, expectancy, cumulative return и max drawdown.",
+        ),
+    ),
+    StrategySpec(
         "smart_money_confluence", "Smart Money Confluence", "🐋", "smc",
         "SMC confluence: liquidity sweep + market structure shift + Order Block/FVG + premium/discount context.",
         (

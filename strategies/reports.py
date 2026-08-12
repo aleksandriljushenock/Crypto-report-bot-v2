@@ -109,6 +109,7 @@ def winrate_text(strategy: str = "fib_05_pullback"):
         f"Win Rate: <b>{s['win_rate']:.1f}%</b>",
         f"Profit Factor: <b>{pf_text}</b>",
         f"Expectancy / средний return: <b>{s['expectancy']:+.2f}%</b>",
+        f"Суммарный return: <b>{s.get('cumulative_return',0):+.2f}%</b> · Max DD: <b>{s.get('max_drawdown',0):.2f}%</b>",
         "",
         f"Ожидают entry: {s['waiting']} · Открыты: {s['open']} · Expired: {s['expired']}",
     ]
@@ -183,3 +184,39 @@ def fib_home_text():
 
 def fib_scan_report(result):
     return scan_report(result, "fib_05_pullback")
+
+
+def strategy_notification_messages(scheduled_result: dict) -> list[str]:
+    """Telegram notifications for strategies that explicitly require live BUY/CLOSE alerts."""
+    messages: list[str] = []
+    for run in scheduled_result.get("runs") or []:
+        if run.get("strategy") != "ma55_cycle":
+            continue
+        for ev in run.get("new_ready_events") or []:
+            messages.append(
+                "🔄 <b>MA55 CYCLE — BUY SIGNAL</b>\n\n"
+                f"<b>{html.escape(str(ev.get('symbol') or ''))}</b> · LONG\n"
+                f"Reference: <b>{_p(ev.get('reference_price'))}</b>\n"
+                f"Protective SL: <b>{_p(ev.get('stop_price'))}</b>\n"
+                f"Score: <b>{float(ev.get('score') or 0):.0f}</b>\n\n"
+                "SMA55 завершила переход сверху вниз через EMA8/SMA13/SMA21. "
+                "Для статистики фактический entry фиксируется на первой будущей 1H свече.\n"
+                f"<i>{html.escape(str(ev.get('reason') or ''))}</i>"
+            )
+        for ev in run.get("outcome_events") or []:
+            outcome = str(ev.get("outcome") or "")
+            if outcome == "MA55_REVERSE_CROSS":
+                title = "🔔 <b>MA55 CYCLE — CLOSE LONG</b>"
+                reason = "SMA55 пересекла EMA8/SMA13/SMA21 снизу вверх — штатный выход стратегии."
+            elif outcome == "RISK_SL":
+                title = "🛑 <b>MA55 CYCLE — EMERGENCY EXIT</b>"
+                reason = "Сработал защитный risk-stop раньше обратного MA-cross."
+            else:
+                continue
+            messages.append(
+                f"{title}\n\n<b>{html.escape(str(ev.get('symbol') or ''))}</b>\n"
+                f"Entry: <b>{_p(ev.get('entry_price'))}</b>\n"
+                f"Exit: <b>{_p(ev.get('exit_price'))}</b>\n"
+                f"Result: <b>{float(ev.get('return_pct') or 0):+.2f}%</b>\n\n{reason}"
+            )
+    return messages

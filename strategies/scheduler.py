@@ -68,7 +68,16 @@ def run_scheduled_cycle(force_parallel_budget: bool = False) -> dict[str, Any]:
     runtime_state.start("strategy_auto", phase="select", processed=0, total=1)
     started = datetime.now(timezone.utc).isoformat()
     try:
-        specs = list(STRATEGIES) if mode() == "all" else [_next_spec()]
+        if mode() == "all":
+            specs = list(STRATEGIES)
+        else:
+            selected = _next_spec()
+            specs = [selected]
+            # MA55 Cycle is an H4 entry/exit strategy with explicit Telegram BUY/CLOSE
+            # alerts. Check it every main cycle so a reverse-cross is not delayed by
+            # a full round-robin across all Strategy Lab hypotheses.
+            if boolean("STRATEGY_MA55CYCLE_PRIORITY_ENABLED", True) and selected.key != "ma55_cycle":
+                specs.insert(0, get_strategy("ma55_cycle"))
         outputs = []
         for idx, spec in enumerate(specs, 1):
             if is_trade_scan_running() and not parallel_with_main():
@@ -84,6 +93,8 @@ def run_scheduled_cycle(force_parallel_budget: bool = False) -> dict[str, Any]:
                 "watch": int(summary.get("watch") or 0),
                 "analyzed": int(summary.get("analyzed") or 0),
                 "busy": bool(summary.get("busy")),
+                "new_ready_events": list(summary.get("new_ready_events") or []),
+                "outcome_events": list(summary.get("outcome_events") or []),
             })
         payload = {"status": "ok", "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(), "runs": outputs}
         _LAST.clear(); _LAST.update(payload)

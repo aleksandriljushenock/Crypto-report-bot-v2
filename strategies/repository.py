@@ -20,13 +20,14 @@ class StrategyRepository:
                 .order("created_at", desc=True).limit(1).execute().data or [])
         return rows[0] if rows else None
 
-    def upsert_setup(self, row: dict[str, Any]) -> None:
-        # Never reset a resolved setup when the same D1 swing is discovered again.
+    def upsert_setup(self, row: dict[str, Any]) -> bool:
+        # Never reset a resolved setup when the same event is discovered again.
         existing = (_client().table("strategy_setups").select("id,state").eq("fingerprint", row["fingerprint"])
                     .limit(1).execute().data or [])
         if existing:
-            return
+            return False
         _client().table("strategy_setups").insert(row).execute()
+        return True
 
     def active_setups(self, strategy: str, limit: int = 100) -> list[dict[str, Any]]:
         rows = (_client().table("strategy_setups").select("*").eq("strategy", strategy)

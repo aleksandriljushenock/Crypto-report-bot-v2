@@ -9,7 +9,7 @@ from typing import Any
 from core.runtime_config import boolean, integer, number
 from core import runtime_state
 from trade_market_client import collect_multi_exchange_universe, create_trade_market_client
-from strategies.analyzers import analyze_strategy
+from strategies.analyzers import analyze_strategy, ma55_cycle_event
 from strategies.catalog import STRATEGIES, get_strategy
 from strategies.fib_pullback import normalize_klines
 from strategies.repository import repository
@@ -69,15 +69,100 @@ def _return_pct(direction: str, entry: float, exit_price: float) -> float:
     return raw if str(direction).upper() == "LONG" else -raw
 
 
-def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dict[str, int]:
+
+def _ma55_cycle_outcome(client, setup: dict[str, Any], now: datetime) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Forward-track MA55 cycle until reverse cross or protective stop."""
+    created = datetime.fromisoformat(str(setup["created_at"]).replace("Z", "+00:00"))
+    state = setup.get("state") or "waiting_entry"
+    direction = "LONG"
+    entry = float(setup["entry_price"])
+    stop = float(setup["stop_price"])
+    entered_at_raw = setup.get("entered_at")
+    entered_at = datetime.fromisoformat(str(entered_at_raw).replace("Z", "+00:00")) if entered_at_raw else None
+    values: dict[str, Any] = {}
+
+    # Realistic forward fill: first future hourly bar after the strategy was found.
+    hourly = normalize_klines(client.klines(setup["symbol"], "1h", 500))
+    hourly = hourly[:-1] if len(hourly) > 1 else hourly
+    if state == "waiting_entry":
+        first = next((x for x in hourly if _iso_ms(x["ts"]) > created), None)
+        if first is None:
+            if now - created > timedelta(days=3):
+                return ({"state": "expired", "outcome": "ENTRY_EXPIRED", "resolved_at": now.isoformat(), "return_pct": 0}, None)
+            return ({}, None)
+        entry = float(first.get("open") or first.get("close") or entry)
+        entered_at = _iso_ms(first["ts"])
+        state = "open"
+        values.update(state="open", entered_at=entered_at.isoformat(), entry_price=entry)
+
+    if state != "open" or entered_at is None:
+        return values, None
+
+    # Protective stop is checked at 1H resolution.
+    stop_event = None
+    for bar in hourly:
+        dt = _iso_ms(bar["ts"])
+        if dt < entered_at:
+            continue
+        if float(bar["low"]) <= stop:
+            stop_event = (dt, stop)
+            break
+
+    # Normal strategy exit: a completed reverse 55 cross on CLOSED H4 candles.
+    h4 = normalize_klines(client.klines(setup["symbol"], "4h", 320))
+    h4 = h4[:-1] if len(h4) > 1 else h4
+    cross_event = None
+    # Walk forward through H4 history and detect the first reverse transition after entry.
+    for end in range(60, len(h4) + 1):
+        bar_dt = _iso_ms(h4[end - 1]["ts"])
+        if bar_dt < entered_at:
+            continue
+        event = ma55_cycle_event(h4[:end], "EXIT", 12)
+        if event:
+            cross_event = (bar_dt, float(event.get("price") or h4[end - 1]["close"]))
+            break
+
+    candidates = []
+    if stop_event:
+        candidates.append((stop_event[0], "RISK_SL", stop_event[1]))
+    if cross_event:
+        candidates.append((cross_event[0], "MA55_REVERSE_CROSS", cross_event[1]))
+    if not candidates:
+        return values, None
+
+    when, outcome, exit_price = min(candidates, key=lambda x: x[0])
+    ret = round(_return_pct(direction, entry, float(exit_price)), 4)
+    new_state = "won" if ret > 0 else "lost"
+    values.update(state=new_state, outcome=outcome, resolved_at=when.isoformat(), return_pct=ret)
+    event = {
+        "strategy": "ma55_cycle", "symbol": setup.get("symbol"), "type": "CLOSE",
+        "outcome": outcome, "entry_price": entry, "exit_price": float(exit_price),
+        "return_pct": ret, "resolved_at": when.isoformat(), "state": new_state,
+    }
+    return values, event
+
+def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dict[str, Any]:
     spec = get_strategy(strategy)
     active = _safe_repo(lambda: repository.active_setups(spec.key, max_rows), []) or []
     client = create_trade_market_client()
     now = datetime.now(timezone.utc)
-    result = {"checked": 0, "opened": 0, "won": 0, "lost": 0, "expired": 0, "errors": 0}
+    result = {"checked": 0, "opened": 0, "won": 0, "lost": 0, "expired": 0, "errors": 0, "events": []}
     for setup in active:
         result["checked"] += 1
         try:
+            if spec.key == "ma55_cycle":
+                values, event = _ma55_cycle_outcome(client, setup, now)
+                if values:
+                    old_state = setup.get("state") or "waiting_entry"
+                    new_state = values.get("state", old_state)
+                    _safe_repo(lambda s=setup, v=values: repository.update_setup(s["id"], v), None)
+                    if old_state == "waiting_entry" and new_state == "open":
+                        result["opened"] += 1
+                    if new_state in {"won", "lost", "expired"} and new_state != old_state:
+                        result[new_state] += 1
+                if event:
+                    result["events"].append(event)
+                continue
             rows = normalize_klines(client.klines(setup["symbol"], "1h", 500))
             created = datetime.fromisoformat(str(setup["created_at"]).replace("Z", "+00:00"))
             candles = [x for x in rows if _iso_ms(x["ts"]) >= created]
@@ -174,7 +259,7 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
     h4_limit = integer("STRATEGY_LAB_H4_LIMIT", 220, minimum=80, maximum=500)
     state_name = f"strategy_{spec.short}"
     runtime_state.start(state_name, name=spec.key, phase="universe", processed=0, total=0)
-    update_outcomes(30, spec.key)
+    outcome_update = update_outcomes(30, spec.key)
     universe, providers = collect_multi_exchange_universe(top_limit=300, min_quote_volume=min_volume, timeout=8)
     universe = sorted(universe, key=lambda x: float(x.get("quoteVolume") or 0), reverse=True)
     eligible_total = len(universe)
@@ -183,6 +268,7 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
     client = create_trade_market_client()
     results = []
     errors = []
+    new_ready_events = []
     for idx, item in enumerate(universe, 1):
         symbol = item["symbol"]
         try:
@@ -218,7 +304,15 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
                     "payload": analysis,
                     "entered_at": None,
                 }
-                _safe_repo(lambda r=row: repository.upsert_setup(r), None)
+                inserted = bool(_safe_repo(lambda r=row: repository.upsert_setup(r), False))
+                if inserted:
+                    new_ready_events.append({
+                        "strategy": spec.key, "type": "BUY", "symbol": symbol,
+                        "direction": row["direction"], "reference_price": analysis.get("market_price") or row["entry_price"],
+                        "entry_price": row["entry_price"], "stop_price": row["stop_price"],
+                        "score": row.get("score"), "reason": analysis.get("reason"),
+                        "fingerprint": row["fingerprint"],
+                    })
         except Exception as exc:
             errors.append({"symbol": symbol, "error": str(exc)[:240]})
         runtime_state.update(state_name, processed=idx, parallelWithMain=parallel_mode)
@@ -243,6 +337,8 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
         "run_at": datetime.now(timezone.utc).isoformat(),
         "parallel_with_main": parallel_mode,
         "parallel_budget_symbols": max_symbols if parallel_mode else None,
+        "new_ready_events": new_ready_events,
+        "outcome_events": list(outcome_update.get("events") or []),
     }
     _safe_repo(lambda: repository.save_run(spec.key, summary, results[:50]), None)
     runtime_state.finish(state_name, phase="idle", processed=len(universe), total=len(universe), lastSummary=summary)
@@ -283,6 +379,14 @@ def stats(strategy: str = DEFAULT_STRATEGY) -> dict[str, Any]:
     returns = [float(x.get("return_pct") or 0) for x in resolved]
     gross_win = sum(max(0.0, x) for x in returns)
     gross_loss = abs(sum(min(0.0, x) for x in returns))
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    # Rows are newest-first; calculate the equity path chronologically.
+    for value in reversed(returns):
+        equity += value
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
     return {
         "strategy": spec.key,
         "total": len(rows),
@@ -293,6 +397,8 @@ def stats(strategy: str = DEFAULT_STRATEGY) -> dict[str, Any]:
         "avg_return": (sum(returns) / len(returns)) if returns else 0.0,
         "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0),
         "expectancy": (sum(returns) / len(returns)) if returns else 0.0,
+        "cumulative_return": sum(returns),
+        "max_drawdown": max_drawdown,
         "waiting": sum(1 for x in rows if x.get("state") == "waiting_entry"),
         "open": sum(1 for x in rows if x.get("state") == "open"),
         "expired": sum(1 for x in rows if x.get("state") == "expired"),

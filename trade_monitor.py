@@ -169,7 +169,7 @@ class TradeMonitor:
                 self.heartbeat_at = datetime.now(timezone.utc).isoformat()
                 self._stop_event.wait(min(30, max(1, deadline - time.time())))
 
-    def _start_parallel_strategy_cycle(self):
+    def _start_parallel_strategy_cycle(self, chat_id=None):
         if not boolean("STRATEGY_LAB_PARALLEL_WITH_MAIN", True):
             return False
         if not boolean("STRATEGY_LAB_SYNC_WITH_MAIN", True):
@@ -180,6 +180,13 @@ class TradeMonitor:
                 try:
                     result = run_scheduled_cycle(force_parallel_budget=True)
                     self.logger(f"Strategy Lab parallel cycle: status={result.get('status')} runs={len(result.get('runs') or [])}")
+                    if chat_id:
+                        try:
+                            from strategies.reports import strategy_notification_messages
+                            for message in strategy_notification_messages(result):
+                                self.sender(chat_id, message)
+                        except Exception as notify_exc:
+                            self.logger(f"Strategy Lab notification error: {notify_exc}")
                 except Exception as exc:
                     self.logger(f"Strategy Lab parallel cycle error: {exc}")
             threading.Thread(target=_runner, daemon=True, name="strategy-lab-parallel").start()
@@ -204,7 +211,7 @@ class TradeMonitor:
         if not chat_id:
             self.logger('Монитор пропустил цикл: chat_id не задан.')
             return {'signals': []}
-        self._start_parallel_strategy_cycle()
+        self._start_parallel_strategy_cycle(chat_id)
         result = run_trade_scan(include_watch=False, max_results=5, source='monitor')
         if result.get('busy'):
             self.logger('Монитор: полный скан пропущен — scan engine уже занят.')
