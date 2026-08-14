@@ -156,13 +156,16 @@ def _paper_snapshot():
         stats = get_paper_performance() or {}
         account = stats.get("account") or {}
         return {
-            "balance": _num(account.get("balance")),
+            "balance": _num(stats.get("derived_free_balance"), account.get("balance") or 0),
+            "equity": _num(stats.get("derived_equity"), account.get("equity") or 0),
             "initial": _num(account.get("initial_balance"), 100),
             "pnl": _num(stats.get("net_pnl"), account.get("realized_pnl") or 0),
             "closed": int(stats.get("closed_count") or 0),
             "open": len(stats.get("open_positions") or []),
+            "pending": len(stats.get("pending_positions") or []),
             "win_rate": _num(stats.get("win_rate")),
             "pf": _num(stats.get("profit_factor")),
+            "liquidations": int(stats.get("liquidations") or 0),
         }
     except Exception as exc:
         _logger.warning("Paper snapshot error: %s", exc)
@@ -543,21 +546,28 @@ def build_paper_goal_text():
 def build_paper_status_text():
     stats = get_paper_performance()
     account = stats.get("account") or {}
-    balance = float(account.get("balance") or 0)
+    free_balance = float(stats.get("derived_free_balance") if stats.get("derived_free_balance") is not None else account.get("balance") or 0)
+    equity = float(stats.get("derived_equity") if stats.get("derived_equity") is not None else account.get("equity") or 0)
     initial = float(account.get("initial_balance") or 0)
-    pnl = float(stats.get("net_pnl") or account.get("realized_pnl") or 0)
+    pnl = float(stats.get("net_pnl") or 0)
     enabled = boolean("PAPER_TRADING_ENABLED", True)
+    pf = float(stats.get("profit_factor") or 0)
+    pf_text = "∞" if pf >= 999 else f"{pf:.2f}"
+    drift = max(abs(float(stats.get("accounting_drift_balance") or 0)), abs(float(stats.get("accounting_drift_equity") or 0)))
+    sync_line = "🟢 учёт согласован" if drift < 0.01 else f"🟠 расхождение ledger/account: ${drift:.4f}"
     return (
         "🧪 <b>PAPER TRADING</b>\n\n"
         f"Статус: <b>{'🟢 включён' if enabled else '⚪ выключен'}</b>\n"
-        f"Стартовый баланс: <b>${initial:.2f}</b>\n"
-        f"Текущий баланс: <b>${balance:.2f}</b>\n"
-        f"Net PnL: <b>{pnl:+.4f} USDT</b>\n"
-        f"Закрытых сделок: <b>{stats.get('closed_count', 0)}</b>\n"
-        f"Win rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b>\n"
-        f"Profit Factor: <b>{float(stats.get('profit_factor') or 0):.2f}</b>\n"
-        f"Открытых позиций: <b>{len(stats.get('open_positions') or [])}</b>\n\n"
-        "Плечо рассчитывается так, чтобы оценочная ликвидация находилась за стопом с заданным запасом."
+        f"Стартовый капитал: <b>${initial:.2f}</b>\n"
+        f"Свободный баланс: <b>${free_balance:.2f}</b>\n"
+        f"Realized equity: <b>${equity:.2f}</b>\n"
+        f"Net PnL: <b>{pnl:+.4f} USDT</b> • ROI <b>{float(stats.get('roi_pct') or 0):+.2f}%</b>\n\n"
+        f"Закрыто: <b>{stats.get('closed_count', 0)}</b> • ✅ {stats.get('wins',0)} / ❌ {stats.get('losses',0)} / ➖ {stats.get('breakeven',0)}\n"
+        f"Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b> • PF <b>{pf_text}</b>\n"
+        f"TP: <b>{stats.get('tp_closes',0)}</b> • SL: <b>{stats.get('sl_closes',0)}</b> • 💥 Liquidation: <b>{stats.get('liquidations',0)}</b> • Time: <b>{stats.get('time_exits',0)}</b>\n"
+        f"Открытых: <b>{len(stats.get('open_positions') or [])}</b> • ждут entry: <b>{len(stats.get('pending_positions') or [])}</b>\n"
+        f"Учёт: <b>{sync_line}</b>\n\n"
+        "Liquidation отслеживается по 1m/5m OHLC с перекрытием окна; если свеча достигает liquidation level, Paper использует консервативный liquidation outcome."
     )
 
 
@@ -584,7 +594,8 @@ def build_paper_history_text():
     lines = ["📜 <b>ИСТОРИЯ PAPER-СДЕЛОК</b>", ""]
     for row in rows:
         pnl = float(row.get("net_pnl") or 0)
-        icon = "✅" if pnl > 0 else "❌"
+        reason = str(row.get("close_reason") or "")
+        icon = "💥" if reason.startswith("LIQUIDATION") else ("✅" if pnl > 0 else ("➖" if abs(pnl) <= 1e-9 else "❌"))
         lines.append(
             f"{icon} <b>{html.escape(str(row.get('symbol')))}</b> {row.get('side')} • "
             f"{row.get('close_reason')} • <b>{pnl:+.4f} USDT</b> "
@@ -659,7 +670,7 @@ def build_performance_center_text():
     rows = stats.get("trades") or []
     initial = float(account.get("initial_balance") or 100.0)
     m = _trade_metrics(rows, initial)
-    realized_balance = initial + m["net"]
+    realized_balance = float(stats.get("derived_equity") if stats.get("derived_equity") is not None else initial + m["net"])
     open_count = len(stats.get("open_positions") or [])
     pf_text = "∞" if m["pf"] >= 999 else f"{m['pf']:.2f}"
     return (

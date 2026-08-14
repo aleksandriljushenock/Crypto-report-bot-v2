@@ -178,6 +178,63 @@ def _current_market_price(client: Any, symbol: str) -> float:
     return 0.0
 
 
+def _execution_klines(client: Any, symbol: str) -> tuple[list[Any], str, int]:
+    """Load fine-grained execution candles with a safe fallback.
+
+    Paper execution is intentionally tracked on 1m candles. Five-minute candles
+    were too coarse and, combined with last_checked_at, could miss a stop or
+    liquidation that happened inside the still-open 5m candle between ticks.
+    """
+    limit = max(100, min(1000, _int("PAPER_EXECUTION_KLINE_LIMIT", 1000)))
+    try:
+        rows = client.klines(symbol, "1m", limit) or []
+        if rows:
+            return rows, "1m", 1
+    except Exception as exc:
+        log.debug("Paper 1m klines unavailable for %s: %s", symbol, exc)
+    rows = client.klines(symbol, "5m", limit) or []
+    return rows, "5m", 5
+
+
+def _iter_execution_candles(rows: list[Any], *, since: datetime, interval_minutes: int) -> list[tuple[datetime, float, float, float, float]]:
+    """Return candles whose time span overlaps the tracking window.
+
+    Kline timestamps are candle *open* times. Comparing that timestamp directly
+    to last_checked_at skipped the remainder of the current candle. We compare
+    candle end time instead and keep a small overlap. CAS close/fill operations
+    make re-reading an already checked candle safe.
+    """
+    overlap = timedelta(minutes=max(2, interval_minutes * 2))
+    lower = since - overlap
+    out: list[tuple[datetime, float, float, float, float]] = []
+    for item in rows or []:
+        try:
+            start = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
+            if len(item) > 6 and item[6] is not None:
+                end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc)
+            else:
+                end = start + timedelta(minutes=interval_minutes)
+            if end <= lower:
+                continue
+            open_price = float(item[1])
+            high = float(item[2])
+            low = float(item[3])
+            close = float(item[4])
+            out.append((start, open_price, high, low, close))
+        except Exception:
+            continue
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _liquidation_hit(side: str, liquidation: float, *, open_price: float, high: float, low: float) -> tuple[bool, bool]:
+    if liquidation <= 0:
+        return False, False
+    if side == "LONG":
+        return low <= liquidation, open_price <= liquidation
+    return high >= liquidation, open_price >= liquidation
+
+
 def _fill_pending_position(position: dict[str, Any], fill_price: float, fill_source: str = "trigger") -> dict[str, Any]:
     if fill_price <= 0:
         return {"status": "invalid-fill"}
@@ -357,12 +414,39 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
     fee_rate = max(0.0, _float("PAPER_FEE_PCT_PER_SIDE", 0.06) / 100.0)
     slippage = max(0.0, _float("PAPER_SLIPPAGE_PCT", 0.03) / 100.0)
     side = str(position.get("side") or "LONG")
-    adjusted_exit = exit_price * (1.0 - slippage if side == "LONG" else 1.0 + slippage)
-    gross_pnl = notional * _signed_return(side, entry, adjusted_exit)
-    exit_fee = notional * fee_rate
-    net_pnl = gross_pnl - entry_fee - exit_fee
-    released = max(0.0, margin + gross_pnl - exit_fee)
+    is_liquidation = str(reason or "").upper().startswith("LIQUIDATION")
+
+    # Isolated-margin liquidation cannot lose more than the reserved margin
+    # (entry fee has already left the account). Do not apply extra close
+    # slippage/fee beyond the estimated liquidation point; otherwise Paper can
+    # create impossible losses larger than isolated collateral.
+    if is_liquidation:
+        adjusted_exit = float(position.get("estimated_liquidation_price") or exit_price or 0)
+        gross_pnl = -margin
+        exit_fee = 0.0
+        net_pnl = -margin - entry_fee
+        released = 0.0
+    else:
+        adjusted_exit = exit_price * (1.0 - slippage if side == "LONG" else 1.0 + slippage)
+        gross_pnl = notional * _signed_return(side, entry, adjusted_exit)
+        exit_fee = notional * fee_rate
+        net_pnl = gross_pnl - entry_fee - exit_fee
+        released = max(0.0, margin + gross_pnl - exit_fee)
+
     now = closed_at or _iso()
+    audit = dict(position.get("execution_audit") or {})
+    audit.update({
+        "exit_reason": reason,
+        "exit_price": adjusted_exit,
+        "closed_at": now,
+    })
+    if is_liquidation:
+        audit.update({
+            "liquidation_breached": True,
+            "liquidation_hit_at": now,
+            "liquidation_hit_price": float(position.get("estimated_liquidation_price") or exit_price or 0),
+        })
+
     trade = {
         "account_id": ACCOUNT_ID,
         "position_id": position.get("id"),
@@ -391,8 +475,6 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
     }
     try:
         with _PAPER_LOCK:
-            # Close is a compare-and-set operation. This prevents duplicate PnL/fees
-            # if overlapping background ticks observe the same TP/SL candle.
             changed = paper_repo.update_position(position.get("id"), {
                 "status": "closed",
                 "exit_price": adjusted_exit,
@@ -402,6 +484,7 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
                 "closed_at": now,
                 "last_checked_at": now,
                 "updated_at": now,
+                "execution_audit": audit,
             }, expected_status="open")
             if not changed:
                 return {}
@@ -410,10 +493,9 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
             new_balance = float(account.get("balance") or 0) + released
             realized = float(account.get("realized_pnl") or 0) + net_pnl
             fees = float(account.get("fees_paid") or 0) + exit_fee
-            # Equity is account value, not free balance. Preserve other reserved
-            # positions by applying only this trade's realized delta to prior equity.
             prior_equity = float(account.get("equity") or account.get("balance") or 0)
-            new_equity = prior_equity + gross_pnl - exit_fee
+            equity_delta = -margin if is_liquidation else (gross_pnl - exit_fee)
+            new_equity = prior_equity + equity_delta
             paper_repo.update_account(ACCOUNT_ID, {
                 "balance": new_balance,
                 "equity": new_equity,
@@ -422,7 +504,7 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
                 "updated_at": now,
             })
         trade["balance_after"] = new_balance
-        emit("POSITION_CLOSED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason=reason, net_pnl=net_pnl)
+        emit("PAPER_LIQUIDATED" if is_liquidation else "POSITION_CLOSED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason=reason, net_pnl=net_pnl)
         return trade
     except Exception:
         log.exception("Paper position close failed: %s", position.get("id"))
@@ -450,14 +532,9 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             side = str(position.get("side") or "LONG")
             setup = str((position.get("signal_payload") or {}).get("setup") or "").upper()
             since = _parse_ts(position.get("last_checked_at") or position.get("created_at"))
-            rows = client.klines(position["symbol"], "5m", 1000) or []
+            rows, _, interval_minutes = _execution_klines(client, position["symbol"])
             touched = False
-            trigger_price = target
-            for item in rows:
-                ts = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
-                if ts < since:
-                    continue
-                high, low = float(item[2]), float(item[3])
+            for ts, open_price, high, low, close in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes):
                 if setup == "PULLBACK":
                     touched = low <= target if side == "LONG" else high >= target
                 else:
@@ -480,13 +557,13 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 paper_repo.update_position(position.get("id"), {
                     "status": "cancelled", "close_reason": "ENTRY_EXPIRED", "pending_reason": "price_never_reached_entry",
                     "closed_at": _iso(), "last_checked_at": _iso(), "updated_at": _iso(),
-                })
+                }, expected_status="pending_entry")
                 emit("PAPER_ENTRY_CANCELLED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason="ENTRY_EXPIRED")
                 pending_cancelled += 1
                 if notifier:
                     notifier(format_missed_message(position, "ENTRY_EXPIRED"))
             else:
-                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()})
+                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()}, expected_status="pending_entry")
         except Exception as exc:
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             pending_errors.append(text)
@@ -494,58 +571,88 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
 
     positions = _open_positions()
     if not positions:
-        return {"status": "ok", "checked": 0, "closed": 0, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "errors": pending_errors}
+        return {"status": "ok", "checked": 0, "closed": 0, "liquidated": 0, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "errors": pending_errors}
     closed: list[dict[str, Any]] = []
     errors: list[str] = []
+    liquidation_count = 0
     for position in positions:
         try:
-            opened = _parse_ts(position.get("last_checked_at") or position.get("opened_at"))
-            rows = client.klines(position["symbol"], "5m", 1000) or []
-            candles = []
-            for item in rows:
-                ts = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
-                if ts >= opened:
-                    candles.append((ts, float(item[2]), float(item[3]), float(item[4])))
+            last_checked = _parse_ts(position.get("last_checked_at") or position.get("opened_at"))
+            opened_at = _parse_ts(position.get("opened_at"))
+            since = max(opened_at, last_checked - timedelta(minutes=3))
+            rows, _, interval_minutes = _execution_klines(client, position["symbol"])
+            candles = _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes)
             side = str(position.get("side") or "LONG")
             stop = float(position.get("stop_price") or 0)
             tp = float(position.get("tp1_price") or 0)
+            liquidation = float(position.get("estimated_liquidation_price") or 0)
             reason = None
             exit_price = None
             exit_time = None
-            for ts, high, low, close in sorted(candles, key=lambda x: x[0]):
-                stop_hit = low <= stop if side == "LONG" else high >= stop
-                tp_hit = high >= tp if side == "LONG" else low <= tp
-                if stop_hit and tp_hit:
-                    # Conservative assumption when intrabar order is unknown.
-                    reason, exit_price, exit_time = "SL_CONSERVATIVE", stop, ts.isoformat()
-                    break
-                if stop_hit:
-                    reason, exit_price, exit_time = "SL", stop, ts.isoformat()
-                    break
-                if tp_hit:
-                    reason, exit_price, exit_time = "TP1", tp, ts.isoformat()
-                    break
+
+            # A live-price sanity check heals stale positions after API hiccups or
+            # redeploys. If market is already through liquidation, do not leave the
+            # position OPEN until another historical candle happens to be seen.
+            try:
+                market = _current_market_price(client, position["symbol"])
+            except Exception:
+                market = 0.0
+            if market > 0 and liquidation > 0:
+                market_liq = market <= liquidation if side == "LONG" else market >= liquidation
+                if market_liq:
+                    reason, exit_price, exit_time = "LIQUIDATION", liquidation, _iso()
+            if reason is None and market > 0:
+                market_stop = market <= stop if side == "LONG" else market >= stop
+                market_tp = market >= tp if side == "LONG" else market <= tp
+                if market_stop:
+                    reason, exit_price, exit_time = "SL", stop, _iso()
+                elif market_tp:
+                    reason, exit_price, exit_time = "TP1", tp, _iso()
+
+            if reason is None:
+                for ts, open_price, high, low, close in candles:
+                    liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=open_price, high=high, low=low)
+                    stop_hit = low <= stop if side == "LONG" else high >= stop
+                    tp_hit = high >= tp if side == "LONG" else low <= tp
+                    if liq_hit:
+                        # On OHLC data the exact intrabar ordering is unknown. Once
+                        # the candle reaches liquidation, use the conservative paper
+                        # outcome rather than pretending a stop definitely filled.
+                        reason = "LIQUIDATION_GAP" if opened_beyond_liq else "LIQUIDATION_CONSERVATIVE"
+                        exit_price, exit_time = liquidation, ts.isoformat()
+                        break
+                    if stop_hit and tp_hit:
+                        reason, exit_price, exit_time = "SL_CONSERVATIVE", stop, ts.isoformat()
+                        break
+                    if stop_hit:
+                        reason, exit_price, exit_time = "SL", stop, ts.isoformat()
+                        break
+                    if tp_hit:
+                        reason, exit_price, exit_time = "TP1", tp, ts.isoformat()
+                        break
+
             max_hold = _parse_ts(position.get("max_hold_until"))
             if reason is None and _now() >= max_hold:
                 if candles:
-                    exit_price = candles[-1][3]
+                    exit_price = candles[-1][4]
                 else:
-                    ticker = client.ticker_24h(position["symbol"])
-                    exit_price = float(ticker.get("lastPrice") or ticker.get("last_price") or 0)
+                    exit_price = market
                 reason, exit_time = "TIME_EXIT", _iso()
             if reason and exit_price and exit_price > 0:
                 trade = _close_position(position, exit_price, reason, exit_time)
                 if trade:
                     closed.append(trade)
+                    if str(reason).startswith("LIQUIDATION"):
+                        liquidation_count += 1
                     if notifier:
                         notifier(format_close_message(trade))
             else:
-                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()})
+                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()}, expected_status="open")
         except Exception as exc:
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             errors.append(text)
             log.warning("Paper position update failed: %s", text)
-    return {"status": "ok", "checked": len(positions), "closed": len(closed), "trades": closed, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "errors": pending_errors + errors}
+    return {"status": "ok", "checked": len(positions), "closed": len(closed), "liquidated": liquidation_count, "trades": closed, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "errors": pending_errors + errors}
 
 
 def performance() -> dict[str, Any]:
@@ -553,10 +660,25 @@ def performance() -> dict[str, Any]:
     trades = get_recent_trades(1000)
     positions = _open_positions()
     pending = _pending_positions()
-    wins = [t for t in trades if float(t.get("net_pnl") or 0) > 0]
-    losses = [t for t in trades if float(t.get("net_pnl") or 0) <= 0]
-    gross_profit = sum(float(t.get("net_pnl") or 0) for t in wins)
-    gross_loss = abs(sum(float(t.get("net_pnl") or 0) for t in losses))
+    pnls = [float(t.get("net_pnl") or 0) for t in trades]
+    eps = 1e-9
+    wins = [x for x in pnls if x > eps]
+    losses = [x for x in pnls if x < -eps]
+    breakeven = [x for x in pnls if abs(x) <= eps]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    net_pnl = sum(pnls)
+    initial = float(account.get("initial_balance") or 0)
+    open_margin = sum(float(p.get("margin_usd") or 0) for p in positions)
+    open_entry_fees = sum(float(p.get("entry_fee") or 0) for p in positions)
+    derived_equity = initial + net_pnl - open_entry_fees
+    derived_free_balance = derived_equity - open_margin
+    account_balance = float(account.get("balance") or 0)
+    account_equity = float(account.get("equity") or 0)
+    liquidations = [t for t in trades if str(t.get("close_reason") or "").upper().startswith("LIQUIDATION")]
+    tp_closes = [t for t in trades if str(t.get("close_reason") or "").upper().startswith("TP")]
+    sl_closes = [t for t in trades if str(t.get("close_reason") or "").upper().startswith("SL")]
+    time_exits = [t for t in trades if str(t.get("close_reason") or "").upper() == "TIME_EXIT"]
     return {
         "account": account,
         "open_positions": positions,
@@ -565,9 +687,20 @@ def performance() -> dict[str, Any]:
         "closed_count": len(trades),
         "wins": len(wins),
         "losses": len(losses),
+        "breakeven": len(breakeven),
         "win_rate": len(wins) / len(trades) * 100.0 if trades else 0.0,
         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0),
-        "net_pnl": sum(float(t.get("net_pnl") or 0) for t in trades),
+        "net_pnl": net_pnl,
+        "roi_pct": (net_pnl / initial * 100.0) if initial > 0 else 0.0,
+        "avg_pnl": (net_pnl / len(trades)) if trades else 0.0,
+        "liquidations": len(liquidations),
+        "tp_closes": len(tp_closes),
+        "sl_closes": len(sl_closes),
+        "time_exits": len(time_exits),
+        "derived_equity": derived_equity,
+        "derived_free_balance": derived_free_balance,
+        "accounting_drift_balance": account_balance - derived_free_balance,
+        "accounting_drift_equity": account_equity - derived_equity,
     }
 
 
@@ -638,9 +771,11 @@ def format_open_message(result: dict[str, Any]) -> str:
 
 def format_close_message(trade: dict[str, Any]) -> str:
     pnl = float(trade.get("net_pnl") or 0)
-    icon = "✅" if pnl > 0 else "❌"
+    reason = str(trade.get("close_reason") or "")
+    icon = "💥" if reason.startswith("LIQUIDATION") else ("✅" if pnl > 0 else "❌")
+    title = "PAPER POSITION LIQUIDATED" if reason.startswith("LIQUIDATION") else "PAPER POSITION CLOSED"
     return (
-        f"{icon} <b>PAPER POSITION CLOSED</b>\n\n"
+        f"{icon} <b>{title}</b>\n\n"
         f"{trade.get('side')} <b>{trade.get('symbol')}</b>\n"
         f"Reason: <b>{trade.get('close_reason')}</b>\n"
         f"PnL: <b>{pnl:+.4f} USDT</b>\n"

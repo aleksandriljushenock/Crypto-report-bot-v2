@@ -75,7 +75,7 @@ class AutomationSupervisor:
         listing_minutes = self._minutes('LISTING_REFRESH_INTERVAL_MINUTES', 360)
         outcome_minutes = self._minutes('OUTCOME_UPDATE_INTERVAL_MINUTES', 180)
         trade_outcome_minutes = self._minutes('TRADE_OUTCOME_UPDATE_INTERVAL_MINUTES', 60)
-        paper_minutes = self._minutes('PAPER_UPDATE_INTERVAL_MINUTES', 5)
+        paper_minutes = self._minutes('PAPER_UPDATE_INTERVAL_MINUTES', 1)
         capital_flow_minutes = self._minutes('CAPITAL_FLOW_INTERVAL_MINUTES', 15)
         news_minutes = self._minutes('NEWS_INTERVAL_MINUTES', 10)
         narrative_minutes = self._minutes('NARRATIVE_INTERVAL_MINUTES', 60)
@@ -216,7 +216,7 @@ class AutomationSupervisor:
         if self.chat_id:
             notifier = lambda text: self.sender(self.chat_id, text)
         result = update_positions(notifier=notifier)
-        self.logger(f"Paper trading: checked={result.get('checked')}, closed={result.get('closed')}, errors={len(result.get('errors', []))}")
+        self.logger(f"Paper trading: checked={result.get('checked')}, closed={result.get('closed')}, liquidated={result.get('liquidated',0)}, pending={result.get('pending_checked',0)}, errors={len(result.get('errors', []))}")
         return result
 
     def _run_outcomes(self):
