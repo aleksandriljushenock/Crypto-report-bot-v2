@@ -24,10 +24,10 @@ def _row(state="waiting_entry", strategy="fib_05_pullback"):
 
 def test_ready_render_has_full_trade_levels():
     text = notifications.render_notification("READY", _row())
-    assert "STRATEGY SIGNAL" in text
+    assert "STRATEGY READY" in text
     assert "ETHUSDT" in text
     assert "Entry:" in text and "SL:" in text and "TP:" in text
-    assert "ждём касания Entry" in text
+    assert "готова к торговле" in text
 
 
 def test_open_and_close_render():

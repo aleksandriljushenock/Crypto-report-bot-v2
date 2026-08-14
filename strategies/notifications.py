@@ -33,6 +33,37 @@ def _entry_mode(row: dict[str, Any]) -> str:
     return str((row.get("payload") or {}).get("entry_mode") or "LIMIT").upper()
 
 
+def _analysis_status(row: dict[str, Any]) -> str:
+    payload = row.get("payload") or {}
+    return str(payload.get("status") or payload.get("setup_status") or "").upper().strip()
+
+
+def _is_notifiable(event_type: str, row: dict[str, Any]) -> bool:
+    """Hard notification gate.
+
+    Strategy Lab may persist WATCH/WAITING candidates for research, but Telegram
+    must stay quiet until a setup is actually READY. OPEN/CLOSED are lifecycle
+    events of a setup that already passed READY and therefore remain actionable.
+    """
+    event_type = str(event_type or "").upper()
+    state = str(row.get("state") or "").lower()
+    if event_type == "READY":
+        if state != "waiting_entry":
+            return False
+        # New rows always persist analyzer status in payload. For legacy v25-v32
+        # rows the status may be missing; only allow them when they contain a
+        # complete executable trade plan instead of guessing from WATCH/WAITING.
+        status = _analysis_status(row)
+        if status and status != "READY":
+            return False
+        return all(row.get(k) is not None for k in ("entry_price", "stop_price", "tp_price"))
+    if event_type == "OPEN":
+        return state == "open"
+    if event_type == "CLOSED":
+        return state in {"won", "lost"}
+    return False
+
+
 def render_notification(event_type: str, row: dict[str, Any]) -> str:
     spec = get_strategy(str(row.get("strategy") or "fib_05_pullback"))
     symbol = html.escape(str(row.get("symbol") or ""))
@@ -41,16 +72,17 @@ def render_notification(event_type: str, row: dict[str, Any]) -> str:
 
     if event_type == "READY":
         mode = _entry_mode(row)
-        wait_text = "ждём касания Entry" if mode == "LIMIT" else "ждём пробоя Entry"
+        mode_text = "LIMIT" if mode == "LIMIT" else "STOP / BREAKOUT"
         return (
-            "🧭 <b>STRATEGY SIGNAL</b>\n\n"
+            "🔥 <b>STRATEGY READY</b>\n\n"
             f"{spec.emoji} <b>{html.escape(spec.title)}</b>\n"
             f"{'🟢' if direction == 'LONG' else '🔴'} <b>{direction} {symbol}</b>\n\n"
             f"Entry: <b>{_p(row.get('entry_price'))}</b>\n"
             f"SL: <b>{_p(row.get('stop_price'))}</b>\n"
             f"TP: <b>{_p(row.get('tp_price'))}</b>\n"
-            f"R/R: <b>{float(row.get('rr') or 0):.2f}</b> · Score: <b>{float(row.get('score') or 0):.0f}</b>\n\n"
-            f"Статус: ⏳ <b>{wait_text}</b>\n"
+            f"R/R: <b>{float(row.get('rr') or 0):.2f}</b> · Score: <b>{float(row.get('score') or 0):.0f}</b>\n"
+            f"Исполнение: <b>{mode_text}</b>\n\n"
+            "✅ <b>Стратегия прошла все фильтры и готова к торговле.</b>\n"
             f"<i>{html.escape(_reason(row))}</i>"
         )
 
@@ -117,6 +149,13 @@ def dispatch_pending_notifications(
     for item in pending:
         event_type = str(item.get("event_type") or "").upper()
         row = item.get("setup") or {}
+        if not _is_notifiable(event_type, row):
+            if log:
+                log(
+                    f"Strategy notification suppressed: {row.get('strategy')}/{row.get('symbol')} "
+                    f"event={event_type} state={row.get('state')} status={_analysis_status(row) or 'legacy'}"
+                )
+            continue
         if event_type == "READY" and not boolean("STRATEGY_LAB_NOTIFY_READY", True):
             continue
         if event_type == "OPEN" and not boolean("STRATEGY_LAB_NOTIFY_FILLED", True):
