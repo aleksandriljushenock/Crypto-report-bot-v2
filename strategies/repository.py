@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any
+from datetime import datetime, timedelta, timezone
 
 
 def _client():
@@ -41,6 +42,38 @@ class StrategyRepository:
 
     def update_setup(self, setup_id: Any, values: dict[str, Any]) -> None:
         _client().table("strategy_setups").update(values).eq("id", setup_id).execute()
+
+    def pending_notifications(self, max_age_hours: int = 24, limit: int = 30) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+        table = _client().table("strategy_setups")
+        out: list[dict[str, Any]] = []
+
+        ready = (table.select("*").eq("state", "waiting_entry")
+                 .is_("ready_notified_at", "null").gte("created_at", cutoff)
+                 .order("created_at", desc=False).limit(limit).execute().data or [])
+        out.extend({"event_type": "READY", "setup": row} for row in ready)
+
+        remaining = max(0, limit - len(out))
+        if remaining:
+            opened = (_client().table("strategy_setups").select("*").eq("state", "open")
+                      .is_("open_notified_at", "null").gte("entered_at", cutoff)
+                      .order("entered_at", desc=False).limit(remaining).execute().data or [])
+            out.extend({"event_type": "OPEN", "setup": row} for row in opened)
+
+        remaining = max(0, limit - len(out))
+        if remaining:
+            closed = (_client().table("strategy_setups").select("*").in_("state", ["won", "lost"])
+                      .is_("close_notified_at", "null").gte("resolved_at", cutoff)
+                      .order("resolved_at", desc=False).limit(remaining).execute().data or [])
+            out.extend({"event_type": "CLOSED", "setup": row} for row in closed)
+        return out[:limit]
+
+    def mark_notification_sent(self, setup_id: Any, event_type: str) -> None:
+        event_type = str(event_type or "").upper()
+        column = {"READY": "ready_notified_at", "OPEN": "open_notified_at", "CLOSED": "close_notified_at"}.get(event_type)
+        if not column or setup_id is None:
+            return
+        _client().table("strategy_setups").update({column: datetime.now(timezone.utc).isoformat()}).eq("id", setup_id).execute()
 
 
 repository = StrategyRepository()

@@ -203,36 +203,42 @@ def fib_scan_report(result):
 
 
 def strategy_notification_messages(scheduled_result: dict) -> list[str]:
-    """Telegram notifications for strategies that explicitly require live BUY/CLOSE alerts."""
+    """Backward-compatible immediate messages. Durable delivery uses strategies.notifications."""
     messages: list[str] = []
     for run in scheduled_result.get("runs") or []:
-        if run.get("strategy") != "ma55_cycle":
+        try:
+            spec = get_strategy(run.get("strategy"))
+        except Exception:
             continue
         for ev in run.get("new_ready_events") or []:
+            direction = str(ev.get("direction") or "LONG").upper()
+            title = "🔄 <b>MA55 CYCLE — BUY SIGNAL</b>" if run.get("strategy") == "ma55_cycle" else "🧭 <b>STRATEGY SIGNAL</b>"
             messages.append(
-                "🔄 <b>MA55 CYCLE — BUY SIGNAL</b>\n\n"
-                f"<b>{html.escape(str(ev.get('symbol') or ''))}</b> · LONG\n"
-                f"Reference: <b>{_p(ev.get('reference_price'))}</b>\n"
-                f"Protective SL: <b>{_p(ev.get('stop_price'))}</b>\n"
-                f"Score: <b>{float(ev.get('score') or 0):.0f}</b>\n\n"
-                "SMA55 завершила переход сверху вниз через EMA8/SMA13/SMA21. "
-                "Для статистики фактический entry фиксируется на первой будущей 1H свече.\n"
+                f"{title}\n\n"
+                f"{spec.emoji} <b>{html.escape(spec.title)}</b>\n"
+                f"{'🟢' if direction == 'LONG' else '🔴'} <b>{direction} {html.escape(str(ev.get('symbol') or ''))}</b>\n\n"
+                f"Entry: <b>{_p(ev.get('entry_price') or ev.get('reference_price'))}</b>\n"
+                f"SL: <b>{_p(ev.get('stop_price'))}</b>\n"
+                f"TP: <b>{_p(ev.get('tp_price'))}</b>\n"
+                f"R/R: <b>{float(ev.get('rr') or 0):.2f}</b> · Score: <b>{float(ev.get('score') or 0):.0f}</b>\n\n"
                 f"<i>{html.escape(str(ev.get('reason') or ''))}</i>"
             )
-        for ev in run.get("outcome_events") or []:
-            outcome = str(ev.get("outcome") or "")
-            if outcome == "MA55_REVERSE_CROSS":
-                title = "🔔 <b>MA55 CYCLE — CLOSE LONG</b>"
-                reason = "SMA55 пересекла EMA8/SMA13/SMA21 снизу вверх — штатный выход стратегии."
-            elif outcome == "RISK_SL":
-                title = "🛑 <b>MA55 CYCLE — EMERGENCY EXIT</b>"
-                reason = "Сработал защитный risk-stop раньше обратного MA-cross."
-            else:
-                continue
-            messages.append(
-                f"{title}\n\n<b>{html.escape(str(ev.get('symbol') or ''))}</b>\n"
-                f"Entry: <b>{_p(ev.get('entry_price'))}</b>\n"
-                f"Exit: <b>{_p(ev.get('exit_price'))}</b>\n"
-                f"Result: <b>{float(ev.get('return_pct') or 0):+.2f}%</b>\n\n{reason}"
-            )
+        if run.get("strategy") == "ma55_cycle":
+            for ev in run.get("outcome_events") or []:
+                outcome = str(ev.get("outcome") or "")
+                if outcome == "MA55_REVERSE_CROSS":
+                    title = "🔔 <b>MA55 CYCLE — CLOSE LONG</b>"
+                    reason = "SMA55 пересекла EMA8/SMA13/SMA21 снизу вверх — штатный выход стратегии."
+                elif outcome == "RISK_SL":
+                    title = "🛑 <b>MA55 CYCLE — EMERGENCY EXIT</b>"
+                    reason = "Сработал защитный risk-stop раньше обратного MA-cross."
+                else:
+                    continue
+                messages.append(
+                    f"{title}\n\n<b>{html.escape(str(ev.get('symbol') or ''))}</b>\n"
+                    f"Entry: <b>{_p(ev.get('entry_price') or ev.get('reference_price'))}</b>\n"
+                    f"Exit: <b>{_p(ev.get('exit_price'))}</b>\n"
+                    f"Result: <b>{float(ev.get('return_pct') or 0):+.2f}%</b>\n\n{reason}"
+                )
     return messages
+

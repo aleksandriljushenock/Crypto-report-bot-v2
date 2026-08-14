@@ -1001,6 +1001,11 @@ def run_strategy_lab_task(chat_id, strategy):
         )
         result = run_strategy_scan(spec.key)
         send_message(chat_id, build_strategy_scan_report(result, spec.key), reply_markup=strategy_lab_keyboard(spec.key))
+        try:
+            from strategies.notifications import dispatch_pending_notifications
+            dispatch_pending_notifications(send_message, chat_id, log)
+        except Exception as notify_exc:
+            log(f"Strategy Lab manual notification error {spec.key}: {notify_exc}")
     except Exception as exc:
         log(f"Strategy Lab scan error {spec.key}: {exc}")
         send_message(

@@ -310,7 +310,9 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
                         "strategy": spec.key, "type": "BUY", "symbol": symbol,
                         "direction": row["direction"], "reference_price": analysis.get("market_price") or row["entry_price"],
                         "entry_price": row["entry_price"], "stop_price": row["stop_price"],
+                        "tp_price": row["tp_price"], "rr": row.get("rr"),
                         "score": row.get("score"), "reason": analysis.get("reason"),
+                        "entry_mode": (analysis.get("entry_mode") or "LIMIT"),
                         "fingerprint": row["fingerprint"],
                     })
         except Exception as exc:

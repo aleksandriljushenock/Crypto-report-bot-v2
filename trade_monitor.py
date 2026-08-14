@@ -182,9 +182,8 @@ class TradeMonitor:
                     self.logger(f"Strategy Lab parallel cycle: status={result.get('status')} runs={len(result.get('runs') or [])}")
                     if chat_id:
                         try:
-                            from strategies.reports import strategy_notification_messages
-                            for message in strategy_notification_messages(result):
-                                self.sender(chat_id, message)
+                            from strategies.notifications import dispatch_pending_notifications
+                            dispatch_pending_notifications(self.sender, chat_id, self.logger)
                         except Exception as notify_exc:
                             self.logger(f"Strategy Lab notification error: {notify_exc}")
                 except Exception as exc:

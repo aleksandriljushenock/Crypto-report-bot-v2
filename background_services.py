@@ -298,10 +298,8 @@ class AutomationSupervisor:
         self.logger(f"Strategy Lab auto: status={result.get('status')} runs={len(runs)} analyzed={analyzed} ready={ready}")
         if self.chat_id:
             try:
-                from strategies.reports import strategy_notification_messages
-                if self._bool_env('STRATEGY_MA55CYCLE_NOTIFY', True):
-                    for message in strategy_notification_messages(result):
-                        self.sender(self.chat_id, message)
+                from strategies.notifications import dispatch_pending_notifications
+                dispatch_pending_notifications(self.sender, self.chat_id, self.logger)
             except Exception as exc:
                 self.logger(f"Strategy Lab detailed notification error: {exc}")
         if ready and self._bool_env('STRATEGY_LAB_AUTO_NOTIFY_READY', False) and self.chat_id:
