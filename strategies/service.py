@@ -132,7 +132,7 @@ def _ma55_cycle_outcome(client, setup: dict[str, Any], now: datetime) -> tuple[d
 
     when, outcome, exit_price = min(candidates, key=lambda x: x[0])
     ret = round(_return_pct(direction, entry, float(exit_price)), 4)
-    new_state = "won" if ret > 0 else "lost"
+    new_state = "won" if ret > 0 else ("lost" if ret < 0 else "breakeven")
     values.update(state=new_state, outcome=outcome, resolved_at=when.isoformat(), return_pct=ret)
     event = {
         "strategy": "ma55_cycle", "symbol": setup.get("symbol"), "type": "CLOSE",
@@ -146,7 +146,7 @@ def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dic
     active = _safe_repo(lambda: repository.active_setups(spec.key, max_rows), []) or []
     client = create_trade_market_client()
     now = datetime.now(timezone.utc)
-    result = {"checked": 0, "opened": 0, "won": 0, "lost": 0, "expired": 0, "errors": 0, "events": []}
+    result = {"checked": 0, "opened": 0, "won": 0, "lost": 0, "breakeven": 0, "expired": 0, "errors": 0, "events": []}
     for setup in active:
         result["checked"] += 1
         try:
@@ -158,7 +158,7 @@ def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dic
                     _safe_repo(lambda s=setup, v=values: repository.update_setup(s["id"], v), None)
                     if old_state == "waiting_entry" and new_state == "open":
                         result["opened"] += 1
-                    if new_state in {"won", "lost", "expired"} and new_state != old_state:
+                    if new_state in {"won", "lost", "breakeven", "expired"} and new_state != old_state:
                         result[new_state] += 1
                 if event:
                     result["events"].append(event)
@@ -213,6 +213,12 @@ def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dic
         except Exception as exc:
             result["errors"] += 1
             logger.debug("Outcome update failed %s/%s: %s", spec.key, setup.get("symbol"), exc)
+    # Keep a durable aggregate in Supabase even when nobody opens the Telegram
+    # statistics screen. This survives redeploys and provides daily history.
+    try:
+        stats(spec.key, persist=True)
+    except Exception as exc:
+        logger.debug("Strategy statistics refresh failed %s: %s", spec.key, exc)
     return result
 
 
@@ -347,6 +353,11 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
         } if spec.key == "ma55_cycle" else {}),
     }
     _safe_repo(lambda: repository.save_run(spec.key, summary, results[:50]), None)
+    # Include newly-created READY setups in the durable aggregate immediately.
+    try:
+        stats(spec.key, persist=True)
+    except Exception as exc:
+        logger.debug("Post-scan statistics refresh failed %s: %s", spec.key, exc)
     runtime_state.finish(state_name, phase="idle", processed=len(universe), total=len(universe), lastSummary=summary)
     return {"strategy": spec.key, "summary": summary, "results": results, "errors": errors}
 
@@ -376,40 +387,83 @@ def latest_run(strategy: str = DEFAULT_STRATEGY):
     return _safe_repo(lambda: repository.latest_run(spec.key), None)
 
 
-def stats(strategy: str = DEFAULT_STRATEGY) -> dict[str, Any]:
-    spec = get_strategy(strategy)
-    rows = _safe_repo(lambda: repository.recent_setups(spec.key, 2000), []) or []
-    resolved = [x for x in rows if x.get("state") in {"won", "lost"}]
+def _compute_stats_from_rows(strategy: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute strategy performance from durable forward setups.
+
+    Rows are expected in chronological order. The calculation deliberately uses
+    actual forward outcomes only; WATCH/WAITING candidates never enter PnL.
+    """
+    resolved = [x for x in rows if x.get("state") in {"won", "lost", "breakeven"}]
     wins = [x for x in resolved if x.get("state") == "won"]
     losses = [x for x in resolved if x.get("state") == "lost"]
-    returns = [float(x.get("return_pct") or 0) for x in resolved]
+    breakeven = [x for x in resolved if x.get("state") == "breakeven"]
+    returns = [float(x.get("return_pct") or 0.0) for x in resolved]
     gross_win = sum(max(0.0, x) for x in returns)
     gross_loss = abs(sum(min(0.0, x) for x in returns))
-    equity = 0.0
-    peak = 0.0
+
+    # Two return views are kept: additive for backward-compatible comparison and
+    # compounded for a more realistic equal-capital strategy curve.
+    equity = 100.0
+    peak = 100.0
     max_drawdown = 0.0
-    # Rows are newest-first; calculate the equity path chronologically.
-    for value in reversed(returns):
-        equity += value
+    for value in returns:
+        equity *= max(0.0, 1.0 + value / 100.0)
         peak = max(peak, equity)
-        max_drawdown = min(max_drawdown, equity - peak)
+        if peak > 0:
+            max_drawdown = min(max_drawdown, (equity / peak - 1.0) * 100.0)
+
+    decisive = len(wins) + len(losses)
+    first_at = rows[0].get("created_at") if rows else None
+    last_at = rows[-1].get("created_at") if rows else None
     return {
-        "strategy": spec.key,
+        "strategy": strategy,
         "total": len(rows),
         "resolved": len(resolved),
         "wins": len(wins),
         "losses": len(losses),
-        "win_rate": (len(wins) / len(resolved) * 100) if resolved else 0.0,
+        "breakeven": len(breakeven),
+        "win_rate": (len(wins) / decisive * 100.0) if decisive else 0.0,
         "avg_return": (sum(returns) / len(returns)) if returns else 0.0,
         "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0),
         "expectancy": (sum(returns) / len(returns)) if returns else 0.0,
         "cumulative_return": sum(returns),
+        "compounded_return": equity - 100.0,
         "max_drawdown": max_drawdown,
+        "gross_win": gross_win,
+        "gross_loss": gross_loss,
         "waiting": sum(1 for x in rows if x.get("state") == "waiting_entry"),
         "open": sum(1 for x in rows if x.get("state") == "open"),
         "expired": sum(1 for x in rows if x.get("state") == "expired"),
-        "recent": rows[:15],
+        "first_setup_at": first_at,
+        "last_setup_at": last_at,
+        "recent": list(reversed(rows[-15:])),
     }
+
+
+def _persist_strategy_stats(strategy: str, metrics: dict[str, Any]) -> None:
+    # `recent` belongs to the UI, not to the aggregate database row.
+    durable = {k: v for k, v in metrics.items() if k not in {"recent", "strategy"}}
+    _safe_repo(lambda: repository.upsert_statistics(strategy, durable), None)
+    _safe_repo(lambda: repository.save_daily_statistics(strategy, durable), None)
+
+
+def stats(strategy: str = DEFAULT_STRATEGY, persist: bool = True) -> dict[str, Any]:
+    spec = get_strategy(strategy)
+    rows = _safe_repo(lambda: repository.setups_for_stats(spec.key), None)
+    if rows is None:
+        # Migration/table/network fallback: keep UI alive using the last persisted
+        # aggregate when available. History rows may be absent in this mode.
+        cached = _safe_repo(lambda: repository.persisted_statistics(spec.key), None) or {}
+        if cached:
+            cached = dict(cached)
+            cached.setdefault("strategy", spec.key)
+            cached.setdefault("recent", [])
+            return cached
+        rows = []
+    metrics = _compute_stats_from_rows(spec.key, rows)
+    if persist:
+        _persist_strategy_stats(spec.key, metrics)
+    return metrics
 
 
 def leaderboard() -> list[dict[str, Any]]:

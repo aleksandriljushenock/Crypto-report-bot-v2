@@ -40,6 +40,46 @@ class StrategyRepository:
         return (_client().table("strategy_setups").select("*").eq("strategy", strategy)
                 .order("created_at", desc=True).limit(limit).execute().data or [])
 
+    def setups_for_stats(self, strategy: str, page_size: int = 1000, max_rows: int = 20000) -> list[dict[str, Any]]:
+        """Load the durable strategy history without the old 2k-statistics truncation.
+
+        Supabase/PostgREST commonly caps a response near 1k rows, so statistics are
+        paged explicitly. The safety cap prevents an accidental unbounded read.
+        """
+        out: list[dict[str, Any]] = []
+        start = 0
+        page_size = max(100, min(int(page_size or 1000), 1000))
+        max_rows = max(page_size, int(max_rows or 20000))
+        while start < max_rows:
+            end = min(start + page_size - 1, max_rows - 1)
+            rows = (_client().table("strategy_setups").select("*").eq("strategy", strategy)
+                    .order("created_at", desc=False).range(start, end).execute().data or [])
+            out.extend(rows)
+            if len(rows) < page_size:
+                break
+            start += page_size
+        return out
+
+    def upsert_statistics(self, strategy: str, metrics: dict[str, Any]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        payload = {"strategy": strategy, **metrics, "updated_at": now}
+        _client().table("strategy_statistics").upsert(payload, on_conflict="strategy").execute()
+
+    def save_daily_statistics(self, strategy: str, metrics: dict[str, Any]) -> None:
+        now_dt = datetime.now(timezone.utc)
+        payload = {
+            "strategy": strategy,
+            "stat_date": now_dt.date().isoformat(),
+            "metrics": metrics,
+            "updated_at": now_dt.isoformat(),
+        }
+        _client().table("strategy_stats_daily").upsert(payload, on_conflict="strategy,stat_date").execute()
+
+    def persisted_statistics(self, strategy: str) -> dict[str, Any] | None:
+        rows = (_client().table("strategy_statistics").select("*").eq("strategy", strategy)
+                .limit(1).execute().data or [])
+        return rows[0] if rows else None
+
     def update_setup(self, setup_id: Any, values: dict[str, Any]) -> None:
         _client().table("strategy_setups").update(values).eq("id", setup_id).execute()
 
@@ -62,7 +102,7 @@ class StrategyRepository:
 
         remaining = max(0, limit - len(out))
         if remaining:
-            closed = (_client().table("strategy_setups").select("*").in_("state", ["won", "lost"])
+            closed = (_client().table("strategy_setups").select("*").in_("state", ["won", "lost", "breakeven"])
                       .is_("close_notified_at", "null").gte("resolved_at", cutoff)
                       .order("resolved_at", desc=False).limit(remaining).execute().data or [])
             out.extend({"event_type": "CLOSED", "setup": row} for row in closed)
