@@ -1,5 +1,5 @@
 from strategies.catalog import get_strategy
-from strategies.analyzers import analyze_strategy, ma55_cycle_event
+from strategies.analyzers import analyze_strategy, ma55_cycle_event, recent_ma55_cycle_event
 from strategies.service import stats
 from strategies.reports import strategy_notification_messages
 
@@ -77,3 +77,34 @@ def test_ma55_cycle_reverse_exit_event():
             break
     assert found is not None
     assert found['type']=='EXIT'
+
+
+def test_ma55_cycle_cross_remains_active_for_three_h4_bars():
+    closes=[130-i*.2 for i in range(70)] + [116,118,121,125,130,136,143,151]
+    base=_rows(closes)
+    fresh=ma55_cycle_event(base, 'BUY', 12)
+    assert fresh is not None
+    # Add two later bars: the original one-shot detector no longer emits, but
+    # the active-window detector must still return the original cross.
+    later=_rows(closes + [154,157])
+    assert ma55_cycle_event(later, 'BUY', 12) is None
+    active=recent_ma55_cycle_event(later, 'BUY', active_bars=3, transition_lookback_bars=12)
+    assert active is not None
+    assert active['age_bars'] == 2
+    assert active['ts'] == fresh['ts']
+
+
+def test_ma55_cycle_cross_expires_after_three_h4_bars():
+    closes=[130-i*.2 for i in range(70)] + [116,118,121,125,130,136,143,151]
+    later=_rows(closes + [154,157,160,163])
+    active=recent_ma55_cycle_event(later, 'BUY', active_bars=3, transition_lookback_bars=12)
+    assert active is None
+
+
+def test_ma55_helpers_accept_normalized_dict_candles_regression():
+    from strategies.fib_pullback import normalize_klines
+    closes=[130-i*.2 for i in range(70)] + [116,118,121,125,130,136,143,151]
+    normalized=normalize_klines(_rows(closes))
+    event=ma55_cycle_event(normalized, 'BUY', 12)
+    assert event is not None
+    assert event['type'] == 'BUY'

@@ -59,6 +59,22 @@ def scan_report(result, strategy: str | None = None):
     ]
     if s.get("errors"):
         lines.append(f"⚠️ Ошибок API: {s.get('errors')}")
+    if strategy == "ma55_cycle" and s.get("funnel"):
+        funnel = s.get("funnel") or {}
+        labels = {
+            "ready": "READY",
+            "confirmation_wait": "ждём подтверждения",
+            "stack_wait": "ждём clean stack",
+            "overextended": "слишком далеко от EMA8",
+            "d1_down": "D1 DOWN",
+            "cross_expired": "cross window истёк",
+            "waiting_cross": "ждём cross",
+            "insufficient_data": "мало данных",
+            "insufficient_ma": "мало MA истории",
+        }
+        parts = [f"{labels.get(k,k)} {v}" for k,v in funnel.items() if v]
+        if parts:
+            lines += ["", "<b>MA55 funnel:</b>", " · ".join(parts)]
     shown = [x for x in result.get("results", []) if x.get("status") in {"READY", "WATCH", "WAITING"}][:10]
     if shown:
         lines += ["", "<b>Лучшие сетапы:</b>"]

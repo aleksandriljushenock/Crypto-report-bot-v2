@@ -339,6 +339,10 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
         "parallel_budget_symbols": max_symbols if parallel_mode else None,
         "new_ready_events": new_ready_events,
         "outcome_events": list(outcome_update.get("events") or []),
+        "funnel": ({
+            stage: sum(1 for x in results if x.get("funnel_stage") == stage)
+            for stage in sorted({str(x.get("funnel_stage")) for x in results if x.get("funnel_stage")})
+        } if spec.key == "ma55_cycle" else {}),
     }
     _safe_repo(lambda: repository.save_run(spec.key, summary, results[:50]), None)
     runtime_state.finish(state_name, phase="idle", processed=len(universe), total=len(universe), lastSummary=summary)

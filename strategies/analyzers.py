@@ -362,15 +362,46 @@ def _ma55_cycle_states(h4: list[dict[str, float]], tail: int = 12) -> list[dict[
     return states
 
 
+def _ma55_rows(h4_rows) -> list[dict[str, float]]:
+    """Accept both raw exchange kline arrays and already-normalized candle dicts.
+
+    Strategy analyzers call ``_closed`` first, so MA55 helpers frequently receive
+    dictionaries. The older implementation re-ran ``normalize_klines`` on those
+    dictionaries, which silently returned an empty list and prevented MA55 BUY
+    and reverse EXIT events from being detected.
+    """
+    rows = list(h4_rows or [])
+    if not rows:
+        return []
+    if isinstance(rows[0], dict):
+        out = []
+        for row in rows:
+            try:
+                out.append({
+                    "ts": float(row.get("ts", 0)),
+                    "open": float(row.get("open", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "close": float(row.get("close", 0)),
+                    "volume": float(row.get("volume", 0)),
+                })
+            except Exception:
+                continue
+        return out
+    return normalize_klines(rows)
+
+
 def ma55_cycle_event(h4_rows, direction: str, lookback_bars: int = 3) -> dict[str, Any] | None:
-    """Detect completed transition of SMA55 across all three fast averages.
+    """Detect a newly completed transition of SMA55 across all three fast averages.
 
     direction='BUY': 55 transitions from above-all to below-all.
     direction='EXIT': 55 transitions from below-all to above-all.
-    Crosses may complete over up to lookback_bars closed H4 candles, which is
-    more robust than requiring all three mathematical intersections in one bar.
+    Crosses may complete over up to ``lookback_bars`` closed H4 candles.
+    This function intentionally emits only on the candle that completes the
+    transition. Use ``recent_ma55_cycle_event`` when the setup should remain
+    actionable for several later candles.
     """
-    h4 = normalize_klines(h4_rows)
+    h4 = _ma55_rows(h4_rows)
     states = _ma55_cycle_states(h4, tail=max(8, lookback_bars + 4))
     if len(states) < 2:
         return None
@@ -380,7 +411,7 @@ def ma55_cycle_event(h4_rows, direction: str, lookback_bars: int = 3) -> dict[st
     origin = "slow_above_all" if direction == "BUY" else "slow_below_all"
     if not current[target]:
         return None
-    # Only emit on the first fully-crossed state, not every later scan.
+    # Emit only on the first fully-crossed state, not on every later scan.
     if states[-2][target]:
         return None
     window = states[max(0, len(states) - 1 - lookback_bars):-1]
@@ -397,17 +428,49 @@ def ma55_cycle_event(h4_rows, direction: str, lookback_bars: int = 3) -> dict[st
     }
 
 
+def recent_ma55_cycle_event(
+    h4_rows,
+    direction: str,
+    active_bars: int = 3,
+    transition_lookback_bars: int = 12,
+) -> dict[str, Any] | None:
+    """Return the most recent MA55 cross while its confirmation window is active.
+
+    ``active_bars=3`` means the completed H4 cross is actionable immediately
+    and remains eligible for confirmation for the next three H4 closes
+    (about 12 hours). It does *not* delay an already-confirmed entry.
+    """
+    h4 = _ma55_rows(h4_rows)
+    if len(h4) < 60:
+        return None
+    active_bars = max(0, int(active_bars))
+    for age in range(0, active_bars + 1):
+        end = len(h4) - age
+        if end < 60:
+            break
+        event = ma55_cycle_event(h4[:end], direction, transition_lookback_bars)
+        if event:
+            event = dict(event)
+            event["age_bars"] = age
+            event["active_bars"] = active_bars
+            return event
+    return None
+
+
 def analyze_ma55_cycle(symbol, quote_volume, d1_rows, h4_rows, provider=None, derivatives=None):
     d1 = _closed(d1_rows, 100)
     h4 = _closed(h4_rows, 100)
     if len(d1) < 80 or len(h4) < 70:
-        return {"strategy": "ma55_cycle", "symbol": symbol, "status": "NO_SETUP", "reason": "Недостаточно D1/H4 данных"}
+        return {"strategy": "ma55_cycle", "symbol": symbol, "status": "NO_SETUP", "reason": "Недостаточно D1/H4 данных", "funnel_stage": "insufficient_data"}
 
-    buy_event = ma55_cycle_event(h4, "BUY", 12)
-    states = _ma55_cycle_states(h4, tail=10)
+    # The cross is actionable immediately and can still be confirmed during
+    # the next 3 H4 closes (~12h). This avoids missing a valid crossover merely
+    # because D1/RSI/volume confirmation arrived one candle later.
+    buy_event = recent_ma55_cycle_event(h4, "BUY", active_bars=3, transition_lookback_bars=12)
+    states = _ma55_cycle_states(h4, tail=12)
     current = states[-1] if states else None
     if not current:
-        return {"strategy": "ma55_cycle", "symbol": symbol, "status": "NO_SETUP", "reason": "Недостаточно MA истории"}
+        return {"strategy": "ma55_cycle", "symbol": symbol, "status": "NO_SETUP", "reason": "Недостаточно MA истории", "funnel_stage": "insufficient_ma"}
 
     tr = _trend(d1)
     cur = h4[-1]
@@ -422,62 +485,124 @@ def analyze_ma55_cycle(symbol, quote_volume, d1_rows, h4_rows, provider=None, de
     bullish_stack = cur["close"] > current["ema8"] > current["ma13"] > current["ma21"] > current["ma55"]
     ma55_old = states[-4]["ma55"] if len(states) >= 4 else states[0]["ma55"]
     ma55_slope_pct = (current["ma55"] / ma55_old - 1.0) * 100 if ma55_old else 0.0
-    slope_ok = ma55_slope_pct > 0
-    d1_ok = tr["direction"] == "UP"
-    rsi_ok = 50.0 <= rsi <= 72.0
-    volume_ok = volume_ratio >= 1.05
+
+    # v32: D1 DOWN is still a hard blocker, but RANGE is allowed because this
+    # strategy is meant to catch the *birth* of a trend, not only mature D1 UP.
+    d1_blocked = tr["direction"] == "DOWN"
+    d1_up = tr["direction"] == "UP"
+    d1_closes = [x["close"] for x in d1]
+    prev_ema50 = _ema(d1_closes[:-3], 50) if len(d1_closes) > 53 else tr.get("ema50", 0.0)
+    d1_improving = bool(
+        d1_up
+        or (
+            tr["direction"] == "RANGE"
+            and float(tr.get("price") or 0) >= float(tr.get("ema50") or 0)
+            and float(tr.get("ema50") or 0) >= float(prev_ema50 or 0)
+        )
+    )
+
+    slope_positive = ma55_slope_pct >= 0.0
+    slope_watch_ok = ma55_slope_pct >= -0.10
+    rsi_ok = 48.0 <= rsi <= 76.0
+    volume_ok = volume_ratio >= 0.90
+    strong_volume = volume_ratio >= 1.20
     structure_ok = bool(conf.get("bos") or conf.get("engulf") or conf.get("reject"))
     extension_atr = (cur["close"] - current["ema8"]) / a if a > 0 else 0.0
-    not_overextended = extension_atr <= 1.5
+    not_overextended = extension_atr <= 2.0
 
-    votes = sum((d1_ok, bullish_stack, slope_ok, rsi_ok, volume_ok, structure_ok, not_overextended))
-    ready = bool(buy_event) and d1_ok and bullish_stack and slope_ok and not_overextended and votes >= 5
-    watch = current["slow_below_all"] and bullish_stack and slope_ok and votes >= 4
+    # Core entry quality: keep the clean ribbon and avoid chasing. The four
+    # confirmations are deliberately soft; two are enough after a valid cross.
+    confirmations = {
+        "d1_up_or_improving": d1_improving,
+        "ma55_slope_positive": slope_positive,
+        "rsi_48_76": rsi_ok,
+        "volume_ge_0_90_avg20": volume_ok,
+    }
+    confirmation_count = sum(bool(v) for v in confirmations.values())
+
+    cross_active = bool(buy_event)
+    ready = (
+        cross_active
+        and not d1_blocked
+        and bullish_stack
+        and not_overextended
+        and confirmation_count >= 2
+    )
+    watch = (
+        cross_active
+        and not d1_blocked
+        and current["slow_below_all"]
+        and slope_watch_ok
+        and not_overextended
+    )
 
     if ready:
         status = "READY"
-        reason = "SMA55 прошла EMA8/SMA13/SMA21 сверху вниз + подтверждён bullish regime"
-    elif watch:
-        status = "WATCH"
-        reason = "SMA55 уже ниже fast ribbon; ждём новый подтверждённый цикл/quality confirmation"
-    elif tr["direction"] == "UP":
-        status = "WAITING"
-        reason = "D1 UP; ждём, когда SMA55 завершит переход сверху вниз через EMA8/SMA13/SMA21"
-    else:
+        age = int((buy_event or {}).get("age_bars") or 0)
+        reason = f"MA55 cross активен ({age * 4}ч назад); bullish ribbon + {confirmation_count}/4 подтверждений"
+        funnel_stage = "ready"
+    elif d1_blocked:
         status = "NO_SETUP"
-        reason = "Нет D1 bullish regime или подтверждённого MA55-cycle"
+        reason = "MA55-cycle отклонён: D1 остаётся DOWN"
+        funnel_stage = "d1_down"
+    elif cross_active and not bullish_stack:
+        status = "WATCH"
+        reason = "MA55 cross активен; ждём чистый Price > EMA8 > MA13 > MA21 > MA55"
+        funnel_stage = "stack_wait"
+    elif cross_active and not not_overextended:
+        status = "WATCH"
+        reason = "MA55 cross активен, но цена ушла дальше 2 ATR от EMA8 — не догоняем"
+        funnel_stage = "overextended"
+    elif cross_active and confirmation_count < 2:
+        status = "WATCH"
+        reason = f"MA55 cross активен; подтверждений {confirmation_count}/4, нужно минимум 2"
+        funnel_stage = "confirmation_wait"
+    elif current["slow_below_all"] and bullish_stack:
+        status = "WAITING"
+        reason = "Bullish ribbon сформирован, но окно последнего MA55 cross уже истекло; ждём новый цикл"
+        funnel_stage = "cross_expired"
+    else:
+        status = "WAITING"
+        reason = "Ждём переход SMA55 сверху вниз через EMA8/SMA13/SMA21"
+        funnel_stage = "waiting_cross"
 
-    # Signal reference price is the closed H4 price. Forward tracker records the
-    # actual entry on the first future 1H bar after discovery (NEXT_BAR_MARKET).
+    # Reference price is the closed H4 price. Forward tracker records the actual
+    # entry on the first future 1H bar after discovery; there is no 12h delay
+    # when confirmations are already present.
     entry = cur["close"]
     recent_low = min(x["low"] for x in h4[-12:])
     stop = min(recent_low, current["ma55"] - a * 0.50)
     if stop >= entry:
         stop = entry - 2.0 * a
     risk = max(entry - stop, a)
-    # No normal take-profit: reverse MA55 cross is the intended exit. tp_price is
-    # only a schema-compatible reference and is explicitly ignored by tracker.
-    tp = entry + 6.0 * risk
+    tp = entry + 6.0 * risk  # schema-only reference; reverse MA55 cross is normal exit
 
-    score = 30.0 + (22 if buy_event else 0) + (14 if d1_ok else 0) + (12 if bullish_stack else 0)
-    score += 8 if slope_ok else 0
+    score = 28.0 + (24 if cross_active else 0) + (14 if bullish_stack else 0)
+    score += 10 if d1_up else (5 if d1_improving else 0)
+    score += 8 if slope_positive else (3 if slope_watch_ok else 0)
     score += 6 if rsi_ok else 0
     score += 5 if volume_ok else 0
+    score += 3 if strong_volume else 0
     score += 6 if structure_ok else 0
-    score += 5 if not_overextended else -10
+    score += 6 if not_overextended else -12
 
     out = _base(
         "ma55_cycle", symbol, "LONG", status, reason, quote_volume, provider,
         entry, stop, tp, score, cur["close"], "NEXT_BAR_MARKET",
         ema8=current["ema8"], ma13=current["ma13"], ma21=current["ma21"], ma55=current["ma55"],
-        ma55_slope_pct=round(ma55_slope_pct, 4), d1_trend=tr["direction"], rsi=round(rsi, 2),
-        volume_ratio=round(volume_ratio, 3), structure_confirmation=structure_ok,
-        extension_atr=round(extension_atr, 3), quality_votes=votes,
-        buy_cross=bool(buy_event), cross_bars=(buy_event or {}).get("bars"),
+        ma55_slope_pct=round(ma55_slope_pct, 4), d1_trend=tr["direction"], d1_improving=d1_improving,
+        rsi=round(rsi, 2), volume_ratio=round(volume_ratio, 3), strong_volume=strong_volume,
+        structure_confirmation=structure_ok, extension_atr=round(extension_atr, 3),
+        confirmation_count=confirmation_count, confirmations=confirmations,
+        buy_cross=cross_active, cross_bars=(buy_event or {}).get("bars"),
+        cross_age_bars=(buy_event or {}).get("age_bars"), cross_window_hours=12,
+        funnel_stage=funnel_stage,
         exit_mode="MA55_CROSS_UP_ALL", ignore_tp=True, reference_tp=tp,
         protective_stop=True,
     )
     if buy_event and buy_event.get("ts") is not None:
+        # Stable fingerprint uses the original cross candle, so repeated scans
+        # during the 12h confirmation window cannot duplicate the same setup.
         out["fingerprint"] = _fp("ma55_cycle", symbol, "LONG", float(buy_event["ts"]))
         out["cross_ts"] = buy_event["ts"]
     return out
