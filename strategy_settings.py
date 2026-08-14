@@ -102,6 +102,23 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec("ADAPTIVE_MODEL_BLEND_WEIGHT", "float", 0.20, "optimizer", "Вес Adaptive Model", "Максимальная доля adaptive probability в итоговой вероятности.", 0.0, 0.45),
 )
 
+# Per-strategy Telegram notifications. Defaults are intentionally OFF: a strategy
+# must be explicitly opted in from its Strategy Lab screen.
+from strategies.catalog import STRATEGIES as _LAB_STRATEGIES
+
+STRATEGY_NOTIFICATION_SPECS: tuple[SettingSpec, ...] = tuple(
+    SettingSpec(
+        f"STRATEGY_NOTIFY_{spec.key.upper()}",
+        "bool",
+        False,
+        "runtime",
+        f"{spec.title}: уведомления",
+        "Отправлять READY/FILLED/CLOSED Telegram-уведомления только для этой стратегии.",
+    )
+    for spec in _LAB_STRATEGIES
+)
+SPECS = SPECS + STRATEGY_NOTIFICATION_SPECS
+
 SPEC_BY_KEY: Dict[str, SettingSpec] = {spec.key: spec for spec in SPECS}
 CATEGORY_TITLES = {
     "filters": "🎯 Фильтры",

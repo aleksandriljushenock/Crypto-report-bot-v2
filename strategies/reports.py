@@ -5,6 +5,7 @@ import html
 from strategies.catalog import STRATEGIES, get_strategy
 from strategies.service import latest_run, stats, leaderboard
 from strategies.scheduler import status as scheduler_status
+from strategy_settings import current_value
 
 
 def _p(v):
@@ -39,9 +40,14 @@ def strategy_home_text():
 
 def strategy_detail_text(strategy: str):
     spec = get_strategy(strategy)
+    notify_key = f"STRATEGY_NOTIFY_{spec.key.upper()}"
+    notify_on = str(current_value(notify_key)).lower() == "true"
+    notify_state = "🔔 ВКЛ" if notify_on else "🔕 ВЫКЛ"
     return (
         f"{spec.emoji} <b>{html.escape(spec.title.upper())}</b>\n\n"
         f"{html.escape(spec.description)}\n\n"
+        f"Уведомления: <b>{notify_state}</b>\n"
+        "По умолчанию выключены. При включении приходят только READY → FILLED → CLOSED; WATCH/WAITING остаются в меню.\n\n"
         "Стратегия ведёт отдельные кандидаты, outcomes и статистику. "
         "READY-setups сохраняются только для будущего наблюдения — исторический вход задним числом не создаётся."
     )

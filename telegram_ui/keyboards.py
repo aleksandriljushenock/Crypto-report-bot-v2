@@ -49,10 +49,15 @@ def strategies_keyboard():
 
 def strategy_lab_keyboard(strategy):
     from strategies.catalog import get_strategy
+    from strategy_settings import current_value
     spec = get_strategy(strategy)
     prefix = f"lab_{spec.short}"
+    notify_key = f"STRATEGY_NOTIFY_{spec.key.upper()}"
+    notify_on = str(current_value(notify_key)).lower() == "true"
+    notify_text = "🔔 Уведомления: ВКЛ" if notify_on else "🔕 Уведомления: ВЫКЛ"
     return {"inline_keyboard": [
         [{"text": "🔍 Анализировать монеты", "callback_data": f"{prefix}_scan"}],
+        [{"text": notify_text, "callback_data": f"{prefix}_notify"}],
         [
             {"text": "📈 Статистика", "callback_data": f"{prefix}_winrate"},
             {"text": "🟡 Кандидаты", "callback_data": f"{prefix}_candidates"},

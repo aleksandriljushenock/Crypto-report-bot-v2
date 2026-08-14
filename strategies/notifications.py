@@ -156,13 +156,16 @@ def dispatch_pending_notifications(
                     f"event={event_type} state={row.get('state')} status={_analysis_status(row) or 'legacy'}"
                 )
             continue
+        strategy_key = str(row.get("strategy") or "").strip().upper()
+        # Opt-in per strategy. Default OFF prevents a newly added strategy from
+        # unexpectedly producing Telegram alerts before the user enables it.
+        if not strategy_key or not boolean(f"STRATEGY_NOTIFY_{strategy_key}", False):
+            continue
         if event_type == "READY" and not boolean("STRATEGY_LAB_NOTIFY_READY", True):
             continue
         if event_type == "OPEN" and not boolean("STRATEGY_LAB_NOTIFY_FILLED", True):
             continue
         if event_type == "CLOSED" and not boolean("STRATEGY_LAB_NOTIFY_CLOSED", True):
-            continue
-        if str(row.get("strategy") or "") == "ma55_cycle" and not boolean("STRATEGY_MA55CYCLE_NOTIFY", True):
             continue
         try:
             sender(chat_id, render_notification(event_type, row))
