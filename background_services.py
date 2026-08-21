@@ -280,6 +280,13 @@ class AutomationSupervisor:
         return {'ranked': len(result.get('signals', [])), 'sent': sent, 'threshold': threshold}
 
     def _run_learning(self):
+        try:
+            from model_control import auto_learning_enabled
+            if not auto_learning_enabled():
+                self.logger("Self Learning Engine: runtime auto-learning disabled")
+                return {"status": "disabled-by-runtime-setting"}
+        except Exception:
+            pass
         return retrain()
 
     def _run_learning_checkpoint(self):

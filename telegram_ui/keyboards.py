@@ -141,6 +141,7 @@ def discovery_keyboard():
 
 def ai_keyboard():
     return {"inline_keyboard": [
+        [{"text": "🧠 Управление нейромоделью", "callback_data": "modelctl_home"}],
         [
             {"text": "🏆 Champion / Модель", "callback_data": "model_status"},
             {"text": "🧬 Learning", "callback_data": "self_learning"},
@@ -300,4 +301,123 @@ def paper_keyboard():
         [{"text": "♻️ Сбросить баланс", "callback_data": "paper_reset_confirm"}],
         back_row("menu_performance"),
         home_row(),
+    ]}
+
+
+def model_control_keyboard():
+    try:
+        from model_control import auto_learning_enabled
+        auto_text = "🟢 Автообучение: ВКЛ" if auto_learning_enabled() else "⚪ Автообучение: ВЫКЛ"
+    except Exception:
+        auto_text = "🔁 Автообучение"
+    return {"inline_keyboard": [
+        [{"text": auto_text, "callback_data": "modelctl_auto_toggle"}],
+        [
+            {"text": "📊 Статус", "callback_data": "modelctl_home"},
+            {"text": "🔄 Обучить сейчас", "callback_data": "modelctl_train"},
+        ],
+        [
+            {"text": "⚙️ Параметры", "callback_data": "modelctl_params"},
+            {"text": "⚖️ Веса факторов", "callback_data": "modelctl_weights"},
+        ],
+        [
+            {"text": "🎛 Профили", "callback_data": "modelctl_profiles"},
+            {"text": "🏆 Champion / Challenger", "callback_data": "modelctl_versions"},
+        ],
+        [
+            {"text": "📈 Диагностика", "callback_data": "modelctl_diagnostics"},
+            {"text": "📜 История изменений", "callback_data": "modelctl_audit"},
+        ],
+        [{"text": "⬅️ AI Центр", "callback_data": "menu_ai"}],
+        home_row(),
+    ]}
+
+
+def model_params_keyboard():
+    from model_control import PARAMS
+    rows = []
+    pending = []
+    for key, spec in PARAMS.items():
+        pending.append({"text": spec.title, "callback_data": f"modelparam:{key}"})
+        if len(pending) == 2:
+            rows.append(pending)
+            pending = []
+    if pending:
+        rows.append(pending)
+    rows.append([{"text": "🎛 Готовые профили", "callback_data": "modelctl_profiles"}])
+    rows.append([{"text": "⬅️ Нейромодель", "callback_data": "modelctl_home"}])
+    return {"inline_keyboard": rows}
+
+
+def model_param_keyboard(param_key):
+    return {"inline_keyboard": [
+        [
+            {"text": "➖ Уменьшить", "callback_data": f"modelparam_dec:{param_key}"},
+            {"text": "➕ Увеличить", "callback_data": f"modelparam_inc:{param_key}"},
+        ],
+        [{"text": "↩️ ENV / default", "callback_data": f"modelparam_reset:{param_key}"}],
+        [{"text": "⬅️ Все параметры", "callback_data": "modelctl_params"}],
+        [{"text": "🏠 Нейромодель", "callback_data": "modelctl_home"}],
+    ]}
+
+
+def model_profiles_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🟢 Safe", "callback_data": "modelprofile:safe"}],
+        [{"text": "🟡 Balanced", "callback_data": "modelprofile:balanced"}],
+        [{"text": "🔴 Aggressive", "callback_data": "modelprofile:aggressive"}],
+        [{"text": "⬅️ Нейромодель", "callback_data": "modelctl_home"}],
+    ]}
+
+
+def model_weights_keyboard():
+    from model_control import FEATURES, FEATURE_TITLES
+    rows = []
+    pending = []
+    for feature in FEATURES:
+        pending.append({"text": FEATURE_TITLES[feature], "callback_data": f"modelweight:{feature}"})
+        if len(pending) == 2:
+            rows.append(pending)
+            pending = []
+    if pending:
+        rows.append(pending)
+    rows.append([{"text": "⬅️ Нейромодель", "callback_data": "modelctl_home"}])
+    return {"inline_keyboard": rows}
+
+
+def model_weight_keyboard(feature):
+    return {"inline_keyboard": [
+        [
+            {"text": "➖ 0.05", "callback_data": f"modelweight_dec:{feature}"},
+            {"text": "➕ 0.05", "callback_data": f"modelweight_inc:{feature}"},
+        ],
+        [{"text": "🔁 AUTO → BOUNDED → MANUAL", "callback_data": f"modelweight_mode:{feature}"}],
+        [
+            {"text": "🛡 Bound -5%", "callback_data": f"modelweight_bound_dec:{feature}"},
+            {"text": "🛡 Bound +5%", "callback_data": f"modelweight_bound_inc:{feature}"},
+        ],
+        [{"text": "↩️ Сбросить фактор", "callback_data": f"modelweight_reset:{feature}"}],
+        [{"text": "⬅️ Все веса", "callback_data": "modelctl_weights"}],
+        [{"text": "🏠 Нейромодель", "callback_data": "modelctl_home"}],
+    ]}
+
+
+def model_versions_keyboard():
+    from model_control import recent_versions
+    rows = []
+    for row in recent_versions(6):
+        version = str(row.get("version") or "")
+        if not version:
+            continue
+        status = str(row.get("status") or "")
+        icon = "🏆" if status == "active" else ("🥈" if status == "challenger" else "▫️")
+        rows.append([{"text": f"{icon} {version} · {status}", "callback_data": f"modelver:{version}"}])
+    rows.append([{"text": "⬅️ Нейромодель", "callback_data": "modelctl_home"}])
+    return {"inline_keyboard": rows}
+
+
+def model_version_confirm_keyboard(version):
+    return {"inline_keyboard": [
+        [{"text": "✅ Сделать Champion", "callback_data": f"modelver_apply:{version}"}],
+        [{"text": "❌ Отмена", "callback_data": "modelctl_versions"}],
     ]}

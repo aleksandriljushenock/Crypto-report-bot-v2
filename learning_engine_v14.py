@@ -37,6 +37,23 @@ HORIZONS = ("1h", "4h", "24h", "72h")
 _RESTORE_ATTEMPTED = False
 
 
+def _runtime_env(name: str, default: Any) -> str:
+    """Read V40 runtime model setting, falling back to ENV/default."""
+    try:
+        from model_control import runtime_env
+        return runtime_env(name, default)
+    except Exception:
+        return os.getenv(name, str(default))
+
+
+def _apply_operator_weight_policy(weights: Dict[str, float], defaults: Dict[str, float]) -> Dict[str, float]:
+    try:
+        from model_control import apply_weight_policy
+        return apply_weight_policy(weights, defaults)
+    except Exception:
+        return dict(weights)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -287,7 +304,7 @@ def _days_old(created_at: str) -> float:
 
 
 def _sample_weight(sample: Dict[str, Any]) -> float:
-    half_life = max(2.0, float(os.getenv("LEARNING_RECENCY_HALF_LIFE_DAYS", "30")))
+    half_life = max(2.0, float(_runtime_env("LEARNING_RECENCY_HALF_LIFE_DAYS", "30")))
     return 0.5 ** (_days_old(sample.get("created_at", "")) / half_life)
 
 
@@ -374,11 +391,12 @@ def walk_forward_folds(samples: Sequence[Dict[str, Any]], folds: int = 4) -> Lis
 
 
 def _bounded(weights: Dict[str, float], defaults: Dict[str, float]) -> Dict[str, float]:
-    max_change = float(os.getenv("LEARNING_MAX_WEIGHT_CHANGE", "0.35"))
-    return {
+    max_change = float(_runtime_env("LEARNING_MAX_WEIGHT_CHANGE", "0.35"))
+    bounded = {
         k: round(max(float(defaults[k]) * (1 - max_change), min(float(defaults[k]) * (1 + max_change), float(weights[k]))), 5)
         for k in FEATURES
     }
+    return _apply_operator_weight_policy(bounded, defaults)
 
 
 def optimize_weights(samples: Sequence[Dict[str, Any]], defaults: Dict[str, float], seed: int) -> Dict[str, float]:
@@ -386,10 +404,10 @@ def optimize_weights(samples: Sequence[Dict[str, Any]], defaults: Dict[str, floa
     if len(samples) < 20:
         return dict(defaults)
     rng = random.Random(seed)
-    folds = walk_forward_folds(samples, int(os.getenv("LEARNING_WALK_FORWARD_FOLDS", "4")))
+    folds = walk_forward_folds(samples, int(_runtime_env("LEARNING_WALK_FORWARD_FOLDS", "4")))
     if not folds:
         return dict(defaults)
-    iterations = max(40, min(800, int(os.getenv("LEARNING_SEARCH_ITERATIONS", "240"))))
+    iterations = max(40, min(800, int(_runtime_env("LEARNING_SEARCH_ITERATIONS", "240"))))
     best = dict(defaults)
 
     def objective(candidate: Dict[str, float]) -> float:
@@ -438,18 +456,29 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
             previous = active_v13(defaults)
             previous_weights = dict(previous.get("weights") or defaults)
             cfg = _model_config(previous_weights)
-            return {"version": previous.get("version", "13.0-base"), "weights": previous_weights,
+            effective = _apply_operator_weight_policy(previous_weights, defaults)
+            cfg["learned_global_weights"] = dict(previous_weights)
+            cfg["global_weights"] = effective
+            return {"version": previous.get("version", "13.0-base"), "weights": effective, "learned_weights": previous_weights,
                     "config": cfg, "metrics": previous.get("metrics") or {}, "rules": previous.get("rules") or []}
         except Exception:
             cfg = _model_config(defaults)
-            return {"version": "13.0-base", "weights": dict(defaults), "config": cfg, "metrics": {}, "rules": []}
+            effective = _apply_operator_weight_policy(dict(defaults), defaults)
+            cfg["learned_global_weights"] = dict(defaults)
+            cfg["global_weights"] = effective
+            return {"version": "13.0-base", "weights": effective, "learned_weights": dict(defaults), "config": cfg, "metrics": {}, "rules": []}
     cfg = _json(row["config_json"], _model_config(defaults))
     parsed_rules = []
     for r in rules:
         rr = dict(r)
         rr.update(_json(rr.pop("rule_json"), {}))
         parsed_rules.append(rr)
-    return {"version": row["version"], "weights": cfg.get("global_weights", defaults), "config": cfg,
+    learned_weights = dict(cfg.get("global_weights", defaults))
+    effective_weights = _apply_operator_weight_policy(learned_weights, defaults)
+    cfg = dict(cfg)
+    cfg["learned_global_weights"] = learned_weights
+    cfg["global_weights"] = effective_weights
+    return {"version": row["version"], "weights": effective_weights, "learned_weights": learned_weights, "config": cfg,
             "metrics": _json(row["metrics_json"], {}), "rules": parsed_rules}
 
 
@@ -457,7 +486,9 @@ def specialist_weights(model: Dict[str, Any], regime: str, direction: str) -> Di
     cfg = model.get("config") or {}
     specialists = cfg.get("specialists") or {}
     direction = str(direction or "").upper()
-    return specialists.get(f"{regime}:{direction}") or specialists.get(regime) or cfg.get("global_weights") or model.get("weights") or {}
+    selected = specialists.get(f"{regime}:{direction}") or specialists.get(regime) or cfg.get("global_weights") or model.get("weights") or {}
+    defaults = model.get("learned_weights") or cfg.get("learned_global_weights") or selected
+    return _apply_operator_weight_policy(dict(selected), dict(defaults))
 
 
 def calibrated_probability(score: float, regime: str, model: Dict[str, Any]) -> Tuple[float, float]:
@@ -494,7 +525,7 @@ def apply_learning_adjustments(factors: Dict[str, float], rules: Iterable[Dict[s
             total += adjustment
             triggered.append({"kind": rule.get("kind", "rule"), "feature": feature, "operator": op,
                               "threshold": threshold, "feature2": feature2, "adjustment": adjustment})
-    cap = float(os.getenv("LEARNING_MAX_TOTAL_ADJUSTMENT", "20"))
+    cap = float(_runtime_env("LEARNING_MAX_TOTAL_ADJUSTMENT", "20"))
     total = max(-cap, min(cap, total))
     return {"adjustment": round(total, 2), "penalty": round(max(0.0, -total), 2), "triggered": triggered}
 
@@ -506,7 +537,7 @@ def apply_no_trade_penalty(factors: Dict[str, float], rules: Iterable[Dict[str, 
 
 
 def _derive_rules(samples: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    min_samples = max(8, int(os.getenv("LEARNING_RULE_MIN_SAMPLES", "14")))
+    min_samples = max(8, int(_runtime_env("LEARNING_RULE_MIN_SAMPLES", "14")))
     rules: List[Dict[str, Any]] = []
     contexts = [("all", "ALL", list(samples))]
     for regime in sorted({s["regime"] for s in samples}):
@@ -587,9 +618,9 @@ def _drift(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _candidate_better(base: Dict[str, float], candidate: Dict[str, float], drift: Dict[str, Any]) -> bool:
-    min_gain = float(os.getenv("LEARNING_MIN_UTILITY_GAIN", "0.012"))
+    min_gain = float(_runtime_env("LEARNING_MIN_UTILITY_GAIN", "0.012"))
     required = min_gain * (1.4 if drift.get("status") == "high" else 1.0)
-    min_holdout = max(30, int(os.getenv("LEARNING_MIN_HOLDOUT_SAMPLES", "40")))
+    min_holdout = max(30, int(_runtime_env("LEARNING_MIN_HOLDOUT_SAMPLES", "40")))
     return (
         candidate.get("samples", 0) >= min_holdout
         and candidate["utility"] >= base["utility"] + required
@@ -605,7 +636,7 @@ def _candidate_better(base: Dict[str, float], candidate: Dict[str, float], drift
 def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     initialize()
     samples = load_samples()
-    min_samples = max(100, int(os.getenv("LEARNING_MIN_SAMPLES", "200")))
+    min_samples = max(100, int(_runtime_env("LEARNING_MIN_SAMPLES", "200")))
     if len(samples) < min_samples:
         result = {"status": "collecting-data", "samples": len(samples), "required": min_samples,
                   "active": active_model(defaults)["version"]}
@@ -627,7 +658,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     seed = int(hashlib.sha256((str(len(samples)) + samples[-1]["fingerprint"]).encode()).hexdigest()[:8], 16)
     global_weights = optimize_weights(samples, defaults, seed)
     specialists: Dict[str, Dict[str, float]] = {}
-    specialist_min = max(50, int(os.getenv("LEARNING_SPECIALIST_MIN_SAMPLES", "80")))
+    specialist_min = max(50, int(_runtime_env("LEARNING_SPECIALIST_MIN_SAMPLES", "80")))
     for regime in sorted({s["regime"] for s in samples}):
         subset = [s for s in samples if s["regime"] == regime]
         if len(subset) >= specialist_min:

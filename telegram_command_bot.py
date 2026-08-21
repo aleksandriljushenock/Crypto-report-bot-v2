@@ -1248,6 +1248,23 @@ def handle_command(chat_id, text):
     if command == "/modelstatus":
         send_v8_report(chat_id, build_model_status_report)
         return
+    if command == "/model":
+        try:
+            from learning_engine_v14 import diagnostics
+            from ai_score_engine import DEFAULT_WEIGHTS
+            from model_control import build_control_home_text
+            data = diagnostics(DEFAULT_WEIGHTS)
+            send_message(chat_id, build_control_home_text(data), reply_markup=ui_keyboards.model_control_keyboard())
+        except Exception as exc:
+            send_message(chat_id, f"❌ Ошибка Model Control: <code>{html.escape(str(exc)[:500])}</code>")
+        return
+    if command == "/version":
+        try:
+            version = (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
+        except Exception:
+            version = "unknown"
+        send_message(chat_id, f"🤖 <b>Crypto Report Bot</b>\nVersion: <b>V{html.escape(version)}</b>")
+        return
     if command == "/market":
         send_v8_report(chat_id, build_market_report)
         return

@@ -1,16 +1,26 @@
 """Self-learning facade for v14 maximum-learning engine."""
+import threading
+
 from ai_score_engine import DEFAULT_WEIGHTS
 from learning_engine_v14 import diagnostics, train
 
+_TRAIN_LOCK = threading.Lock()
+
 
 def retrain():
-    result = train(DEFAULT_WEIGHTS)
+    if not _TRAIN_LOCK.acquire(blocking=False):
+        local = {"status": "already-running", "message": "training is already running"}
+        return {"local": local, "cloudAdaptive": {"status": "skipped"}, "status": "already-running"}
     try:
-        from adaptive_cloud_learning import train_cloud_overlay
-        cloud = train_cloud_overlay(DEFAULT_WEIGHTS)
-    except Exception as exc:
-        cloud = {"status": "error", "error": str(exc)}
-    return {"local": result, "cloudAdaptive": cloud, "status": result.get("status") if isinstance(result, dict) else "done"}
+        result = train(DEFAULT_WEIGHTS)
+        try:
+            from adaptive_cloud_learning import train_cloud_overlay
+            cloud = train_cloud_overlay(DEFAULT_WEIGHTS)
+        except Exception as exc:
+            cloud = {"status": "error", "error": str(exc)}
+        return {"local": result, "cloudAdaptive": cloud, "status": result.get("status") if isinstance(result, dict) else "done"}
+    finally:
+        _TRAIN_LOCK.release()
 
 
 def build_learning_report():

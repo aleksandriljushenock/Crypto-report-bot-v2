@@ -6,6 +6,24 @@ trading state or background workers.
 """
 from __future__ import annotations
 
+import html as _html
+import json as _json
+import threading
+
+from telegram_ui.keyboards import (
+    model_control_keyboard, model_params_keyboard, model_param_keyboard,
+    model_profiles_keyboard, model_weights_keyboard, model_weight_keyboard,
+    model_versions_keyboard, model_version_confirm_keyboard,
+)
+from model_control import (
+    PARAMS, FEATURES, PROFILE_TITLES, adjust_param, reset_param, apply_profile,
+    build_control_home_text, build_params_text, build_param_text, build_profiles_text,
+    build_weights_text, build_weight_text, build_versions_text, build_audit_text,
+    adjust_weight, cycle_weight_mode, adjust_weight_bound, reset_weight,
+    activate_version, recent_versions, runtime_value, weight_control,
+    auto_learning_enabled, set_auto_learning,
+)
+
 _BOT_EXPORTS = ['CATEGORY_TITLES', 'SPEC_BY_KEY', '_chronos_state_text', '_fmt_metric', '_period_rows', 'ai_keyboard', 'ai_optimizer_keyboard', 'analytics_keyboard', 'apply_recommendation', 'automation_supervisor', 'build_ai_history_report', 'build_ai_optimizer_text', 'build_automation_status', 'build_best_combos_text', 'build_best_signal_text', 'build_capital_flow_report', 'build_coin_performance_text', 'build_exchange_status_text', 'build_explain_signal_text', 'build_filter_performance_text', 'build_heat_map_text', 'build_home_text', 'build_learning_report', 'build_listing_progress_message', 'build_market_mood_text', 'build_model_status_report', 'build_narrative_report', 'build_near_signal_text', 'build_news_report', 'build_paper_goal_text', 'build_paper_history_text', 'build_paper_positions_text', 'build_paper_status_text', 'build_performance_center_text', 'build_period_performance_text', 'build_professional_report', 'build_scanner_intelligence_text', 'build_sentiment_report', 'build_shadow_signals_text', 'build_smart_money_report', 'build_strategy_category_text', 'build_strategy_edit_text', 'build_strategy_settings_text', 'build_top_ai_report', 'build_universe_dashboard_text', 'disable_monitor', 'enable_monitor', 'ensure_paper_account', 'exc', 'exchange_status_keyboard', 'get_monitor_settings', 'get_strategy_setting_value', 'handle_command', 'handle_system_callback', 'html', 'is_authorized', 'load_strategy_settings', 'log', 'main_keyboard', 'market_keyboard', 'new_scan_thread', 'paper_keyboard', 'performance_keyboard', 'portfolio_keyboard', 'portfolio_report', 'reject_recommendation', 'report_thread', 'reset_paper_account', 'reset_strategy_setting', 'run_optimizer', 'save_strategy_setting', 'scanner_intelligence_keyboard', 'send_message', 'send_monitor_status', 'send_recent_signals', 'send_trade_performance', 'send_v8_report', 'send_watchlist', 'signals_keyboard', 'start_early_discovery', 'start_listing_hunter', 'start_new_listings_scan', 'start_report', 'start_trade_scan', 'strategy_category_keyboard', 'strategy_edit_keyboard', 'strategy_edit_pending', 'strategy_settings_keyboard', 'system_keyboard', 'telegram_request', 'trade_keyboard', 'trade_monitor', 'trade_scan_thread', 'train_candidate', 'universe_dashboard_keyboard', 'strategies_keyboard', 'fib_strategy_keyboard', 'build_strategies_home_text', 'build_fib_strategy_home_text', 'build_fib_candidates_text', 'build_fib_winrate_text', 'build_fib_history_text', 'build_fib_rules_text', 'start_fib_strategy_scan', 'refresh_fib_strategy_outcomes', 'strategy_lab_keyboard', 'build_strategy_lab_home_text', 'build_strategy_candidates_text', 'build_strategy_winrate_text', 'build_strategy_history_text', 'build_strategy_rules_text', 'build_strategy_leaderboard_text', 'start_strategy_lab_scan', 'refresh_strategy_lab_outcomes', 'get_lab_strategy']
 
 def process_update(update, bot):
@@ -178,6 +196,202 @@ def _process_update(update):
 
         if callback_data == "menu_ai":
             send_message(chat_id, "🤖 <b>AI ЦЕНТР</b>\nChampion, Learning, Chronos и AI-диагностика.", reply_markup=ai_keyboard())
+            return
+
+        # V40 model control center -------------------------------------------------
+        if callback_data == "modelctl_home":
+            try:
+                from learning_engine_v14 import diagnostics
+                from ai_score_engine import DEFAULT_WEIGHTS
+                data = diagnostics(DEFAULT_WEIGHTS)
+                text = build_control_home_text(data)
+            except Exception as exc:
+                text = f"❌ Не удалось загрузить нейромодель: <code>{_html.escape(str(exc)[:500])}</code>"
+            send_message(chat_id, text, reply_markup=model_control_keyboard())
+            return
+
+        if callback_data == "modelctl_auto_toggle":
+            enabled = set_auto_learning(not auto_learning_enabled(), updated_by=f"telegram:{chat_id}")
+            state = "🟢 ВКЛЮЧЕНО" if enabled else "⚪ ВЫКЛЮЧЕНО"
+            text = (
+                f"🔁 <b>Автоматическое обучение: {state}</b>\n\n"
+                "Когда включено, фоновый Self Learning Engine периодически пытается построить challenger. "
+                "Champion меняется только если кандидат проходит walk-forward, holdout и safety-gates.\n\n"
+                "Когда выключено, накопление outcomes и работа текущего Champion продолжаются, но автоматические переобучения не запускаются. "
+                "Кнопка «Обучить сейчас» остаётся доступной."
+            )
+            send_message(chat_id, text, reply_markup=model_control_keyboard())
+            return
+
+        if callback_data == "modelctl_params":
+            send_message(chat_id, build_params_text(), reply_markup=model_params_keyboard())
+            return
+
+        if callback_data and callback_data.startswith("modelparam:"):
+            key = callback_data.split(":", 1)[1]
+            if key not in PARAMS:
+                send_message(chat_id, "⚠️ Неизвестный параметр.", reply_markup=model_params_keyboard())
+                return
+            send_message(chat_id, build_param_text(key), reply_markup=model_param_keyboard(key))
+            return
+
+        if callback_data and (callback_data.startswith("modelparam_inc:") or callback_data.startswith("modelparam_dec:") or callback_data.startswith("modelparam_reset:")):
+            action, key = callback_data.split(":", 1)
+            if key not in PARAMS:
+                send_message(chat_id, "⚠️ Неизвестный параметр.", reply_markup=model_params_keyboard())
+                return
+            try:
+                if action == "modelparam_inc":
+                    adjust_param(key, +1, updated_by=f"telegram:{chat_id}")
+                elif action == "modelparam_dec":
+                    adjust_param(key, -1, updated_by=f"telegram:{chat_id}")
+                else:
+                    reset_param(key, updated_by=f"telegram:{chat_id}")
+                text = "✅ <b>Настройка сохранена</b>\n\n" + build_param_text(key)
+            except Exception as exc:
+                text = f"❌ Ошибка изменения параметра: <code>{_html.escape(str(exc)[:500])}</code>"
+            send_message(chat_id, text, reply_markup=model_param_keyboard(key))
+            return
+
+        if callback_data == "modelctl_profiles":
+            send_message(chat_id, build_profiles_text(), reply_markup=model_profiles_keyboard())
+            return
+
+        if callback_data and callback_data.startswith("modelprofile:"):
+            profile = callback_data.split(":", 1)[1]
+            try:
+                apply_profile(profile, updated_by=f"telegram:{chat_id}")
+                text = (f"✅ Применён профиль <b>{PROFILE_TITLES.get(profile, profile)}</b>.\n\n"
+                        + build_profiles_text())
+            except Exception as exc:
+                text = f"❌ Ошибка применения профиля: <code>{_html.escape(str(exc)[:500])}</code>"
+            send_message(chat_id, text, reply_markup=model_profiles_keyboard())
+            return
+
+        if callback_data == "modelctl_weights":
+            try:
+                from learning_engine_v14 import active_model
+                from ai_score_engine import DEFAULT_WEIGHTS
+                model = active_model(DEFAULT_WEIGHTS)
+                text = build_weights_text(model.get("weights") or DEFAULT_WEIGHTS, DEFAULT_WEIGHTS)
+            except Exception as exc:
+                text = f"❌ Ошибка чтения весов: <code>{_html.escape(str(exc)[:500])}</code>"
+            send_message(chat_id, text, reply_markup=model_weights_keyboard())
+            return
+
+        if callback_data and callback_data.startswith("modelweight:"):
+            feature = callback_data.split(":", 1)[1]
+            if feature not in FEATURES:
+                send_message(chat_id, "⚠️ Неизвестный фактор.", reply_markup=model_weights_keyboard())
+                return
+            try:
+                from learning_engine_v14 import active_model
+                from ai_score_engine import DEFAULT_WEIGHTS
+                model = active_model(DEFAULT_WEIGHTS)
+                learned = (model.get("learned_weights") or (model.get("config") or {}).get("learned_global_weights") or model.get("weights") or DEFAULT_WEIGHTS)
+                effective = model.get("weights") or DEFAULT_WEIGHTS
+                text = build_weight_text(feature, float(learned.get(feature, DEFAULT_WEIGHTS[feature])), float(effective.get(feature, DEFAULT_WEIGHTS[feature])), DEFAULT_WEIGHTS)
+            except Exception as exc:
+                text = f"❌ Ошибка чтения фактора: <code>{_html.escape(str(exc)[:500])}</code>"
+            send_message(chat_id, text, reply_markup=model_weight_keyboard(feature))
+            return
+
+        if callback_data and any(callback_data.startswith(prefix) for prefix in ("modelweight_inc:", "modelweight_dec:", "modelweight_mode:", "modelweight_bound_inc:", "modelweight_bound_dec:", "modelweight_reset:")):
+            action, feature = callback_data.split(":", 1)
+            if feature not in FEATURES:
+                send_message(chat_id, "⚠️ Неизвестный фактор.", reply_markup=model_weights_keyboard())
+                return
+            try:
+                actor = f"telegram:{chat_id}"
+                if action == "modelweight_inc": adjust_weight(feature, +0.05, actor)
+                elif action == "modelweight_dec": adjust_weight(feature, -0.05, actor)
+                elif action == "modelweight_mode": cycle_weight_mode(feature, actor)
+                elif action == "modelweight_bound_inc": adjust_weight_bound(feature, +0.05, actor)
+                elif action == "modelweight_bound_dec": adjust_weight_bound(feature, -0.05, actor)
+                elif action == "modelweight_reset": reset_weight(feature, actor)
+                from learning_engine_v14 import active_model
+                from ai_score_engine import DEFAULT_WEIGHTS
+                model = active_model(DEFAULT_WEIGHTS)
+                learned = (model.get("learned_weights") or (model.get("config") or {}).get("learned_global_weights") or model.get("weights") or DEFAULT_WEIGHTS)
+                effective = model.get("weights") or DEFAULT_WEIGHTS
+                text = "✅ <b>Вес обновлён</b>\n\n" + build_weight_text(feature, float(learned.get(feature, DEFAULT_WEIGHTS[feature])), float(effective.get(feature, DEFAULT_WEIGHTS[feature])), DEFAULT_WEIGHTS)
+            except Exception as exc:
+                text = f"❌ Ошибка изменения веса: <code>{_html.escape(str(exc)[:500])}</code>"
+            send_message(chat_id, text, reply_markup=model_weight_keyboard(feature))
+            return
+
+        if callback_data == "modelctl_versions":
+            send_message(chat_id, build_versions_text(), reply_markup=model_versions_keyboard())
+            return
+
+        if callback_data and callback_data.startswith("modelver:"):
+            version = callback_data.split(":", 1)[1]
+            row = next((x for x in recent_versions(12) if str(x.get("version")) == version), None)
+            if not row:
+                send_message(chat_id, "⚠️ Версия не найдена.", reply_markup=model_versions_keyboard())
+                return
+            metrics = row.get("metrics") or {}
+            cand = metrics.get("candidate") or {}
+            text = (
+                "🏆 <b>ВЕРСИЯ МОДЕЛИ</b>\n\n"
+                f"Version: <code>{_html.escape(version)}</code>\n"
+                f"Status: <b>{_html.escape(str(row.get('status')))}</b>\n"
+                f"Samples: <b>{row.get('sample_count',0)}</b>\n"
+                f"Utility: <b>{float(cand.get('utility') or 0):.4f}</b>\n"
+                f"Brier: <b>{float(cand.get('brier') or 0):.4f}</b>\n"
+                f"Profit Factor: <b>{float(cand.get('profit_factor') or 0):.2f}</b>\n\n"
+                "⚠️ Ручная активация обходит автоматическое решение promotion. Используй её как осознанный rollback/promotion, если автоматическая модель ведёт себя хуже ожидаемого."
+            )
+            send_message(chat_id, text, reply_markup=model_version_confirm_keyboard(version))
+            return
+
+        if callback_data and callback_data.startswith("modelver_apply:"):
+            version = callback_data.split(":", 1)[1]
+            result = activate_version(version, updated_by=f"telegram:{chat_id}")
+            if result.get("status") == "activated":
+                text = f"✅ <b>Champion переключён</b>\nПредыдущий: <code>{_html.escape(str(result.get('previous') or '—'))}</code>\nНовый: <code>{_html.escape(version)}</code>"
+            else:
+                text = f"❌ Не удалось активировать <code>{_html.escape(version)}</code>: {_html.escape(str(result.get('status')))}"
+            send_message(chat_id, text, reply_markup=model_versions_keyboard())
+            return
+
+        if callback_data == "modelctl_diagnostics":
+            send_v8_report(chat_id, build_model_status_report)
+            return
+
+        if callback_data == "modelctl_audit":
+            send_message(chat_id, build_audit_text(), reply_markup=model_control_keyboard())
+            return
+
+        if callback_data == "modelctl_train":
+            send_message(chat_id, "🧬 <b>Обучение запущено</b>\n\nМодель использует текущие runtime-параметры, walk-forward validation и финальный holdout. По завершении пришлю результат.", reply_markup=model_control_keyboard())
+            def _run_v40_training():
+                try:
+                    from self_learning_engine import retrain
+                    result = retrain()
+                    local = result.get("local") if isinstance(result, dict) else {}
+                    local = local or {}
+                    metrics = local.get("metrics") or {}
+                    candidate = metrics.get("candidate") or {}
+                    status = local.get("model_status") or local.get("status") or result.get("status")
+                    text = (
+                        "✅ <b>ОБУЧЕНИЕ ЗАВЕРШЕНО</b>\n\n"
+                        f"Status: <b>{_html.escape(str(status))}</b>\n"
+                        f"Version: <code>{_html.escape(str(local.get('version') or local.get('active') or '—'))}</code>\n"
+                        f"Samples: <b>{local.get('samples', 0)}</b>\n"
+                        f"Promoted: <b>{'ДА' if local.get('promoted') else 'НЕТ'}</b>\n"
+                        f"Utility: <b>{float(candidate.get('utility') or 0):.4f}</b>\n"
+                        f"Brier: <b>{float(candidate.get('brier') or 0):.4f}</b>\n"
+                        f"Profit Factor: <b>{float(candidate.get('profit_factor') or 0):.2f}</b>\n\n"
+                        "Если challenger не promoted, текущий Champion остался активным — это нормальная работа safety-gates."
+                    )
+                except Exception as exc:
+                    text = f"❌ Обучение завершилось ошибкой: <code>{_html.escape(str(exc)[:700])}</code>"
+                try:
+                    send_message(chat_id, text, reply_markup=model_control_keyboard())
+                except Exception:
+                    pass
+            threading.Thread(target=_run_v40_training, daemon=True, name="model-v40-training").start()
             return
 
         if callback_data in {"menu_performance", "menu_portfolio"}:

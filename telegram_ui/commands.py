@@ -28,6 +28,8 @@ BOT_COMMANDS = [
     {"command": "news", "description": "Важные новости"},
     {"command": "portfolio", "description": "Портфель"},
     {"command": "learn", "description": "Самообучение и веса"},
+    {"command": "model", "description": "Управление нейромоделью"},
+    {"command": "version", "description": "Версия бота"},
     {"command": "topai", "description": "TOP AI монеты"},
     {"command": "aihistory", "description": "История AI Score монеты"},
 ]
