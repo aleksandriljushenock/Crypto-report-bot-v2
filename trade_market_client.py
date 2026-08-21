@@ -17,6 +17,7 @@ _LAST_UNIVERSE_SUMMARY = {}
 _PROVIDER_LOCK = threading.Lock()
 _RATE_LOCK = threading.Lock()
 _PROVIDER_LAST_CALL = {}
+_METHOD_HEALTH = {}
 
 
 def _provider_order():
@@ -27,79 +28,72 @@ def _cooldown_seconds():
     return integer("EXCHANGE_PROVIDER_COOLDOWN_SECONDS", 900, minimum=60, strategy=False)
 
 
-def _mark_failed(provider, exc):
+def _mark_failed(provider, exc, method: str | None = None):
     now = time.time()
+    target = _METHOD_HEALTH if method else _PROVIDER_HEALTH
+    key = (provider, method) if method else provider
     with _PROVIDER_LOCK:
-        state = dict(_PROVIDER_HEALTH.get(provider) or {})
-        state.update({
-            "blocked_until": now + _cooldown_seconds(),
-            "error": f"{type(exc).__name__}: {exc}",
-            "last_failure_at": now,
-            "failures": int(state.get("failures", 0)) + 1,
-        })
-        _PROVIDER_HEALTH[provider] = state
+        state = dict(target.get(key) or {})
+        state.update({"blocked_until": now + _cooldown_seconds(), "error": f"{type(exc).__name__}: {exc}",
+                      "last_failure_at": now, "failures": int(state.get("failures", 0)) + 1})
+        target[key] = state
 
 
-def _mark_soft_failure(provider, exc):
-    now = time.time()
+def _mark_soft_failure(provider, exc, method: str | None = None):
+    now = time.time(); target = _METHOD_HEALTH if method else _PROVIDER_HEALTH; key=(provider,method) if method else provider
     with _PROVIDER_LOCK:
-        state = dict(_PROVIDER_HEALTH.get(provider) or {})
-        state.update({
-            "blocked_until": 0,
-            "error": f"{type(exc).__name__}: {exc}",
-            "last_failure_at": now,
-            "failures": int(state.get("failures", 0)) + 1,
-        })
-        _PROVIDER_HEALTH[provider] = state
+        state=dict(target.get(key) or {}); state.update({"blocked_until":0,"error":f"{type(exc).__name__}: {exc}",
+            "last_failure_at":now,"failures":int(state.get("failures",0))+1}); target[key]=state
 
 
 def _should_trip_provider(exc):
     text = f"{type(exc).__name__}: {exc}".lower()
-    markers = (
-        "timeout", "timed out", "connectionerror", "connection error",
-        "name resolution", "429", "418", "500", "502", "503", "504",
-        "too many requests", "rate limit", "temporarily unavailable",
-    )
+    markers = ("timeout","timed out","connectionerror","connection error","name resolution","429","418","500","502","503","504","too many requests","rate limit","temporarily unavailable")
     return any(marker in text for marker in markers)
 
 
-def _mark_success(provider):
-    now = time.time()
+def _mark_success(provider, method: str | None = None):
+    now=time.time()
     with _PROVIDER_LOCK:
-        state = dict(_PROVIDER_HEALTH.get(provider) or {})
-        state.update({
-            "blocked_until": 0,
-            "error": None,
-            "last_success_at": now,
-            "successes": int(state.get("successes", 0)) + 1,
-        })
-        _PROVIDER_HEALTH[provider] = state
+        state=dict(_PROVIDER_HEALTH.get(provider) or {}); state.update({"error":None,"last_success_at":now,"successes":int(state.get("successes",0))+1}); _PROVIDER_HEALTH[provider]=state
+        if method:
+            _METHOD_HEALTH.pop((provider,method), None)
 
 
-def _available(provider):
+def _available(provider, method: str | None = None):
+    now=time.time()
     with _PROVIDER_LOCK:
-        state = _PROVIDER_HEALTH.get(provider)
-        return not state or float(state.get("blocked_until", 0)) <= time.time()
+        state=_PROVIDER_HEALTH.get(provider)
+        if state and float(state.get("blocked_until",0)) > now:
+            return False
+        if method:
+            mstate=_METHOD_HEALTH.get((provider,method))
+            if mstate and float(mstate.get("blocked_until",0)) > now:
+                return False
+        return True
 
 
-def _rate_limit(provider):
-    """Process-wide per-provider request pacing.
+def _method_weight(method: str) -> float:
+    weights = {
+        "exchange_info": 2.0, "ticker_24h_all": 4.0, "ticker_24h": 1.0,
+        "klines": 2.0, "depth": 5.0, "open_interest_history": 2.0,
+        "global_long_short_ratio": 2.0, "taker_buy_sell_volume": 2.0,
+    }
+    return max(1.0, float(weights.get(str(method or ""), 1.0)))
 
-    Keeps concurrent scanner/Strategy Lab/background workers from bursting one
-    venue. This complements exchange-specific HTTP backoff and circuit breakers.
-    """
+def _rate_limit(provider, method: str = ""):
+    """Weighted process-wide pacing with an instance-count budget divisor."""
     rps = max(0.2, number("EXCHANGE_PROVIDER_MAX_RPS", 8.0, minimum=0.2, maximum=50.0, strategy=False))
-    gap = 1.0 / rps
+    instances = max(1, integer("EXCHANGE_EXPECTED_INSTANCE_COUNT", 1, minimum=1, maximum=100, strategy=False))
+    effective_rps = max(0.1, rps / instances)
+    gap = _method_weight(method) / effective_rps
     while True:
         with _RATE_LOCK:
-            now = time.monotonic()
-            last = float(_PROVIDER_LAST_CALL.get(provider, 0.0))
-            wait = gap - (now - last)
+            now = time.monotonic(); last = float(_PROVIDER_LAST_CALL.get(provider, 0.0)); wait = gap - (now - last)
             if wait <= 0:
                 _PROVIDER_LAST_CALL[provider] = now
                 return
         time.sleep(min(wait, gap))
-
 
 def _build_provider(name, timeout):
     return create_provider(name, timeout)
@@ -145,7 +139,7 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
             continue
         try:
             client = _build_provider(name, timeout)
-            _rate_limit(name)
+            _rate_limit(name, "exchange_info")
             info = client.exchange_info() or {}
             tradable = {
                 str(row.get("symbol")).upper()
@@ -153,7 +147,7 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
                 if row.get("status") == "TRADING" and row.get("quoteAsset") == "USDT" and row.get("contractType") == "PERPETUAL"
             }
             _register_provider_symbols(name, tradable)
-            _rate_limit(name)
+            _rate_limit(name, "ticker_24h_all")
             tickers = client.ticker_24h_all() or []
             accepted = 0
             for row in tickers:
@@ -296,15 +290,15 @@ class FallbackTradeMarketClient:
                 symbol = first.upper()
 
         for name in self.provider_names:
-            if not _available(name):
+            if not _available(name, method):
                 continue
             if symbol and not _provider_supports_symbol(name, symbol):
                 continue
             attempted.add(name)
             try:
-                _rate_limit(name)
+                _rate_limit(name, method)
                 value = getattr(self.clients[name], method)(*args, **kwargs)
-                _mark_success(name)
+                _mark_success(name, method)
                 self.last_provider = name
                 self.last_errors = errors
                 if name != self.provider_names[0]:
@@ -316,10 +310,10 @@ class FallbackTradeMarketClient:
                 logger.debug("Trade market symbol unsupported: method=%s provider=%s symbol=%s", method, name, symbol)
             except Exception as exc:
                 if _should_trip_provider(exc):
-                    _mark_failed(name, exc)
+                    _mark_failed(name, exc, method)
                     logger.warning("Trade market provider failed: method=%s provider=%s error=%s", method, name, exc)
                 else:
-                    _mark_soft_failure(name, exc)
+                    _mark_soft_failure(name, exc, method)
                     logger.debug("Trade market method unavailable: method=%s provider=%s error=%s", method, name, exc)
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 

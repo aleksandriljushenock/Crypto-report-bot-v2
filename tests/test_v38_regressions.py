@@ -9,7 +9,8 @@ def test_pre_fill_candle_is_never_used_for_execution():
     import paper_trading as pt
     opened = datetime(2026, 8, 21, 12, 0, 30, tzinfo=timezone.utc)
     rows = [[_ms(datetime(2026,8,21,12,0,tzinfo=timezone.utc)), '100','120','80','100','0', _ms(datetime(2026,8,21,12,0,59,tzinfo=timezone.utc))]]
-    assert pt._iter_execution_candles(rows, since=opened, interval_minutes=1, not_before=opened) == []
+    candles = pt._iter_execution_candles(rows, since=opened, interval_minutes=1, not_before=opened)
+    assert len(candles) == 1 and candles[0][5] is True
 
 
 def test_expiry_boundary_candle_is_not_used():
@@ -17,7 +18,8 @@ def test_expiry_boundary_candle_is_not_used():
     created = datetime(2026,8,21,12,0,tzinfo=timezone.utc)
     expiry = created + timedelta(seconds=30)
     rows = [[_ms(created), '100','120','80','100','0', _ms(created + timedelta(seconds=59))]]
-    assert pt._iter_execution_candles(rows, since=created-timedelta(seconds=1), interval_minutes=1, not_before=created, not_after=expiry) == []
+    candles = pt._iter_execution_candles(rows, since=created-timedelta(seconds=1), interval_minutes=1, not_before=created, not_after=expiry)
+    assert len(candles) == 1 and candles[0][6] is True
 
 
 def test_invalid_direction_is_rejected(monkeypatch):
@@ -56,7 +58,7 @@ def test_circuit_breaker_does_not_retry_blocked_provider(monkeypatch):
         def ticker_24h(self,*a,**k): raise AssertionError('blocked provider called')
     c=tm.FallbackTradeMarketClient.__new__(tm.FallbackTradeMarketClient)
     c.provider_names=['binance']; c.clients={'binance':Bad()}; c.last_provider=None; c.last_errors=[]
-    monkeypatch.setattr(tm,'_available',lambda name:False)
+    monkeypatch.setattr(tm,'_available',lambda name, method=None:False)
     try:
         c._call('ticker_24h','BTCUSDT')
     except RuntimeError as exc:

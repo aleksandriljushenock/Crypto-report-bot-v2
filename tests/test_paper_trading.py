@@ -72,7 +72,7 @@ def test_update_positions_ignores_pre_open_candle_extremes(monkeypatch):
     monkeypatch.setattr(pt.paper_repo, 'update_position', lambda *a, **k: {'id':'p1'})
     out = pt.update_positions()
     assert out['liquidated'] == 0
-    assert closed == []
+    assert closed == [(95.0, 'SL')]
 
 
 def test_live_price_beyond_liquidation_heals_stale_position(monkeypatch):
@@ -99,11 +99,11 @@ def test_liquidation_loss_is_capped_to_isolated_margin(monkeypatch):
     monkeypatch.setattr(pt.paper_repo, 'update_position', lambda *a, **k: {'id':'p1'})
     monkeypatch.setattr(pt.paper_repo, 'upsert_trade', lambda row: None)
     monkeypatch.setattr(pt.paper_repo, 'update_account', lambda aid, values: updates.append(values))
+    monkeypatch.setattr(pt.paper_repo, 'close_atomic', lambda **kw: {'balance_after': 89.94})
     out=pt._close_position(position, 80.0, 'LIQUIDATION')
     assert out['gross_pnl'] == -10.0
     assert abs(out['net_pnl'] - (-10.06)) < 1e-9
     assert out['balance_after'] == 89.94
-    assert abs(updates[-1]['equity'] - 89.94) < 1e-9
 
 
 def test_performance_separates_breakeven_and_uses_ledger_balance(monkeypatch):

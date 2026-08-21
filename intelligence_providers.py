@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +26,7 @@ MARKET_MAKERS = (
 
 def _connect():
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
+    conn = safe_sqlite_connect(DATABASE_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute(
         """

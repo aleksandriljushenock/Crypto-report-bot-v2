@@ -199,7 +199,7 @@ def _leverage_and_liquidation(entry: float, stop: float, side: str) -> tuple[int
 
 def _current_market_price(client: Any, symbol: str) -> float:
     ticker = client.ticker_24h(symbol) or {}
-    for key in ("markPrice", "mark_price", "lastPrice", "last_price", "price"):
+    for key in ("lastPrice", "last_price", "price", "markPrice", "mark_price"):
         try:
             value = float(ticker.get(key) or 0)
             if value > 0:
@@ -209,52 +209,48 @@ def _current_market_price(client: Any, symbol: str) -> float:
     return 0.0
 
 
-def _execution_klines(client: Any, symbol: str) -> tuple[list[Any], str, int]:
-    """Load fine-grained execution candles with a safe fallback.
+def _execution_klines(client: Any, symbol: str, *, lookback_hours: Optional[float] = None) -> tuple[list[Any], str, int]:
+    """Load execution candles while guaranteeing configured hold-window coverage.
 
-    Paper execution is intentionally tracked on 1m candles. Five-minute candles
-    were too coarse and, combined with last_checked_at, could miss a stop or
-    liquidation that happened inside the still-open 5m candle between ticks.
+    Exchange clients expose at most 1000 candles. Use 1m only when 1000 bars cover
+    the required lookback; otherwise switch to 5m so a restart cannot create a
+    silent hole in a 72h Paper position.
     """
     limit = max(100, min(1000, _int("PAPER_EXECUTION_KLINE_LIMIT", 1000)))
-    try:
-        rows = client.klines(symbol, "1m", limit) or []
-        if rows:
-            return rows, "1m", 1
-    except Exception as exc:
-        log.debug("Paper 1m klines unavailable for %s: %s", symbol, exc)
+    hours = float(lookback_hours if lookback_hours is not None else max(_int("PAPER_MAX_HOLD_HOURS", 72), _int("PAPER_ENTRY_MAX_WAIT_HOURS", 12)))
+    need_minutes = max(1.0, hours * 60.0 + 5.0)
+    if need_minutes <= limit:
+        try:
+            rows = client.klines(symbol, "1m", limit) or []
+            if rows:
+                return rows, "1m", 1
+        except Exception as exc:
+            log.debug("Paper 1m klines unavailable for %s: %s", symbol, exc)
     rows = client.klines(symbol, "5m", limit) or []
     return rows, "5m", 5
 
+def _iter_execution_candles(rows: list[Any], *, since: datetime, interval_minutes: int, not_before: Optional[datetime] = None, not_after: Optional[datetime] = None) -> list[tuple[datetime, float, float, float, float, bool, bool]]:
+    """Return candles intersecting the legal event-time window.
 
-def _iter_execution_candles(rows: list[Any], *, since: datetime, interval_minutes: int, not_before: Optional[datetime] = None, not_after: Optional[datetime] = None) -> list[tuple[datetime, float, float, float, float]]:
-    """Return execution candles clipped to the legal tracking window.
-
-    We never admit a candle that ended before the fill/signal boundary and never
-    process a candle starting after an order expiry/max-hold boundary. The start
-    and end timestamps are retained so callers can make conservative decisions
-    for boundary candles instead of replaying pre-entry history.
+    Boundary candles are retained, but marked partial. Callers must never use
+    their full high/low because those extrema may have occurred before entry or
+    after expiry. For a partial boundary we only trust the close when the close
+    timestamp itself lies inside the legal window.
     """
     lower = max(since, not_before or since)
-    out: list[tuple[datetime, float, float, float, float]] = []
+    out = []
     for item in rows or []:
         try:
             candle_start = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
-            if len(item) > 6 and item[6] is not None:
-                candle_end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc)
-            else:
-                candle_end = candle_start + timedelta(minutes=interval_minutes)
-            if candle_end <= since:
+            candle_end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc) if len(item) > 6 and item[6] is not None else candle_start + timedelta(minutes=interval_minutes)
+            if candle_end <= lower:
                 continue
-            if not_after is not None and (candle_start >= not_after or candle_end > not_after):
+            if not_after is not None and candle_start >= not_after:
                 continue
-            # Never use OHLC extremes from a candle that started before the actual
-            # signal/fill boundary. For later last_checked boundaries re-reading
-            # the overlapping candle is intentional and CAS-protected.
-            if not_before is not None and candle_start < not_before:
-                continue
+            partial_start = candle_start < lower
+            partial_end = bool(not_after is not None and candle_end > not_after)
             open_price = float(item[1]); high = float(item[2]); low = float(item[3]); close = float(item[4])
-            out.append((candle_start, open_price, high, low, close))
+            out.append((candle_start, open_price, high, low, close, partial_start, partial_end))
         except Exception:
             continue
     out.sort(key=lambda x: x[0])
@@ -492,58 +488,22 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
         "closed_at": now,
         "created_at": now,
     }
-    # Closing the position is the canonical state transition. Ledger/account
-    # writes are deliberately isolated so a transient failure after CAS-close
-    # cannot suppress the close notification or make the outcome disappear.
-    with _PAPER_LOCK:
-        try:
-            changed = paper_repo.update_position(position.get("id"), {
-                "status": "closed",
-                "exit_price": adjusted_exit,
-                "close_reason": reason,
-                "gross_pnl": gross_pnl,
-                "net_pnl": net_pnl,
-                "closed_at": now,
-                "last_checked_at": now,
-                "updated_at": now,
-                "execution_audit": audit,
-            }, expected_status="open")
-        except Exception:
-            log.exception("Paper position CAS-close failed: %s", position.get("id"))
-            return {}
-        if not changed:
-            return {}
-
-        persistence_errors: list[str] = []
-        try:
-            paper_repo.upsert_trade(trade)
-        except Exception as exc:
-            persistence_errors.append(f"ledger: {type(exc).__name__}: {exc}")
-            log.exception("Paper trade ledger write failed after close: %s", position.get("id"))
-
-        account = ensure_account()
-        new_balance = float(account.get("balance") or 0) + released
-        realized = float(account.get("realized_pnl") or 0) + net_pnl
-        fees = float(account.get("fees_paid") or 0) + exit_fee
-        prior_equity = float(account.get("equity") or account.get("balance") or 0)
-        equity_delta = -margin if is_liquidation else (gross_pnl - exit_fee)
-        new_equity = prior_equity + equity_delta
-        try:
-            paper_repo.update_account(ACCOUNT_ID, {
-                "balance": new_balance,
-                "equity": new_equity,
-                "realized_pnl": realized,
-                "fees_paid": fees,
-                "updated_at": now,
-            })
-        except Exception as exc:
-            persistence_errors.append(f"account: {type(exc).__name__}: {exc}")
-            log.exception("Paper account update failed after close: %s", position.get("id"))
-
-    trade["balance_after"] = new_balance
-    if persistence_errors:
-        trade["persistence_pending"] = True
-        trade["persistence_errors"] = persistence_errors
+    # V39 closes the position, writes the ledger and updates account aggregates
+    # in one PostgreSQL transaction. This removes cross-process lost updates.
+    equity_delta = -margin if is_liquidation else (gross_pnl - exit_fee)
+    try:
+        with _PAPER_LOCK:
+            result = paper_repo.close_atomic(
+                position_id=position.get("id"), exit_price=adjusted_exit, reason=reason,
+                gross_pnl=gross_pnl, net_pnl=net_pnl, exit_fee=exit_fee, released=released,
+                equity_delta=equity_delta, closed_at=now, execution_audit=audit, trade=trade,
+            )
+    except Exception:
+        log.exception("Paper atomic close failed: %s", position.get("id"))
+        return {}
+    if not result:
+        return {}
+    trade["balance_after"] = float(result.get("balance_after") or 0)
     emit("PAPER_LIQUIDATED" if is_liquidation else "POSITION_CLOSED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason=reason, net_pnl=net_pnl)
     return trade
 
@@ -575,13 +535,19 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             rows, _, interval_minutes = _execution_klines(client, position["symbol"])
             touched = False
             touch_time = None
-            for ts, open_price, high, low, close in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until):
-                if setup == "PULLBACK":
-                    touched = low <= target if side == "LONG" else high >= target
+            for ts, open_price, high, low, close, partial_start, partial_end in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until):
+                if partial_start or partial_end:
+                    # OHLC extrema are temporally ambiguous on a boundary candle.
+                    # Only its close is safe if that close belongs to the legal window.
+                    effective_low = effective_high = close
                 else:
-                    touched = high >= target if side == "LONG" else low <= target
+                    effective_low, effective_high = low, high
+                if setup == "PULLBACK":
+                    touched = effective_low <= target if side == "LONG" else effective_high >= target
+                else:
+                    touched = effective_high >= target if side == "LONG" else effective_low <= target
                 if touched:
-                    touch_time = ts
+                    touch_time = max(ts, _parse_ts(position.get("created_at")))
                     break
             if touched:
                 fill = target
@@ -641,10 +607,16 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             # Historical events are authoritative. Process them chronologically
             # before considering the current ticker, otherwise a later TP can hide
             # an earlier SL/liquidation after downtime.
-            for ts, open_price, high, low, close in candles:
-                liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=open_price, high=high, low=low)
-                stop_hit = low <= stop if side == "LONG" else high >= stop
-                tp_hit = high >= tp if side == "LONG" else low <= tp
+            for ts, open_price, high, low, close, partial_start, partial_end in candles:
+                if partial_start or partial_end:
+                    # Never attribute an unknown intra-candle wick to the legal window.
+                    # The close is the only timestamp-safe observation available from OHLC.
+                    safe_open = safe_high = safe_low = close
+                else:
+                    safe_open, safe_high, safe_low = open_price, high, low
+                liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=safe_open, high=safe_high, low=safe_low)
+                stop_hit = safe_low <= stop if side == "LONG" else safe_high >= stop
+                tp_hit = safe_high >= tp if side == "LONG" else safe_low <= tp
                 if liq_hit:
                     reason = "LIQUIDATION_GAP" if opened_beyond_liq else "LIQUIDATION_CONSERVATIVE"
                     exit_price, exit_time = liquidation, ts.isoformat(); break
@@ -771,27 +743,15 @@ def performance() -> dict[str, Any]:
 
 
 def reset_account(initial_balance: Optional[float] = None) -> dict[str, Any]:
-    if _open_positions() or _pending_positions():
-        return {"status": "open-positions-exist"}
     amount = max(1.0, float(initial_balance or _float("PAPER_INITIAL_BALANCE_USD", 100.0)))
     try:
-        paper_repo.delete_account_history(ACCOUNT_ID)
-        now = _iso()
-        row = {
-            "initial_balance": amount,
-            "balance": amount,
-            "equity": amount,
-            "realized_pnl": 0.0,
-            "fees_paid": 0.0,
-            "status": "active",
-            "updated_at": now,
-        }
-        paper_repo.upsert_account(ACCOUNT_ID, row)
+        result = paper_repo.reset_atomic(ACCOUNT_ID, amount)
+        if not result.get("ok"):
+            return {"status": "open-positions-exist", "active": int(result.get("active") or 0)}
         return {"status": "reset", "balance": amount}
     except Exception:
         log.exception("Paper account reset failed")
         return {"status": "error"}
-
 
 def format_pending_message(result: dict[str, Any]) -> str:
     p = result.get("position") or {}

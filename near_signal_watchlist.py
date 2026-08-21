@@ -10,6 +10,7 @@ from core.runtime_config import boolean, integer, number, raw
 
 import json
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def _iso(dt=None):
 
 def _conn():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = safe_sqlite_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 

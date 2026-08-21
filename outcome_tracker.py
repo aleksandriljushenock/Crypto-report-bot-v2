@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,7 +14,7 @@ HORIZONS = {"1h": 1, "24h": 24, "7d": 24 * 7, "30d": 24 * 30}
 
 def _connect():
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
+    conn = safe_sqlite_connect(DATABASE_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute(
         """CREATE TABLE IF NOT EXISTS predictions (

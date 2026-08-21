@@ -22,6 +22,7 @@ import math
 import os
 import random
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -49,7 +50,7 @@ def _json(value: Any, default: Any) -> Any:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = safe_sqlite_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 

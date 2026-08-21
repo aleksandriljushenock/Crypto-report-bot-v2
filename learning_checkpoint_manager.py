@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,7 +66,7 @@ def _valid_sqlite(path: Path, required_table: str = "model_versions") -> bool:
     if not path.exists() or path.stat().st_size < 512:
         return False
     try:
-        conn = sqlite3.connect(path)
+        conn = safe_sqlite_connect(path)
         result = conn.execute("PRAGMA integrity_check").fetchone()
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         conn.close()
@@ -125,8 +126,8 @@ def save_checkpoint(db_path: Path, reason: str = "periodic") -> dict[str, Any]:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_path = db_path.parent / f"learning_v14-{stamp}.db"
     try:
-        source = sqlite3.connect(db_path, timeout=30)
-        target = sqlite3.connect(backup_path)
+        source = safe_sqlite_connect(db_path, timeout=30)
+        target = safe_sqlite_connect(backup_path)
         with target:
             source.backup(target)
         target.close()
@@ -139,8 +140,8 @@ def save_checkpoint(db_path: Path, reason: str = "periodic") -> dict[str, Any]:
         outcomes_bytes = 0
         if OUTCOMES_DB_PATH.exists():
             outcomes_backup = OUTCOMES_DB_PATH.parent / f"trade_outcomes-{stamp}.db"
-            osource = sqlite3.connect(OUTCOMES_DB_PATH, timeout=30)
-            otarget = sqlite3.connect(outcomes_backup)
+            osource = safe_sqlite_connect(OUTCOMES_DB_PATH, timeout=30)
+            otarget = safe_sqlite_connect(outcomes_backup)
             with otarget:
                 osource.backup(otarget)
             otarget.close()

@@ -141,7 +141,7 @@ def _ma55_cycle_outcome(client, setup: dict[str, Any], now: datetime) -> tuple[d
     }
     return values, event
 
-def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dict[str, Any]:
+def update_outcomes(max_rows: int = 5000, strategy: str = DEFAULT_STRATEGY) -> dict[str, Any]:
     spec = get_strategy(strategy)
     active = _safe_repo(lambda: repository.active_setups(spec.key, max_rows), []) or []
     client = create_trade_market_client()
@@ -165,8 +165,13 @@ def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dic
                 continue
             rows = normalize_klines(client.klines(setup["symbol"], "1h", 500))
             created = datetime.fromisoformat(str(setup["created_at"]).replace("Z", "+00:00"))
-            candles = [x for x in rows if _iso_ms(x["ts"]) >= created]
             state = setup.get("state") or "waiting_entry"
+            entered_boundary = None
+            if setup.get("entered_at"):
+                entered_boundary = datetime.fromisoformat(str(setup["entered_at"]).replace("Z", "+00:00"))
+            boundary = entered_boundary if state == "open" and entered_boundary else created
+            # Keep the boundary candle but never use pre-boundary extrema from it.
+            candles = [x for x in rows if _iso_ms(x["ts"]) + timedelta(hours=1) > boundary]
             entry = float(setup["entry_price"])
             stop = float(setup["stop_price"])
             tp = float(setup["tp_price"])
@@ -177,19 +182,30 @@ def update_outcomes(max_rows: int = 80, strategy: str = DEFAULT_STRATEGY) -> dic
             resolved = None
             for candle in candles:
                 cdt = _iso_ms(candle["ts"])
+                candle_end = cdt + timedelta(hours=1)
+                current_boundary = entered_boundary if state == "open" and entered_boundary else created
+                partial = cdt < current_boundary < candle_end
+                safe_candle = candle
+                if partial:
+                    close = float(candle.get("close") or 0)
+                    safe_candle = {**candle, "open": close, "high": close, "low": close, "close": close}
                 if state == "waiting_entry":
-                    if _entry_touched(candle, direction, entry, entry_mode):
+                    if _entry_touched(safe_candle, direction, entry, entry_mode):
                         state = "open"
-                        entered_at = cdt.isoformat()
-                        same_bar = _bar_resolution(candle, direction, stop, tp)
+                        entered_dt = max(created, cdt)
+                        entered_at = entered_dt.isoformat()
+                        entered_boundary = entered_dt
+                        # Same-bar OHLC cannot establish ordering after a mid-bar fill.
+                        # Only a close-only boundary view is allowed.
+                        same_bar = _bar_resolution(safe_candle, direction, stop, tp)
                         if same_bar:
-                            resolved = (same_bar[0], same_bar[1], cdt)
+                            resolved = (same_bar[0], same_bar[1], candle_end)
                             break
                     continue
                 if state == "open":
-                    bar = _bar_resolution(candle, direction, stop, tp)
+                    bar = _bar_resolution(safe_candle, direction, stop, tp)
                     if bar:
-                        resolved = (bar[0], bar[1], cdt)
+                        resolved = (bar[0], bar[1], candle_end if partial else cdt)
                         break
             values: dict[str, Any] = {}
             if resolved:
@@ -265,7 +281,7 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
     h4_limit = integer("STRATEGY_LAB_H4_LIMIT", 220, minimum=80, maximum=500)
     state_name = f"strategy_{spec.short}"
     runtime_state.start(state_name, name=spec.key, phase="universe", processed=0, total=0)
-    outcome_update = update_outcomes(30, spec.key)
+    outcome_update = update_outcomes(5000, spec.key)
     universe, providers = collect_multi_exchange_universe(top_limit=300, min_quote_volume=min_volume, timeout=8)
     universe = sorted(universe, key=lambda x: float(x.get("quoteVolume") or 0), reverse=True)
     eligible_total = len(universe)

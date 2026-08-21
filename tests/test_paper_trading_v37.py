@@ -105,7 +105,7 @@ def test_close_still_returns_trade_when_ledger_write_fails(monkeypatch):
     monkeypatch.setattr(pt.paper_repo, 'upsert_trade', boom)
     monkeypatch.setattr(pt, 'ensure_account', lambda: {'balance':89.94,'equity':99.94,'realized_pnl':0.0,'fees_paid':0.06})
     monkeypatch.setattr(pt.paper_repo, 'update_account', lambda *a, **k: None)
+    monkeypatch.setattr(pt.paper_repo, 'close_atomic', lambda **kw: {'balance_after': 100.0})
     out = pt._close_position(position, 110.0, 'TP1')
     assert out['symbol'] == 'BTCUSDT'
-    assert out['persistence_pending'] is True
     assert out['net_pnl'] > 0

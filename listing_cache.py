@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def get_connection():
         exist_ok=True,
     )
 
-    connection = sqlite3.connect(
+    connection = safe_sqlite_connect(
         DATABASE_PATH,
         timeout=30,
     )

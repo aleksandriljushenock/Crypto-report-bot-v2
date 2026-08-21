@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ DEFAULT_WEIGHTS = {
 def get_adaptive_weights(min_samples=30):
     if not DATABASE_PATH.exists():
         return {"weights": DEFAULT_WEIGHTS, "learned": False, "samples": 0}
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = safe_sqlite_connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT p.components_json, o.return_percent FROM predictions p

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from core.runtime_config import boolean, integer
-from strategies.catalog import get_strategy
+from strategies.catalog import STRATEGIES, get_strategy
 from strategies.repository import repository
 
 logger = logging.getLogger("strategy_notifications")
@@ -60,7 +60,7 @@ def _is_notifiable(event_type: str, row: dict[str, Any]) -> bool:
     if event_type == "OPEN":
         return state == "open"
     if event_type == "CLOSED":
-        return state in {"won", "lost"}
+        return state in {"won", "lost", "breakeven"}
     return False
 
 
@@ -138,7 +138,10 @@ def dispatch_pending_notifications(
     max_age = integer("STRATEGY_LAB_NOTIFY_MAX_AGE_HOURS", 24, minimum=1, maximum=168)
     limit = integer("STRATEGY_LAB_NOTIFY_MAX_PER_CYCLE", 30, minimum=1, maximum=200)
     try:
-        pending = repository.pending_notifications(max_age_hours=max_age, limit=limit)
+        enabled = [spec.key for spec in STRATEGIES if boolean(f"STRATEGY_NOTIFY_{spec.key.upper()}", False)]
+        if not enabled:
+            return {"status": "disabled", "sent": 0, "errors": 0}
+        pending = repository.pending_notifications(max_age_hours=max_age, limit=limit, strategies=enabled)
     except Exception as exc:
         if log:
             log(f"Strategy notifications unavailable (run v33 migration): {exc}")

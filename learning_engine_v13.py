@@ -11,6 +11,7 @@ import json
 import math
 import os
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +31,7 @@ def now_iso() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = safe_sqlite_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 

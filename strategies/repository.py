@@ -30,17 +30,23 @@ class StrategyRepository:
         _client().table("strategy_setups").insert(row).execute()
         return True
 
-    def active_setups(self, strategy: str, limit: int = 100) -> list[dict[str, Any]]:
-        rows = (_client().table("strategy_setups").select("*").eq("strategy", strategy)
-                .in_("state", ["waiting_entry", "open"]).order("created_at", desc=False)
-                .limit(limit).execute().data or [])
-        return rows
+    def active_setups(self, strategy: str, limit: int = 5000) -> list[dict[str, Any]]:
+        out = []; offset = 0; cap = max(1, int(limit or 5000))
+        while offset < cap:
+            end = min(offset + 999, cap - 1)
+            rows = (_client().table("strategy_setups").select("*").eq("strategy", strategy)
+                    .in_("state", ["waiting_entry", "open"]).order("created_at", desc=False)
+                    .range(offset, end).execute().data or [])
+            out.extend(rows)
+            if len(rows) < (end - offset + 1): break
+            offset = end + 1
+        return out
 
     def recent_setups(self, strategy: str, limit: int = 1000) -> list[dict[str, Any]]:
         return (_client().table("strategy_setups").select("*").eq("strategy", strategy)
                 .order("created_at", desc=True).limit(limit).execute().data or [])
 
-    def setups_for_stats(self, strategy: str, page_size: int = 1000, max_rows: int = 20000) -> list[dict[str, Any]]:
+    def setups_for_stats(self, strategy: str, page_size: int = 1000, max_rows: int | None = None) -> list[dict[str, Any]]:
         """Load the durable strategy history without the old 2k-statistics truncation.
 
         Supabase/PostgREST commonly caps a response near 1k rows, so statistics are
@@ -49,9 +55,9 @@ class StrategyRepository:
         out: list[dict[str, Any]] = []
         start = 0
         page_size = max(100, min(int(page_size or 1000), 1000))
-        max_rows = max(page_size, int(max_rows or 20000))
-        while start < max_rows:
-            end = min(start + page_size - 1, max_rows - 1)
+        cap = max(page_size, int(max_rows)) if max_rows is not None and int(max_rows) > 0 else None
+        while cap is None or start < cap:
+            end = start + page_size - 1 if cap is None else min(start + page_size - 1, cap - 1)
             rows = (_client().table("strategy_setups").select("*").eq("strategy", strategy)
                     .order("created_at", desc=False).range(start, end).execute().data or [])
             out.extend(rows)
@@ -83,26 +89,35 @@ class StrategyRepository:
     def update_setup(self, setup_id: Any, values: dict[str, Any]) -> None:
         _client().table("strategy_setups").update(values).eq("id", setup_id).execute()
 
-    def pending_notifications(self, max_age_hours: int = 24, limit: int = 30) -> list[dict[str, Any]]:
+    def pending_notifications(self, max_age_hours: int = 24, limit: int = 30, strategies: list[str] | None = None) -> list[dict[str, Any]]:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
         table = _client().table("strategy_setups")
         out: list[dict[str, Any]] = []
 
-        ready = (table.select("*").eq("state", "waiting_entry")
+        ready_q = table.select("*").eq("state", "waiting_entry")
+        if strategies:
+            ready_q = ready_q.in_("strategy", strategies)
+        ready = (ready_q
                  .is_("ready_notified_at", "null").gte("created_at", cutoff)
                  .order("created_at", desc=False).limit(limit).execute().data or [])
         out.extend({"event_type": "READY", "setup": row} for row in ready)
 
         remaining = max(0, limit - len(out))
         if remaining:
-            opened = (_client().table("strategy_setups").select("*").eq("state", "open")
+            opened_q = _client().table("strategy_setups").select("*").eq("state", "open")
+            if strategies:
+                opened_q = opened_q.in_("strategy", strategies)
+            opened = (opened_q
                       .is_("open_notified_at", "null").gte("entered_at", cutoff)
                       .order("entered_at", desc=False).limit(remaining).execute().data or [])
             out.extend({"event_type": "OPEN", "setup": row} for row in opened)
 
         remaining = max(0, limit - len(out))
         if remaining:
-            closed = (_client().table("strategy_setups").select("*").in_("state", ["won", "lost", "breakeven"])
+            closed_q = _client().table("strategy_setups").select("*").in_("state", ["won", "lost", "breakeven"])
+            if strategies:
+                closed_q = closed_q.in_("strategy", strategies)
+            closed = (closed_q
                       .is_("close_notified_at", "null").gte("resolved_at", cutoff)
                       .order("resolved_at", desc=False).limit(remaining).execute().data or [])
             out.extend({"event_type": "CLOSED", "setup": row} for row in closed)

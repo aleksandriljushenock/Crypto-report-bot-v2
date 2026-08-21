@@ -13,3 +13,6 @@
 После `SUPABASE_FINAL_REFACTOR_V24.sql` один раз выполни `SUPABASE_STRATEGY_LAB_V25.sql`, если таблицы `strategy_scan_runs` и `strategy_setups` ещё не создавались.
 
 Для v26 отдельной SQL-миграции нет: все 11 стратегий используют ту же нормализованную схему Strategy Lab.
+
+## V39
+Для V39 обязательно выполнить `SUPABASE_PAPER_V39_ATOMIC_LIFECYCLE.sql` после миграции V38. Она закрывает SECURITY DEFINER RPC от public/anon/authenticated и добавляет атомарные close/reconcile/reset.

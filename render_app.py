@@ -54,6 +54,9 @@ def _ensure_runtime() -> None:
         if _runtime_started:
             return
 
+        secret = _webhook_secret()
+        if len(secret) < 24:
+            raise RuntimeError("TELEGRAM_WEBHOOK_SECRET must be configured with at least 24 characters")
         start_runtime_services()
 
         base_url = _public_base_url()
@@ -62,7 +65,7 @@ def _ensure_runtime() -> None:
 
         set_webhook(
             f"{base_url}/telegram",
-            secret_token=_webhook_secret() or None,
+            secret_token=secret,
             drop_pending_updates=_env("DROP_PENDING_UPDATES", "false").lower() in {"1", "true", "yes", "on"},
         )
         _runtime_started = True
@@ -172,10 +175,11 @@ def telegram_webhook():
     _ensure_runtime()
 
     expected = _webhook_secret()
-    if expected:
-        supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if not _constant_time_equal(supplied, expected):
-            return jsonify(ok=False, error="unauthorized"), 401
+    if len(expected) < 24:
+        return jsonify(ok=False, error="webhook secret not configured"), 503
+    supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not _constant_time_equal(supplied, expected):
+        return jsonify(ok=False, error="unauthorized"), 401
 
     update = request.get_json(silent=True)
     if not isinstance(update, dict) or "update_id" not in update:
@@ -209,7 +213,7 @@ def register_webhook():
         return jsonify(ok=False, error="unauthorized"), 401
     _ensure_runtime()
     base_url = _public_base_url()
-    set_webhook(f"{base_url}/telegram", secret_token=_webhook_secret() or None)
+    set_webhook(f"{base_url}/telegram", secret_token=_webhook_secret())
     return jsonify(ok=True, webhook=f"{base_url}/telegram")
 
 

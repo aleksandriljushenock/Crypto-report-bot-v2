@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ def _parse_dt(value: Any) -> datetime:
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = safe_sqlite_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 

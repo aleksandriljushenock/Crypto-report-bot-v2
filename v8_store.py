@@ -1,3 +1,4 @@
+from core.sqlite_utils import connect as safe_sqlite_connect
 import json, os, sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ DB_PATH = Path(os.getenv('V8_DB_PATH', BASE_DIR / 'data' / 'v8_professional.db')
 @contextmanager
 def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = safe_sqlite_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         yield conn

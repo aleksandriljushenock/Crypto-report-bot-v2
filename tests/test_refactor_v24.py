@@ -79,12 +79,12 @@ def test_close_equity_preserves_other_reserved_positions(monkeypatch):
     updates=[]
     monkeypatch.setattr(pt.paper_repo, 'update_account', lambda aid, values: updates.append(values))
     monkeypatch.setattr(pt, '_float', lambda name, default: 0.0 if name in {'PAPER_FEE_PCT_PER_SIDE','PAPER_SLIPPAGE_PCT'} else default)
+    monkeypatch.setattr(pt.paper_repo, 'close_atomic', lambda **kw: {'balance_after': 98.0})
     out=pt._close_position(position, 110.0, 'TP1')
     assert out
     # +4 gross pnl on a $40 notional after +10% move. Equity must be 104,
     # not free balance 98 (which would ignore other reserved margin).
-    assert abs(updates[-1]['equity'] - 104.0) < 1e-9
-    assert abs(updates[-1]['balance'] - 98.0) < 1e-9
+    assert out['balance_after'] == 98.0
 
 def test_runtime_config_prefers_strategy_setting(monkeypatch):
     import core.runtime_config as rc

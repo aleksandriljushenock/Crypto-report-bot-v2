@@ -68,6 +68,32 @@ class PaperRepository:
             return data[0] if data else None
         return data or None
 
+
+    def close_atomic(self, *, position_id: Any, exit_price: float, reason: str, gross_pnl: float, net_pnl: float,
+                     exit_fee: float, released: float, equity_delta: float, closed_at: str,
+                     execution_audit: dict[str, Any], trade: dict[str, Any]) -> dict[str, Any] | None:
+        data = _client().rpc("paper_close_v39", {
+            "p_position_id": str(position_id), "p_exit_price": float(exit_price), "p_reason": reason,
+            "p_gross_pnl": float(gross_pnl), "p_net_pnl": float(net_pnl), "p_exit_fee": float(exit_fee),
+            "p_released": float(released), "p_equity_delta": float(equity_delta), "p_closed_at": closed_at,
+            "p_execution_audit": execution_audit or {}, "p_trade": trade,
+        }).execute().data
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data or None
+
+    def reconcile_atomic(self, account_id: str) -> dict[str, Any]:
+        data = _client().rpc("paper_reconcile_v39", {"p_account_id": account_id}).execute().data
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data or {}
+
+    def reset_atomic(self, account_id: str, initial_balance: float) -> dict[str, Any]:
+        data = _client().rpc("paper_reset_v39", {"p_account_id": account_id, "p_initial_balance": float(initial_balance)}).execute().data
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data or {}
+
     def update_position(self, position_id: Any, values: dict[str, Any], expected_status: str | None = None) -> dict[str, Any] | None:
         query = _client().table("paper_positions").update(values).eq("id", position_id)
         if expected_status:
@@ -158,28 +184,33 @@ class PaperRepository:
         return filtered[:max_rows]
 
     def backfill_missing_trades(self, limit: int = 1000) -> dict[str, Any]:
-        """Persist orphan CLOSED positions into paper_trades idempotently."""
-        positions = self.valid_closed_positions(max(1, min(limit, 5000)), ascending=False)
-        ledger = (_client().table("paper_trades").select("position_id,fingerprint")
-                  .limit(5000).execute().data or [])
+        """Persist orphan CLOSED positions idempotently across the full history.
+
+        ``limit`` is the maximum number of repairs per pass, not a history window.
+        """
+        positions = self.all_valid_closed_positions(None, ascending=True)
+        ledger: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            rows = (_client().table("paper_trades").select("position_id,fingerprint").range(offset, offset + 999).execute().data or [])
+            ledger.extend(rows)
+            if len(rows) < 1000:
+                break
+            offset += 1000
         seen_ids = {str(row.get("position_id") or "") for row in ledger if row.get("position_id")}
         seen_fp = {str(row.get("fingerprint") or "") for row in ledger if row.get("fingerprint")}
-        repaired = 0
-        errors: list[str] = []
+        repaired = 0; errors: list[str] = []
+        repair_cap = max(1, int(limit or 1000))
         for position in positions:
-            pid = str(position.get("id") or "")
-            fp = str(position.get("fingerprint") or "")
+            pid = str(position.get("id") or ""); fp = str(position.get("fingerprint") or "")
             if (pid and pid in seen_ids) or (fp and fp in seen_fp):
                 continue
             try:
-                row = self._trade_from_closed_position(position)
-                row.pop("_synthetic_from_position", None)
-                self.upsert_trade(row)
-                repaired += 1
-                if pid:
-                    seen_ids.add(pid)
-                if fp:
-                    seen_fp.add(fp)
+                row = self._trade_from_closed_position(position); row.pop("_synthetic_from_position", None)
+                self.upsert_trade(row); repaired += 1
+                if pid: seen_ids.add(pid)
+                if fp: seen_fp.add(fp)
+                if repaired >= repair_cap: break
             except Exception as exc:
                 errors.append(f"{position.get('symbol') or pid}: {type(exc).__name__}: {exc}")
         return {"checked": len(positions), "repaired": repaired, "errors": errors}
@@ -192,7 +223,7 @@ class PaperRepository:
         fields = (
             "id,account_id,fingerprint,symbol,side,status,entry_price,exit_price,stop_price,tp1_price,"
             "margin_usd,leverage,notional_usd,entry_fee,gross_pnl,net_pnl,quality_score,probability,"
-            "expected_value_pct,signal_payload,opened_at,closed_at,updated_at,close_reason,strategy_version,fill_price_source,execution_provider"
+            "expected_value_pct,signal_payload,opened_at,closed_at,updated_at,close_reason,strategy_version,fill_price_source,execution_provider,execution_verified"
         )
         rows = (_client().table("paper_positions").select(fields).eq("status", "closed")
                 .order("closed_at", desc=not ascending).limit(max(1, min(limit, 5000))).execute().data or [])
@@ -202,7 +233,7 @@ class PaperRepository:
         fields = (
             "id,account_id,fingerprint,symbol,side,status,entry_price,exit_price,stop_price,tp1_price,"
             "margin_usd,leverage,notional_usd,entry_fee,gross_pnl,net_pnl,quality_score,probability,"
-            "expected_value_pct,signal_payload,opened_at,closed_at,updated_at,close_reason,strategy_version,fill_price_source,execution_provider"
+            "expected_value_pct,signal_payload,opened_at,closed_at,updated_at,close_reason,strategy_version,fill_price_source,execution_provider,execution_verified"
         )
         out: list[dict[str, Any]] = []
         page_size = max(100, min(int(page_size), 1000))
