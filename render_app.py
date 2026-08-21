@@ -94,16 +94,16 @@ def _task_registry() -> dict[str, Callable[[], object]]:
     if automation_supervisor is None:
         return {}
     return {
-        "discovery": automation_supervisor._run_discovery,
-        "listings": automation_supervisor._run_listing_refresh,
-        "trade-outcomes": automation_supervisor._run_trade_outcomes,
-        "outcomes": automation_supervisor._run_outcomes,
-        "capital-flows": automation_supervisor._run_capital_flows,
-        "news": automation_supervisor._run_news,
-        "narratives": automation_supervisor._run_narratives,
-        "smart-money": automation_supervisor._run_smart_money,
-        "ai": automation_supervisor._run_ai_intelligence,
-        "learning": automation_supervisor._run_learning,
+        "discovery": automation_supervisor._guarded("render-discovery", automation_supervisor._run_discovery),
+        "listings": automation_supervisor._guarded("render-listings", automation_supervisor._run_listing_refresh),
+        "trade-outcomes": automation_supervisor._guarded("render-trade-outcomes", automation_supervisor._run_trade_outcomes),
+        "outcomes": automation_supervisor._guarded("render-outcomes", automation_supervisor._run_outcomes),
+        "capital-flows": automation_supervisor._guarded("render-capital-flows", automation_supervisor._run_capital_flows),
+        "news": automation_supervisor._guarded("render-news", automation_supervisor._run_news),
+        "narratives": automation_supervisor._guarded("render-narratives", automation_supervisor._run_narratives),
+        "smart-money": automation_supervisor._guarded("render-smart-money", automation_supervisor._run_smart_money),
+        "ai": automation_supervisor._guarded("render-ai", automation_supervisor._run_ai_intelligence),
+        "learning": automation_supervisor._guarded("render-learning", automation_supervisor._run_learning),
     }
 
 

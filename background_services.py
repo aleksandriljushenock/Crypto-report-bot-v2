@@ -216,7 +216,7 @@ class AutomationSupervisor:
         if self.chat_id:
             notifier = lambda text: self.sender(self.chat_id, text)
         result = update_positions(notifier=notifier)
-        self.logger(f"Paper trading: checked={result.get('checked')}, closed={result.get('closed')}, liquidated={result.get('liquidated',0)}, pending={result.get('pending_checked',0)}, errors={len(result.get('errors', []))}")
+        self.logger(f"Paper trading: checked={result.get('checked')}, closed={result.get('closed')}, liquidated={result.get('liquidated',0)}, pending={result.get('pending_checked',0)}, ledger_repaired={result.get('ledger_repaired',0)}, errors={len(result.get('errors', []))}")
         return result
 
     def _run_outcomes(self):

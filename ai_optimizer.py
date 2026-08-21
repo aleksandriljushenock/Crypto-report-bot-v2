@@ -60,13 +60,18 @@ def _metric(rows: Iterable[Dict[str, Any]]) -> Dict[str, float]:
     if not items:
         return {"trades": 0, "wins": 0, "win_rate": 0.0, "pnl": 0.0, "profit_factor": 0.0, "avg_pnl": 0.0}
     pnls = [_num(r.get("net_pnl")) for r in items]
-    wins = sum(1 for x in pnls if x > 0)
-    gross_win = sum(x for x in pnls if x > 0)
-    gross_loss = abs(sum(x for x in pnls if x < 0))
+    eps = 1e-9
+    wins = sum(1 for x in pnls if x > eps)
+    losses = sum(1 for x in pnls if x < -eps)
+    breakeven = len(pnls) - wins - losses
+    gross_win = sum(x for x in pnls if x > eps)
+    gross_loss = abs(sum(x for x in pnls if x < -eps))
     return {
         "trades": len(items),
         "wins": wins,
-        "win_rate": wins / len(items) * 100.0,
+        "losses": losses,
+        "breakeven": breakeven,
+        "win_rate": wins / (wins + losses) * 100.0 if (wins + losses) else 0.0,
         "pnl": sum(pnls),
         "profit_factor": gross_win / gross_loss if gross_loss > 1e-12 else (999.0 if gross_win > 0 else 0.0),
         "avg_pnl": sum(pnls) / len(items),
@@ -182,7 +187,10 @@ def _universe_recommendation() -> Optional[Dict[str, Any]]:
     avg_rows = sum(_num(x.get("rows_analyzed")) for x in history) / len(history)
     current = _int("TRADE_TOP_LIQUID_SYMBOLS", 30)
     if avg_rows >= current * 0.8 and avg_signals < _float("AI_OPTIMIZER_LOW_SIGNAL_RATE", 0.25):
-        proposed = min(100, current + max(5, int(round(current * 0.2))))
+        ceiling = max(current, _int("AI_OPTIMIZER_UNIVERSE_MAX", 300))
+        proposed = min(ceiling, current + max(5, int(round(current * 0.2))))
+        if proposed <= current:
+            return None
         return {
             "kind": "setting",
             "setting_key": "TRADE_TOP_LIQUID_SYMBOLS",

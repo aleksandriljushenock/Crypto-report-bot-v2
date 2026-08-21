@@ -11,11 +11,8 @@ from repositories.paper_repository import repository
 def compute(account_id: str = "main") -> dict[str, Any]:
     account = repository.account(account_id) or {}
     initial = float(account.get("initial_balance") or 100.0)
-    valid_positions = repository.valid_closed_positions(5000, ascending=True)
-    valid_ids = {str(x.get("id")) for x in valid_positions if x.get("id") is not None}
-    valid_fp = {str(x.get("fingerprint")) for x in valid_positions if x.get("fingerprint")}
-    trades = repository.recent_trades(5000, valid_only=False)
-    trades = [t for t in trades if str(t.get("position_id")) in valid_ids or str(t.get("fingerprint")) in valid_fp]
+    valid_positions = repository.all_valid_closed_positions(None, ascending=True)
+    trades = [repository._trade_from_closed_position(x) for x in valid_positions]
     open_positions = repository.positions_by_status("open", "opened_at")
 
     realized = sum(float(t.get("net_pnl") or 0) for t in trades)

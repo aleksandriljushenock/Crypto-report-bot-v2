@@ -41,11 +41,11 @@ def test_fill_compare_and_set_prevents_double_debit(monkeypatch):
     }
     account = {'balance':100.0,'equity':100.0,'fees_paid':0.0}
     monkeypatch.setattr(pt, 'ensure_account', lambda: dict(account))
-    monkeypatch.setattr(pt.paper_repo, 'update_position', lambda *a, **k: None)
+    monkeypatch.setattr(pt.paper_repo, 'fill_pending_atomic', lambda **k: None)
     calls=[]
     monkeypatch.setattr(pt.paper_repo, 'update_account', lambda *a, **k: calls.append((a,k)))
     out=pt._fill_pending_position(position, 100.0, 'test')
-    assert out['status']=='already-processed'
+    assert out['status']=='already-processed-or-insufficient-balance'
     assert calls == []
 
 

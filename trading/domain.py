@@ -37,6 +37,9 @@ def is_valid_closed_position(row: dict[str, Any]) -> bool:
         opened = row.get("opened_at")
         closed = row.get("closed_at")
         fill_source = str(row.get("fill_price_source") or "").strip()
-        return entry > 0 and margin > 0 and bool(opened) and bool(closed) and bool(fill_source)
+        # V38 migration backfills legitimate pre-v19 closes. Keep a compatibility
+        # path for databases where the migration has not run yet, while explicit
+        # INVALID_FILL records remain excluded above.
+        return entry > 0 and margin > 0 and bool(opened) and bool(closed)
     except Exception:
         return False

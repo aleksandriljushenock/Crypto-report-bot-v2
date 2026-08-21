@@ -222,7 +222,7 @@ def upsert_near_candidates(items, source='scan'):
 
 def get_due_symbols(limit=None):
     initialize()
-    limit = max(1, int(limit or str(integer('NEAR_SIGNAL_RESCAN_LIMIT', 24))))
+    limit = max(1, int(limit or str(integer('NEAR_SIGNAL_RESCAN_LIMIT', 40))))
     now = _iso()
     with _conn() as conn:
         conn.execute('DELETE FROM near_signals WHERE expires_at < ?', (now,))

@@ -560,7 +560,7 @@ def build_paper_status_text():
         f"Статус: <b>{'🟢 включён' if enabled else '⚪ выключен'}</b>\n"
         f"Стартовый капитал: <b>${initial:.2f}</b>\n"
         f"Свободный баланс: <b>${free_balance:.2f}</b>\n"
-        f"Realized equity: <b>${equity:.2f}</b>\n"
+        f"Equity (с учётом открытых): <b>${equity:.2f}</b>\n"
         f"Net PnL: <b>{pnl:+.4f} USDT</b> • ROI <b>{float(stats.get('roi_pct') or 0):+.2f}%</b>\n\n"
         f"Закрыто: <b>{stats.get('closed_count', 0)}</b> • ✅ {stats.get('wins',0)} / ❌ {stats.get('losses',0)} / ➖ {stats.get('breakeven',0)}\n"
         f"Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b> • PF <b>{pf_text}</b>\n"
@@ -618,13 +618,16 @@ def _paper_trade_dt(row):
 def _trade_metrics(rows, initial_balance=100.0):
     rows = list(rows or [])
     pnls = [float(r.get("net_pnl") or 0) for r in rows]
-    wins = [x for x in pnls if x > 0]
-    losses = [x for x in pnls if x <= 0]
+    eps = 1e-9
+    wins = [x for x in pnls if x > eps]
+    losses = [x for x in pnls if x < -eps]
+    breakeven = [x for x in pnls if abs(x) <= eps]
     gross_profit = sum(wins)
     gross_loss = abs(sum(losses))
     net = sum(pnls)
     pf = gross_profit / gross_loss if gross_loss > 1e-12 else (999.0 if gross_profit > 0 else 0.0)
-    win_rate = len(wins) / len(rows) * 100 if rows else 0.0
+    resolved_directional = len(wins) + len(losses)
+    win_rate = len(wins) / resolved_directional * 100 if resolved_directional else 0.0
     avg_win = sum(wins) / len(wins) if wins else 0.0
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     fees = sum(float(r.get("fees") or 0) for r in rows)
@@ -646,16 +649,20 @@ def _trade_metrics(rows, initial_balance=100.0):
         dd_pct = dd / peak * 100 if peak > 0 else 0.0
         max_dd = max(max_dd, dd)
         max_dd_pct = max(max_dd_pct, dd_pct)
-        if pnl > 0:
+        if pnl > eps:
             win_streak += 1
             loss_streak = 0
             best_win_streak = max(best_win_streak, win_streak)
-        else:
+        elif pnl < -eps:
             loss_streak += 1
             win_streak = 0
             worst_loss_streak = max(worst_loss_streak, loss_streak)
+        else:
+            # Breakeven is neither a win nor a loss and must not inflate a loss streak.
+            win_streak = 0
+            loss_streak = 0
     return {
-        "count": len(rows), "wins": len(wins), "losses": len(losses),
+        "count": len(rows), "wins": len(wins), "losses": len(losses), "breakeven": len(breakeven),
         "net": net, "win_rate": win_rate, "pf": pf,
         "avg_win": avg_win, "avg_loss": avg_loss, "fees": fees,
         "roi": net / initial_balance * 100 if initial_balance else 0.0,
@@ -670,7 +677,7 @@ def build_performance_center_text():
     rows = stats.get("trades") or []
     initial = float(account.get("initial_balance") or 100.0)
     m = _trade_metrics(rows, initial)
-    realized_balance = float(stats.get("derived_equity") if stats.get("derived_equity") is not None else initial + m["net"])
+    realized_balance = float(stats.get("realized_equity") if stats.get("realized_equity") is not None else initial + m["net"])
     open_count = len(stats.get("open_positions") or [])
     pf_text = "∞" if m["pf"] >= 999 else f"{m['pf']:.2f}"
     return (
@@ -678,7 +685,7 @@ def build_performance_center_text():
         f"💰 Реализованный капитал: <b>${realized_balance:.2f}</b>\n"
         f"PnL: <b>{m['net']:+.2f} USDT</b> • ROI <b>{m['roi']:+.2f}%</b>\n"
         f"🎯 Сделок: <b>{m['count']}</b> • открыто <b>{open_count}</b>\n"
-        f"✅ Win Rate: <b>{m['win_rate']:.1f}%</b> • PF <b>{pf_text}</b>\n"
+        f"✅ {m['wins']} / ❌ {m['losses']} / ➖ {m['breakeven']} • Win Rate <b>{m['win_rate']:.1f}%</b> • PF <b>{pf_text}</b>\n"
         f"📉 Max DD: <b>-${m['max_dd']:.2f}</b> ({m['max_dd_pct']:.1f}%)\n"
         f"💸 Комиссии: <b>${m['fees']:.2f}</b>\n\n"
         f"Средняя прибыль: <b>{m['avg_win']:+.2f}$</b> • средний убыток: <b>{m['avg_loss']:+.2f}$</b>\n"

@@ -15,6 +15,8 @@ _UNSUPPORTED_SYMBOLS = {}
 _PROVIDER_MARKET_COUNTS = {}
 _LAST_UNIVERSE_SUMMARY = {}
 _PROVIDER_LOCK = threading.Lock()
+_RATE_LOCK = threading.Lock()
+_PROVIDER_LAST_CALL = {}
 
 
 def _provider_order():
@@ -80,6 +82,25 @@ def _available(provider):
         return not state or float(state.get("blocked_until", 0)) <= time.time()
 
 
+def _rate_limit(provider):
+    """Process-wide per-provider request pacing.
+
+    Keeps concurrent scanner/Strategy Lab/background workers from bursting one
+    venue. This complements exchange-specific HTTP backoff and circuit breakers.
+    """
+    rps = max(0.2, number("EXCHANGE_PROVIDER_MAX_RPS", 8.0, minimum=0.2, maximum=50.0, strategy=False))
+    gap = 1.0 / rps
+    while True:
+        with _RATE_LOCK:
+            now = time.monotonic()
+            last = float(_PROVIDER_LAST_CALL.get(provider, 0.0))
+            wait = gap - (now - last)
+            if wait <= 0:
+                _PROVIDER_LAST_CALL[provider] = now
+                return
+        time.sleep(min(wait, gap))
+
+
 def _build_provider(name, timeout):
     return create_provider(name, timeout)
 
@@ -119,8 +140,12 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
     merged = {}
     provider_stats = {}
     for name in _provider_order():
+        if not _available(name):
+            provider_stats[name] = {"ok": False, "skipped": "cooldown", "tradable": 0, "eligible": 0}
+            continue
         try:
             client = _build_provider(name, timeout)
+            _rate_limit(name)
             info = client.exchange_info() or {}
             tradable = {
                 str(row.get("symbol")).upper()
@@ -128,6 +153,7 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
                 if row.get("status") == "TRADING" and row.get("quoteAsset") == "USDT" and row.get("contractType") == "PERPETUAL"
             }
             _register_provider_symbols(name, tradable)
+            _rate_limit(name)
             tickers = client.ticker_24h_all() or []
             accepted = 0
             for row in tickers:
@@ -186,7 +212,7 @@ def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=
         rows.append(item)
 
     limit = max(1, int(top_limit))
-    wide_limit = max(limit, integer("FAST_SCAN_POOL_SIZE", 250, minimum=1, maximum=2000))
+    wide_limit = max(limit, integer("FAST_SCAN_POOL_SIZE", 500, minimum=1, maximum=2000))
     liquidity_rows = sorted(rows, key=lambda x: (x["liquidityRankScore"], x["exchangeCount"]), reverse=True)[:wide_limit]
 
     # Dynamic universe buckets. Defaults target ~80 deep symbols while keeping
@@ -276,6 +302,7 @@ class FallbackTradeMarketClient:
                 continue
             attempted.add(name)
             try:
+                _rate_limit(name)
                 value = getattr(self.clients[name], method)(*args, **kwargs)
                 _mark_success(name)
                 self.last_provider = name
@@ -297,24 +324,7 @@ class FallbackTradeMarketClient:
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
         if not attempted:
-            for name in self.provider_names:
-                if symbol and not _provider_supports_symbol(name, symbol):
-                    continue
-                try:
-                    value = getattr(self.clients[name], method)(*args, **kwargs)
-                    _mark_success(name)
-                    self.last_provider = name
-                    self.last_errors = errors
-                    return value
-                except UnsupportedSymbolError as exc:
-                    _mark_symbol_unsupported(name, symbol)
-                    errors.append(f"{name}: unsupported: {exc}")
-                except Exception as exc:
-                    if _should_trip_provider(exc):
-                        _mark_failed(name, exc)
-                    else:
-                        _mark_soft_failure(name, exc)
-                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            errors.append("all eligible providers are on cooldown or unsupported")
 
         self.last_errors = errors
         raise RuntimeError(f"No trade market provider succeeded for {method}: {'; '.join(errors)}")
@@ -388,8 +398,10 @@ def probe_provider_health(symbol="BTCUSDT", timeout=5):
             results.append({"provider": name, "ok": False, "latency_ms": latency_ms, "error": str(exc)})
     return results
 
-def create_trade_market_client():
+def create_trade_market_client(providers=None):
     timeout = integer("EXCHANGE_HTTP_TIMEOUT", 15, minimum=1, maximum=60, strategy=False)
-    legacy = string("TRADE_MARKET_PROVIDER", "", strategy=False).lower()
-    providers = [legacy] if legacy in set(supported_names()) else _provider_order()
+    if providers is None:
+        legacy = string("TRADE_MARKET_PROVIDER", "", strategy=False).lower()
+        providers = [legacy] if legacy in set(supported_names()) else _provider_order()
+    providers = [p for p in (providers or []) if p in set(supported_names())]
     return FallbackTradeMarketClient(providers=providers, timeout=timeout)

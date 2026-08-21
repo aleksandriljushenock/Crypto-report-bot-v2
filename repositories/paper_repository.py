@@ -42,6 +42,32 @@ class PaperRepository:
         data = _client().table("paper_positions").insert(row).execute().data or []
         return data[0] if data else dict(row)
 
+    def create_pending_atomic(self, row: dict[str, Any], *, max_active: int, one_per_symbol: bool) -> dict[str, Any] | None:
+        data = _client().rpc("paper_create_pending_v38", {
+            "p_row": row,
+            "p_max_active": int(max_active),
+            "p_one_per_symbol": bool(one_per_symbol),
+        }).execute().data
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data or None
+
+    def fill_pending_atomic(self, *, position_id: Any, fill_price: float, leverage: int, liquidation: float,
+                            stop_distance_pct: float, liquidation_buffer_pct: float, requested_margin: float,
+                            reserve: float, fee_rate: float, fill_source: str, filled_at: str,
+                            max_hold_hours: int, execution_provider: str | None) -> dict[str, Any] | None:
+        data = _client().rpc("paper_fill_pending_v38", {
+            "p_position_id": str(position_id), "p_fill_price": float(fill_price), "p_leverage": int(leverage),
+            "p_liquidation": float(liquidation), "p_stop_distance_pct": float(stop_distance_pct),
+            "p_liquidation_buffer_pct": float(liquidation_buffer_pct), "p_requested_margin": float(requested_margin),
+            "p_reserve": float(reserve), "p_fee_rate": float(fee_rate), "p_fill_source": fill_source,
+            "p_filled_at": filled_at, "p_max_hold_hours": int(max_hold_hours),
+            "p_execution_provider": execution_provider,
+        }).execute().data
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data or None
+
     def update_position(self, position_id: Any, values: dict[str, Any], expected_status: str | None = None) -> dict[str, Any] | None:
         query = _client().table("paper_positions").update(values).eq("id", position_id)
         if expected_status:
@@ -55,23 +81,108 @@ class PaperRepository:
     def upsert_trade(self, row: dict[str, Any]) -> None:
         """Idempotent trade persistence keyed by position_id/fingerprint.
 
-        The v24 migration adds a unique index on position_id. Upsert prevents a
-        duplicate close event from creating duplicate realized PnL history.
+        V38 uses a non-partial UNIQUE index on position_id, which PostgREST can
+        safely use as an ON CONFLICT target.
         """
         _client().table("paper_trades").upsert(row, on_conflict="position_id").execute()
 
+    @staticmethod
+    def _trade_from_closed_position(row: dict[str, Any]) -> dict[str, Any]:
+        """Build a durable trade-ledger row from the canonical closed position.
+
+        paper_positions is the lifecycle source of truth. This fallback makes
+        statistics resilient when the process dies after the position CAS-close
+        but before paper_trades is written.
+        """
+        margin = float(row.get("margin_usd") or 0)
+        net_pnl = float(row.get("net_pnl") or 0)
+        gross_pnl = float(row.get("gross_pnl") or net_pnl)
+        entry_fee = float(row.get("entry_fee") or 0)
+        fees = max(0.0, gross_pnl - net_pnl)
+        if fees <= 0 and entry_fee > 0:
+            fees = entry_fee
+        closed_at = row.get("closed_at") or row.get("updated_at") or row.get("opened_at")
+        return {
+            "account_id": row.get("account_id") or "main",
+            "position_id": row.get("id"),
+            "fingerprint": row.get("fingerprint"),
+            "symbol": row.get("symbol"),
+            "side": row.get("side"),
+            "entry_price": float(row.get("entry_price") or 0),
+            "exit_price": float(row.get("exit_price") or 0),
+            "stop_price": row.get("stop_price"),
+            "target_price": row.get("tp1_price"),
+            "margin_usd": margin,
+            "leverage": int(row.get("leverage") or 1),
+            "notional_usd": float(row.get("notional_usd") or 0),
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "return_on_margin_pct": (net_pnl / margin * 100.0) if margin else 0.0,
+            "fees": fees,
+            "close_reason": row.get("close_reason") or "UNKNOWN",
+            "quality_score": row.get("quality_score"),
+            "probability": row.get("probability"),
+            "expected_value_pct": row.get("expected_value_pct"),
+            "strategy_version": row.get("strategy_version"),
+            "opened_at": row.get("opened_at"),
+            "closed_at": closed_at,
+            "created_at": closed_at,
+            "_synthetic_from_position": True,
+        }
+
     def recent_trades(self, limit: int = 20, *, valid_only: bool = True) -> list[dict[str, Any]]:
-        max_rows = max(1, min(limit, 1000))
+        max_rows = max(1, min(limit, 5000))
+        fetch_rows = max(max_rows * 3, 1000) if valid_only else max_rows
+        fetch_rows = min(fetch_rows, 5000)
         trades = (_client().table("paper_trades").select("*").order("closed_at", desc=True)
-                  .limit(max_rows).execute().data or [])
-        if not valid_only or not trades:
-            return trades
-        # A trade is eligible for PnL/learning only if its originating position
-        # reached a real OPEN fill and then CLOSED. This filters legacy phantom fills.
-        positions = self.valid_closed_positions(max(max_rows * 2, 1000), ascending=False)
+                  .limit(fetch_rows).execute().data or [])
+        if not valid_only:
+            return trades[:max_rows]
+
+        # Canonical source of truth is a real CLOSED position. Merge the ledger
+        # with closed positions so one failed paper_trades write cannot erase a
+        # finished deal from Telegram statistics or model training.
+        positions = self.valid_closed_positions(fetch_rows, ascending=False)
         valid_fp = {str(row.get("fingerprint") or "") for row in positions if row.get("fingerprint")}
         valid_ids = {str(row.get("id") or "") for row in positions if row.get("id")}
-        return [row for row in trades if str(row.get("fingerprint") or "") in valid_fp or str(row.get("position_id") or "") in valid_ids]
+        filtered = [row for row in trades if str(row.get("fingerprint") or "") in valid_fp or str(row.get("position_id") or "") in valid_ids]
+        seen_ids = {str(row.get("position_id") or "") for row in filtered if row.get("position_id")}
+        seen_fp = {str(row.get("fingerprint") or "") for row in filtered if row.get("fingerprint")}
+        for position in positions:
+            pid = str(position.get("id") or "")
+            fp = str(position.get("fingerprint") or "")
+            if (pid and pid in seen_ids) or (fp and fp in seen_fp):
+                continue
+            filtered.append(self._trade_from_closed_position(position))
+        filtered.sort(key=lambda row: str(row.get("closed_at") or row.get("created_at") or ""), reverse=True)
+        return filtered[:max_rows]
+
+    def backfill_missing_trades(self, limit: int = 1000) -> dict[str, Any]:
+        """Persist orphan CLOSED positions into paper_trades idempotently."""
+        positions = self.valid_closed_positions(max(1, min(limit, 5000)), ascending=False)
+        ledger = (_client().table("paper_trades").select("position_id,fingerprint")
+                  .limit(5000).execute().data or [])
+        seen_ids = {str(row.get("position_id") or "") for row in ledger if row.get("position_id")}
+        seen_fp = {str(row.get("fingerprint") or "") for row in ledger if row.get("fingerprint")}
+        repaired = 0
+        errors: list[str] = []
+        for position in positions:
+            pid = str(position.get("id") or "")
+            fp = str(position.get("fingerprint") or "")
+            if (pid and pid in seen_ids) or (fp and fp in seen_fp):
+                continue
+            try:
+                row = self._trade_from_closed_position(position)
+                row.pop("_synthetic_from_position", None)
+                self.upsert_trade(row)
+                repaired += 1
+                if pid:
+                    seen_ids.add(pid)
+                if fp:
+                    seen_fp.add(fp)
+            except Exception as exc:
+                errors.append(f"{position.get('symbol') or pid}: {type(exc).__name__}: {exc}")
+        return {"checked": len(positions), "repaired": repaired, "errors": errors}
 
     def delete_account_history(self, account_id: str) -> None:
         _client().table("paper_trades").delete().eq("account_id", account_id).execute()
@@ -79,12 +190,39 @@ class PaperRepository:
 
     def valid_closed_positions(self, limit: int = 1000, *, ascending: bool = False) -> list[dict[str, Any]]:
         fields = (
-            "id,fingerprint,symbol,status,entry_price,margin_usd,net_pnl,quality_score,probability,"
-            "expected_value_pct,signal_payload,opened_at,closed_at,close_reason,strategy_version,fill_price_source"
+            "id,account_id,fingerprint,symbol,side,status,entry_price,exit_price,stop_price,tp1_price,"
+            "margin_usd,leverage,notional_usd,entry_fee,gross_pnl,net_pnl,quality_score,probability,"
+            "expected_value_pct,signal_payload,opened_at,closed_at,updated_at,close_reason,strategy_version,fill_price_source,execution_provider"
         )
         rows = (_client().table("paper_positions").select(fields).eq("status", "closed")
                 .order("closed_at", desc=not ascending).limit(max(1, min(limit, 5000))).execute().data or [])
         return [row for row in rows if is_valid_closed_position(row)]
+
+    def all_valid_closed_positions(self, max_rows: int | None = None, *, ascending: bool = True, page_size: int = 1000) -> list[dict[str, Any]]:
+        fields = (
+            "id,account_id,fingerprint,symbol,side,status,entry_price,exit_price,stop_price,tp1_price,"
+            "margin_usd,leverage,notional_usd,entry_fee,gross_pnl,net_pnl,quality_score,probability,"
+            "expected_value_pct,signal_payload,opened_at,closed_at,updated_at,close_reason,strategy_version,fill_price_source,execution_provider"
+        )
+        out: list[dict[str, Any]] = []
+        page_size = max(100, min(int(page_size), 1000))
+        cap = max(1, int(max_rows)) if max_rows is not None and int(max_rows) > 0 else None
+        offset = 0
+        while cap is None or offset < cap:
+            end = offset + page_size - 1 if cap is None else min(offset + page_size, cap) - 1
+            rows = (_client().table("paper_positions").select(fields).eq("status", "closed")
+                    .order("closed_at", desc=not ascending).range(offset, end).execute().data or [])
+            if not rows:
+                break
+            out.extend(row for row in rows if is_valid_closed_position(row))
+            if len(rows) < page_size:
+                break
+            offset += page_size
+        return out
+
+    def all_closed_trades(self, max_rows: int | None = None) -> list[dict[str, Any]]:
+        positions = self.all_valid_closed_positions(max_rows=max_rows, ascending=False)
+        return [self._trade_from_closed_position(row) for row in positions]
 
 
 repository = PaperRepository()

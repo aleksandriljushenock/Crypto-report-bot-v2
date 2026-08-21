@@ -57,7 +57,7 @@ def test_execution_window_keeps_current_candle_after_last_checked():
     assert candles[0][3] == 89.0
 
 
-def test_update_positions_records_liquidation_from_overlapping_candle(monkeypatch):
+def test_update_positions_ignores_pre_open_candle_extremes(monkeypatch):
     import paper_trading as pt
     position = _open_position()
     monkeypatch.setattr(pt, '_pending_positions', lambda: [])
@@ -71,9 +71,8 @@ def test_update_positions_records_liquidation_from_overlapping_candle(monkeypatc
     monkeypatch.setattr(pt, '_close_position', lambda pos, price, reason, when=None: closed.append((price,reason)) or {'close_reason':reason,'net_pnl':-10})
     monkeypatch.setattr(pt.paper_repo, 'update_position', lambda *a, **k: {'id':'p1'})
     out = pt.update_positions()
-    assert out['liquidated'] == 1
-    assert closed and closed[0][1].startswith('LIQUIDATION')
-    assert closed[0][0] == 90.0
+    assert out['liquidated'] == 0
+    assert closed == []
 
 
 def test_live_price_beyond_liquidation_heals_stale_position(monkeypatch):

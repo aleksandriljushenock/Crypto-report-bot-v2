@@ -243,10 +243,10 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
     if spec.key == "fib_05_pullback":
         legacy_min = number("FIB_STRATEGY_MIN_VOLUME_USDT", common_min, minimum=1_000_000)
         min_volume = number(f"STRATEGY_{spec.short.upper()}_MIN_VOLUME_USDT", legacy_min, minimum=1_000_000)
-        legacy_max = integer("FIB_STRATEGY_MAX_SYMBOLS", 120, minimum=10, maximum=300)
+        legacy_max = integer("FIB_STRATEGY_MAX_SYMBOLS", 200, minimum=10, maximum=300)
     else:
         min_volume = number(f"STRATEGY_{spec.short.upper()}_MIN_VOLUME_USDT", common_min, minimum=1_000_000)
-        legacy_max = 120
+        legacy_max = 200
     max_symbols = integer("STRATEGY_LAB_MAX_SYMBOLS", legacy_max, minimum=10, maximum=300)
     main_scanner_running = False
     try:
@@ -258,7 +258,7 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
     if parallel_mode:
         max_symbols = min(
             max_symbols,
-            integer("STRATEGY_LAB_PARALLEL_MAX_SYMBOLS", 80, minimum=10, maximum=300),
+            integer("STRATEGY_LAB_PARALLEL_MAX_SYMBOLS", 120, minimum=10, maximum=300),
         )
     parallel_throttle_ms = integer("STRATEGY_LAB_PARALLEL_THROTTLE_MS", 100, minimum=0, maximum=5000) if parallel_mode else 0
     d1_limit = integer("STRATEGY_LAB_D1_LIMIT", 240, minimum=90, maximum=500)
@@ -352,7 +352,7 @@ def _run_strategy_scan_unlocked(strategy: str, progress=None, force_parallel_bud
             for stage in sorted({str(x.get("funnel_stage")) for x in results if x.get("funnel_stage")})
         } if spec.key == "ma55_cycle" else {}),
     }
-    _safe_repo(lambda: repository.save_run(spec.key, summary, results[:50]), None)
+    _safe_repo(lambda: repository.save_run(spec.key, summary, results), None)
     # Include newly-created READY setups in the durable aggregate immediately.
     try:
         stats(spec.key, persist=True)

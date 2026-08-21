@@ -95,11 +95,11 @@ def scanner_config() -> ScannerConfig:
     from config import MIN_QUOTE_VOLUME_USDT
     return ScannerConfig(
         multi_exchange=boolean("MULTI_EXCHANGE_UNIVERSE_ENABLED", True),
-        top_symbols=integer("TRADE_TOP_LIQUID_SYMBOLS", 80, minimum=1, maximum=500),
-        fast_pool=integer("FAST_SCAN_POOL_SIZE", 250, minimum=1, maximum=2000),
-        batch_size=integer("TRADE_SCAN_BATCH_SIZE", 8, minimum=2, maximum=32),
-        workers=integer("TRADE_SCAN_MAX_WORKERS", 2, minimum=1, maximum=8),
-        hedge_pool=integer("HEDGE_CANDIDATE_POOL", 28, minimum=1, maximum=250),
+        top_symbols=integer("TRADE_TOP_LIQUID_SYMBOLS", 150, minimum=1, maximum=500),
+        fast_pool=integer("FAST_SCAN_POOL_SIZE", 500, minimum=1, maximum=2000),
+        batch_size=integer("TRADE_SCAN_BATCH_SIZE", 16, minimum=2, maximum=32),
+        workers=integer("TRADE_SCAN_MAX_WORKERS", 4, minimum=1, maximum=8),
+        hedge_pool=integer("HEDGE_CANDIDATE_POOL", 40, minimum=1, maximum=250),
         min_quote_volume=number("MULTI_EXCHANGE_MIN_QUOTE_VOLUME_USDT", float(MIN_QUOTE_VOLUME_USDT), minimum=0),
         universe_timeout=integer("MULTI_EXCHANGE_UNIVERSE_TIMEOUT", 8, minimum=1, maximum=60),
         min_venues=integer("MULTI_EXCHANGE_MIN_VENUES", 1, minimum=1, maximum=len(DEFAULT_PROVIDERS)),
@@ -156,7 +156,7 @@ def near_signal_config() -> NearSignalConfig:
     return NearSignalConfig(
         enabled=boolean("NEAR_SIGNAL_WATCH_ENABLED", True),
         rescan_minutes=integer("NEAR_SIGNAL_RESCAN_MINUTES", 5, minimum=1, maximum=60),
-        rescan_limit=integer("NEAR_SIGNAL_RESCAN_LIMIT", 24, minimum=1, maximum=200),
+        rescan_limit=integer("NEAR_SIGNAL_RESCAN_LIMIT", 40, minimum=1, maximum=200),
         min_distance_pct=number("NEAR_SIGNAL_MIN_DISTANCE_PCT", 85.0, minimum=50, maximum=100),
         ttl_hours=integer("NEAR_SIGNAL_TTL_HOURS", 12, minimum=1, maximum=168),
     )
