@@ -1,6 +1,6 @@
 """Runtime control plane for the v14 learning model.
 
-V40 keeps operator-tunable model parameters in the persistent learning SQLite DB
+V41 keeps operator-tunable model parameters in the persistent learning SQLite DB
 instead of rewriting .env. Environment values remain the bootstrap/fallback.
 All changes are audited and take effect on the next read/training cycle.
 """
@@ -545,8 +545,15 @@ def build_control_home_text(diagnostics: Dict[str, Any]) -> str:
     profile = current_profile()
     versions = recent_versions(4)
     challenger = next((v for v in versions if v.get("status") == "challenger"), None)
+    try:
+        from adaptive_model_manager import latest_models
+        adaptive_versions = latest_models(4)
+    except Exception:
+        adaptive_versions = []
+    adaptive_champion = next((v for v in adaptive_versions if v.get("status") == "champion"), None)
+    adaptive_candidate = next((v for v in adaptive_versions if v.get("status") == "candidate"), None)
     lines = [
-        "🧠 <b>НЕЙРОМОДЕЛЬ · CONTROL CENTER V40</b>", "",
+        "🧠 <b>НЕЙРОМОДЕЛЬ · CONTROL CENTER V41</b>", "",
         f"Профиль: <b>{PROFILE_TITLES.get(profile, profile)}</b>",
         f"Автообучение: <b>{'🟢 ВКЛ' if auto_learning_enabled() else '⚪ ВЫКЛ'}</b>",
         f"Champion: <code>{html.escape(str(active.get('version') or '—'))}</code>",
@@ -560,7 +567,9 @@ def build_control_home_text(diagnostics: Dict[str, Any]) -> str:
             f"Brier: <b>{float(metrics.get('brier') or 0):.4f}</b>",
             f"Rank corr: <b>{float(metrics.get('rank_corr') or 0):+.3f}</b>",
         ]
-    lines.append(f"Challenger: <code>{html.escape(str(challenger.get('version') if challenger else 'нет'))}</code>")
+    lines.append(f"Challenger v14: <code>{html.escape(str(challenger.get('version') if challenger else 'нет'))}</code>")
+    lines.append(f"Adaptive champion: <code>{html.escape(str(adaptive_champion.get('version') if adaptive_champion else 'нет'))}</code>")
+    lines.append(f"Adaptive candidate: <code>{html.escape(str(adaptive_candidate.get('version') if adaptive_candidate else 'нет'))}</code>")
     lines += ["", "<b>Что можно менять:</b>",
               "• параметры обучения и строгость promotion;",
               "• базовые веса каждого AI-фактора;",
@@ -654,11 +663,16 @@ def build_weight_text(feature: str, learned_weight: float, effective_weight: flo
 
 def build_versions_text() -> str:
     versions = recent_versions(8)
+    try:
+        from adaptive_model_manager import latest_models
+        adaptive_versions = latest_models(5)
+    except Exception:
+        adaptive_versions = []
     lines = ["🏆 <b>CHAMPION / CHALLENGER</b>", "",
-             "Champion — активная модель. Challenger — новая модель, которая не прошла все safety-gates или ещё не была выбрана вручную.", ""]
+             "V14 Champion формирует AI Score и калибровку. Adaptive Champion — независимый Paper-trained слой, который затем может корректировать вероятность Hedge-модели.", "",
+             "<b>V14 learning:</b>"]
     if not versions:
-        lines.append("Сохранённых локальных версий пока нет.")
-        return "\n".join(lines)
+        lines.append("Сохранённых локальных V14-версий пока нет.")
     for row in versions:
         status = str(row.get("status") or "")
         icon = "🏆" if status == "active" else ("🥈" if status == "challenger" else "▫️")
@@ -667,7 +681,18 @@ def build_versions_text() -> str:
         lines.append(f"{icon} <code>{html.escape(str(row.get('version')))}</code> · <b>{html.escape(status)}</b> · n={row.get('sample_count',0)}")
         if cand:
             lines.append(f"   utility {float(cand.get('utility') or 0):.4f} · Brier {float(cand.get('brier') or 0):.4f} · PF {float(cand.get('profit_factor') or 0):.2f}")
-    lines += ["", "Ручной Promote/rollback доступен ниже. Используй его только если понимаешь, почему автоматический safety-gate не выбрал эту модель."]
+
+    lines += ["", "<b>Adaptive Paper model:</b>"]
+    if not adaptive_versions:
+        lines.append("Adaptive-версий пока нет или Supabase недоступен.")
+    for row in adaptive_versions:
+        status = str(row.get("status") or "")
+        icon = "🏆" if status == "champion" else ("🥈" if status == "candidate" else "▫️")
+        metrics = row.get("metrics") or {}
+        lines.append(f"{icon} <code>{html.escape(str(row.get('version')))}</code> · <b>{html.escape(status)}</b> · train={row.get('samples_train',0)} · val={row.get('samples_validation',0)}")
+        if metrics:
+            lines.append(f"   logloss {float(metrics.get('log_loss') or 0):.4f} · Brier {float(metrics.get('brier') or 0):.4f} · accuracy {float(metrics.get('accuracy') or 0)*100:.1f}%")
+    lines += ["", "Автообучение в Control Center теперь управляет <b>обоими</b> обучаемыми контурами. Ручной rollback ниже относится к V14 Champion; Adaptive слой продвигается только через собственный holdout safety-gate."]
     return "\n".join(lines)
 
 

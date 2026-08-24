@@ -19,6 +19,7 @@ from ai_score_engine import claim_ai_alert
 from ai_optimizer import run_optimizer
 from adaptive_model_manager import train_candidate
 from strategies.scheduler import run_scheduled_cycle as run_strategy_lab_scheduled_cycle
+from build_profit_profile import rebuild_from_supabase
 
 
 from core.scheduler import PeriodicWorker
@@ -28,6 +29,7 @@ from core.events import emit
 
 
 _HEAVY_TASK_LOCK = threading.Lock()
+_PAPER_TASK_LOCK = threading.Lock()
 
 
 class AutomationSupervisor:
@@ -46,7 +48,7 @@ class AutomationSupervisor:
     def _minutes(name, default):
         return integer(name, default, minimum=1)
 
-    def _guarded(self, name, callback):
+    def _guarded(self, name, callback, *, shared_heavy_lock=True):
         def runner():
             from memory_guard import cleanup, pressure
             state = pressure()
@@ -56,18 +58,22 @@ class AutomationSupervisor:
             if state.get('critical'):
                 self.logger(f"{name}: skipped due to critical memory rss={state.get('rssMb')}MB")
                 return {'status': 'skipped-memory', 'rssMb': state.get('rssMb')}
-            if not _HEAVY_TASK_LOCK.acquire(blocking=False):
-                self.logger(f"{name}: skipped because another heavy task is running")
+
+            lock = _HEAVY_TASK_LOCK if shared_heavy_lock else _PAPER_TASK_LOCK
+            if not lock.acquire(blocking=False):
+                reason = 'another heavy task is running' if shared_heavy_lock else 'previous paper cycle is still running'
+                self.logger(f"{name}: skipped because {reason}")
                 return {'status': 'skipped-busy'}
-            runtime_start('heavy_task', name=name)
+            runtime_key = 'heavy_task' if shared_heavy_lock else 'paper_task'
+            runtime_start(runtime_key, name=name)
             emit('BACKGROUND_TASK_STARTED', name=name)
             try:
                 return callback()
             finally:
                 emit('BACKGROUND_TASK_FINISHED', name=name)
-                runtime_finish('heavy_task')
+                runtime_finish(runtime_key)
                 cleanup()
-                _HEAVY_TASK_LOCK.release()
+                lock.release()
         return runner
 
     def _build_workers(self):
@@ -85,6 +91,7 @@ class AutomationSupervisor:
         checkpoint_minutes = self._minutes('LEARNING_CHECKPOINT_INTERVAL_MINUTES', 10)
         optimizer_minutes = self._minutes('AI_OPTIMIZER_INTERVAL_MINUTES', 1440)
         strategy_lab_minutes = self._minutes('STRATEGY_LAB_AUTO_INTERVAL_MINUTES', 30)
+        profile_rebuild_minutes = self._minutes('PROFIT_PROFILE_REBUILD_INTERVAL_MINUTES', 1440)
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
@@ -103,7 +110,7 @@ class AutomationSupervisor:
             ),
             PeriodicWorker(
                 'paper-trading-tracker', paper_minutes * 60,
-                self._guarded('paper-trading-tracker', self._run_paper_trading), self.logger,
+                self._guarded('paper-trading-tracker', self._run_paper_trading, shared_heavy_lock=False), self.logger,
                 enabled=self._bool_env('PAPER_TRACKER_ENABLED', True), first_delay=45,
             ),
             PeriodicWorker(
@@ -155,6 +162,11 @@ class AutomationSupervisor:
                 'ai-optimizer-adaptive-models', optimizer_minutes * 60,
                 self._guarded('ai-optimizer-adaptive-models', self._run_optimizer_models), self.logger,
                 enabled=self._bool_env('AI_OPTIMIZER_ENABLED', True), first_delay=600,
+            ),
+            PeriodicWorker(
+                'profit-profile-rebuild', profile_rebuild_minutes * 60,
+                self._guarded('profit-profile-rebuild', self._run_profit_profile_rebuild), self.logger,
+                enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=900,
             ),
         ]
 
@@ -314,9 +326,25 @@ class AutomationSupervisor:
             self.sender(self.chat_id, "🧭 <b>Strategy Lab auto</b>\n" + "\n".join(titles))
         return result
 
+    def _run_profit_profile_rebuild(self):
+        result = rebuild_from_supabase()
+        self.logger(
+            f"Profit profile rebuild: status={result.get('status')} samples={result.get('samples')} "
+            f"version={result.get('version')} windows={result.get('windows')}"
+        )
+        return result
+
     def _run_optimizer_models(self):
         optimizer = run_optimizer(trigger='scheduled')
-        model = train_candidate(trigger='scheduled')
+        try:
+            from model_control import auto_learning_enabled
+            learning_enabled = auto_learning_enabled()
+        except Exception:
+            learning_enabled = True
+        if learning_enabled:
+            model = train_candidate(trigger='scheduled')
+        else:
+            model = {'status': 'disabled-by-runtime-setting', 'version': None}
         self.logger(
             f"AI Optimizer: samples={optimizer.get('samples')}, recommendations={optimizer.get('recommendations_count')}; "
             f"adaptive_model={model.get('status')} version={model.get('version')}"
@@ -340,6 +368,7 @@ def build_automation_status(supervisor):
         'ai-intelligence-engine': 'AI Intelligence v13',
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
+        'profit-profile-rebuild': 'Profit Profile Rebuild',
     }
     for name, runtime in status['runtime'].items():
         saved = status['stored'].get(name, {})

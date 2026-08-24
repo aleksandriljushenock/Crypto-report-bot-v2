@@ -110,29 +110,58 @@ def _rule_hits(s):
         add('breakout_micro_weak', _rule_weight('RULE_WEIGHT_BREAKOUT_MICRO_WEAK', -6))
     return hits
 
-def _recent_group_stat(group: str, key: Any) -> Dict[str, Any]:
+def _recent_group_stat(group: str, key: Any) -> tuple[Dict[str, Any], Optional[int]]:
     p = _profile()
+    requested = max(1, _env_int('PROFILE_RECENT_WINDOW_DAYS', 21))
+    windows = p.get('recent_windows') or {}
+    if windows:
+        available = []
+        for raw in windows:
+            try:
+                available.append(int(raw))
+            except Exception:
+                continue
+        if available:
+            selected = min(available, key=lambda days: abs(days - requested))
+            groups = windows.get(str(selected)) or windows.get(selected) or {}
+            return ((groups.get(group) or {}).get(str(key)) or {}), selected
+    # Backward compatibility with one-window V40 profiles.
     recent_groups = p.get('recent_groups') or {}
-    return ((recent_groups.get(group) or {}).get(str(key)) or {})
+    meta_days = p.get('recent_window_days')
+    try:
+        meta_days = int(meta_days) if meta_days is not None else None
+    except Exception:
+        meta_days = None
+    return ((recent_groups.get(group) or {}).get(str(key)) or {}), meta_days
 
 def _blend_recent_rate(base_rate: float, group: str, key: Any) -> tuple[float, Optional[Dict[str, Any]]]:
-    """Blend an optional recent-window profile into the long-history rate.
+    """Blend long-history and recent statistics using runtime recency controls.
 
-    Current bundled profile may not yet contain `recent_groups`; in that case the
-    function is a no-op. This makes the new ENV settings safe immediately and
-    activates recency automatically after the profile builder writes recent data.
+    V41 profiles carry several recent windows, so PROFILE_RECENT_WINDOW_DAYS is a
+    true runtime selector. PROFILE_HALF_LIFE_DAYS controls how quickly the chosen
+    recent window loses influence as it gets older/wider.
     """
     if not _env_bool('PROFILE_RECENCY_ENABLED', True):
         return base_rate, None
-    st = _recent_group_stat(group, key)
+    st, selected_window = _recent_group_stat(group, key)
     n = int(st.get('samples') or 0)
     min_n = _env_int('PROFILE_MIN_RECENT_SAMPLES', 30)
     if n < min_n:
         return base_rate, None
     recent_rate = float(st.get('win_rate') or base_rate)
-    recent_weight = max(0.0, _env_float('PROFILE_RECENT_WEIGHT', 2.0))
+    configured_weight = max(0.0, _env_float('PROFILE_RECENT_WEIGHT', 2.0))
+    half_life = max(1.0, _env_float('PROFILE_HALF_LIFE_DAYS', 14.0))
+    window = float(selected_window or _env_int('PROFILE_RECENT_WINDOW_DAYS', 21))
+    decay = 0.5 ** (max(0.0, window) / half_life)
+    recent_weight = configured_weight * decay
+    if recent_weight <= 0:
+        return base_rate, None
     blended = (base_rate + recent_rate * recent_weight) / (1.0 + recent_weight)
-    return blended, {'samples': n, 'win_rate': recent_rate, 'weight': recent_weight}
+    return blended, {
+        'samples': n, 'win_rate': recent_rate, 'weight': round(recent_weight, 4),
+        'configured_weight': configured_weight, 'window_days': selected_window,
+        'half_life_days': half_life, 'decay': round(decay, 4),
+    }
 
 def _position_size(quality: float, positive_hits: list[str], passed: bool) -> float:
     if not _env_bool('POSITION_SIZING_ENABLED', False) or not passed:

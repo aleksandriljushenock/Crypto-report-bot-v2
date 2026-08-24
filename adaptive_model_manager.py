@@ -138,6 +138,15 @@ def _metrics(rows: List[Dict[str, Any]], model: Dict[str, Any]) -> Dict[str, flo
 
 
 def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
+    # Runtime Model Control must disable every automatic learner, not only v14.
+    # Manual Telegram training remains available even while auto-learning is OFF.
+    if str(trigger).lower() == "scheduled":
+        try:
+            from model_control import auto_learning_enabled
+            if not auto_learning_enabled():
+                return {"status": "disabled-by-runtime-setting", "trigger": trigger}
+        except Exception:
+            pass
     emit("MODEL_TRAIN_STARTED", trigger=trigger)
     rows = _load_rows(_int("ADAPTIVE_MODEL_MAX_TRADES", 1500))
     min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 40)

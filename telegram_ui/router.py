@@ -186,6 +186,10 @@ def _process_update(update):
             send_message(chat_id, "📊 <b>АНАЛИТИКА</b>\nРынок, комбинации и статистика стратегии.", reply_markup=analytics_keyboard())
             return
 
+        if callback_data == "menu_discovery":
+            start_early_discovery(chat_id)
+            return
+
         if callback_data == "menu_market":
             send_message(chat_id, "🌍 <b>РЫНОК И НОВОСТИ</b>\nДополнительные рыночные инструменты по запросу.", reply_markup=market_keyboard())
             return
@@ -198,7 +202,7 @@ def _process_update(update):
             send_message(chat_id, "🤖 <b>AI ЦЕНТР</b>\nChampion, Learning, Chronos и AI-диагностика.", reply_markup=ai_keyboard())
             return
 
-        # V40 model control center -------------------------------------------------
+        # V41 model control center -------------------------------------------------
         if callback_data == "modelctl_home":
             try:
                 from learning_engine_v14 import diagnostics
@@ -365,17 +369,21 @@ def _process_update(update):
 
         if callback_data == "modelctl_train":
             send_message(chat_id, "🧬 <b>Обучение запущено</b>\n\nМодель использует текущие runtime-параметры, walk-forward validation и финальный holdout. По завершении пришлю результат.", reply_markup=model_control_keyboard())
-            def _run_v40_training():
+            def _run_v41_training():
                 try:
                     from self_learning_engine import retrain
+                    from adaptive_model_manager import train_candidate as train_adaptive_candidate
                     result = retrain()
+                    adaptive = train_adaptive_candidate(trigger=f"telegram:{chat_id}")
                     local = result.get("local") if isinstance(result, dict) else {}
                     local = local or {}
                     metrics = local.get("metrics") or {}
                     candidate = metrics.get("candidate") or {}
                     status = local.get("model_status") or local.get("status") or result.get("status")
+                    adaptive_metrics = adaptive.get("metrics") or {}
                     text = (
                         "✅ <b>ОБУЧЕНИЕ ЗАВЕРШЕНО</b>\n\n"
+                        "<b>V14 Champion/Challenger</b>\n"
                         f"Status: <b>{_html.escape(str(status))}</b>\n"
                         f"Version: <code>{_html.escape(str(local.get('version') or local.get('active') or '—'))}</code>\n"
                         f"Samples: <b>{local.get('samples', 0)}</b>\n"
@@ -383,7 +391,13 @@ def _process_update(update):
                         f"Utility: <b>{float(candidate.get('utility') or 0):.4f}</b>\n"
                         f"Brier: <b>{float(candidate.get('brier') or 0):.4f}</b>\n"
                         f"Profit Factor: <b>{float(candidate.get('profit_factor') or 0):.2f}</b>\n\n"
-                        "Если challenger не promoted, текущий Champion остался активным — это нормальная работа safety-gates."
+                        "<b>Adaptive Paper model</b>\n"
+                        f"Status: <b>{_html.escape(str(adaptive.get('status') or '—'))}</b>\n"
+                        f"Version: <code>{_html.escape(str(adaptive.get('version') or '—'))}</code>\n"
+                        f"Validation: <b>{adaptive.get('samples_validation', adaptive_metrics.get('samples', 0))}</b>\n"
+                        f"LogLoss: <b>{float(adaptive_metrics.get('log_loss') or 0):.4f}</b>\n"
+                        f"Brier: <b>{float(adaptive_metrics.get('brier') or 0):.4f}</b>\n\n"
+                        "Оба обучаемых контура теперь подчиняются общему переключателю автообучения; ручной запуск обучает оба."
                     )
                 except Exception as exc:
                     text = f"❌ Обучение завершилось ошибкой: <code>{_html.escape(str(exc)[:700])}</code>"
@@ -391,7 +405,7 @@ def _process_update(update):
                     send_message(chat_id, text, reply_markup=model_control_keyboard())
                 except Exception:
                     pass
-            threading.Thread(target=_run_v40_training, daemon=True, name="model-v40-training").start()
+            threading.Thread(target=_run_v41_training, daemon=True, name="model-v41-training").start()
             return
 
         if callback_data in {"menu_performance", "menu_portfolio"}:

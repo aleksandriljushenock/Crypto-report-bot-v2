@@ -21,6 +21,7 @@ from learning_engine_v14 import (
     calibrated_probability,
     classify_regime,
     diagnostics,
+    specialist_weights,
     train,
 )
 
@@ -144,19 +145,37 @@ def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
     selected = select_features(features)
     scores = specialist_scores(selected)
     values = list(scores.values())
-    ensemble = mean(values) if values else 50.0
+    specialist_ensemble = mean(values) if values else 50.0
     regime = classify_regime(dict(features))
+
+    # The v14 Champion + operator weight policy is the authoritative learned
+    # weighting layer.  Learning MAX specialists remain an independent ensemble,
+    # but their output is blended with the actual weighted v14 factor score so
+    # Telegram weight controls affect the final probability too.
+    model = active_model(DEFAULT_WEIGHTS)
+    weights = specialist_weights(model, regime, direction) or model.get("weights") or DEFAULT_WEIGHTS
+    denom = sum(max(0.01, float(weights.get(k, DEFAULT_WEIGHTS[k]))) for k in DEFAULT_WEIGHTS)
+    weighted_score = (
+        sum(float(features.get(k, 50)) * float(weights.get(k, DEFAULT_WEIGHTS[k])) for k in DEFAULT_WEIGHTS) / denom
+        if denom else 50.0
+    )
+    ensemble = _clamp(0.55 * specialist_ensemble + 0.45 * weighted_score)
+
     try:
-        probability = calibrated_probability(ensemble, regime, DEFAULT_WEIGHTS)
-        probability = probability * 100 if probability <= 1 else probability
+        probability01, calibration_uncertainty = calibrated_probability(ensemble, regime, model)
+        probability = float(probability01) * 100.0
     except Exception:
         probability = ensemble
+        calibration_uncertainty = 0.25
     disagreement = pstdev(values) if len(values) > 1 else 0.0
-    uncertainty = _clamp(disagreement * 2.2 + max(0.0, 55.0 - abs(ensemble - 50.0)))
+    empirical_uncertainty = disagreement * 2.2 + max(0.0, 55.0 - abs(ensemble - 50.0))
+    uncertainty = _clamp(max(empirical_uncertainty, float(calibration_uncertainty) * 100.0))
     confidence = _clamp(100.0 - uncertainty)
     return {
         "model": "Learning MAX 2.0", "regime": regime, "direction": direction,
         "specialists": {k: round(v, 2) for k, v in scores.items()},
+        "specialist_ensemble": round(specialist_ensemble, 2),
+        "weighted_v14_score": round(weighted_score, 2),
         "ensemble_score": round(ensemble, 2), "probability": round(_clamp(probability), 2),
         "confidence": round(confidence, 2), "uncertainty": round(uncertainty, 2),
         "selected_features": list(selected), "feature_importance": feature_importance(features),
