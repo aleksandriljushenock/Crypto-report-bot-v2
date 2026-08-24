@@ -66,8 +66,13 @@ def rank_signals(signals):
         quality = float(item.get("qualityScore") or 0)
         ev = float(item.get("expectedValuePct") or 0)
         profile = str(item.get("signalProfile") or item.get("setup") or "BREAKOUT").upper()
-        min_quality = float(os.getenv(f"HEDGE_{profile}_MIN_QUALITY", str(base_min_quality)))
-        min_ev = float(os.getenv(f"HEDGE_{profile}_MIN_EV_PCT", str(base_min_ev)))
+        # Global runtime thresholds are hard floors. Profile-specific settings may
+        # tighten a profile, but must never silently weaken a threshold changed
+        # by the operator from Telegram/Supabase.
+        profile_min_quality = float(os.getenv(f"HEDGE_{profile}_MIN_QUALITY", str(base_min_quality)))
+        profile_min_ev = float(os.getenv(f"HEDGE_{profile}_MIN_EV_PCT", str(base_min_ev)))
+        min_quality = max(base_min_quality, profile_min_quality)
+        min_ev = max(base_min_ev, profile_min_ev)
         item["profileQualityThreshold"] = min_quality
         item["profileEvThreshold"] = min_ev
         hard_blocked = any(bool(r.get("hard_block")) for r in (item.get("qualityRules") or []) if isinstance(r, dict))
