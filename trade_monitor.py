@@ -88,6 +88,12 @@ class TradeMonitor:
                     self.sender(chat_id, format_pending_message(paper_result))
                 elif paper_result.get('status') == 'missed_entry':
                     self.sender(chat_id, format_missed_message(paper_result.get('position') or {}, 'MISSED_BREAKOUT'))
+                elif paper_result.get('status') not in {'disabled', 'duplicate'}:
+                    self.logger(
+                        f"Paper trading skipped: status={paper_result.get('status')} "
+                        f"symbol={signal.get('symbol')} direction={signal.get('direction')} "
+                        f"setup={signal.get('setup')} fingerprint={signal.get('fingerprint')}"
+                    )
             except Exception as exc:
                 self.logger(f"Paper trading open error: {exc}")
             mark_signal_sent(signal_id)

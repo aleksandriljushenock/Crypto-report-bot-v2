@@ -69,10 +69,15 @@ def _entry(signal: dict[str, Any]) -> Optional[float]:
 
 
 def _side(direction: Any) -> Optional[str]:
-    value = str(direction or "").strip().upper()
-    if value in {"LONG", "BUY"} or value.startswith("LONG "):
+    """Normalize scanner/exchange direction aliases into executable Paper sides.
+
+    The canonical scanner uses LONG_BIAS/SHORT_BIAS, while some manual/external
+    paths use LONG/SHORT or BUY/SELL. Unknown directions remain fail-closed.
+    """
+    value = str(direction or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if value in {"LONG", "LONG_BIAS", "BUY"}:
         return "LONG"
-    if value in {"SHORT", "SELL"} or value.startswith("SHORT "):
+    if value in {"SHORT", "SHORT_BIAS", "SELL"}:
         return "SHORT"
     return None
 
