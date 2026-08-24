@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import sqlite3
@@ -15,7 +16,8 @@ logger = logging.getLogger("trade_outcome_tracker")
 
 DB_PATH = Path("data") / "trade_outcomes.db"
 HORIZONS = {"1h": 1, "4h": 4, "24h": 24, "72h": 72}
-PRIMARY_READY_HORIZON = os.getenv("LEARNING_READY_HORIZON", "1h").lower()
+LEARNING_TARGET_HORIZON = os.getenv("LEARNING_TARGET_HORIZON", "24h").lower()
+OUTCOME_COMPLETE_HORIZON = os.getenv("OUTCOME_COMPLETE_HORIZON", "72h").lower()
 
 
 def utc_now() -> datetime:
@@ -180,25 +182,44 @@ def sync_pending_from_cloud(limit: int = 2000) -> int:
 
 
 
-def _historical_prices(client: Any, symbol: str) -> list[tuple[datetime, float, float, float]]:
-    """Load up to ~83 hours of 5m candles for accurate restart recovery."""
+def _historical_prices(client: Any, symbol: str, target: datetime, now: datetime | None = None) -> list[tuple[datetime, datetime, float, float, float]]:
+    """Load candles that cover target without using a price formed after target.
+
+    Prefer the finest interval whose 1000-bar window still reaches the target.
+    If the tracker was offline for a long time, widen to 1h instead of silently
+    substituting the oldest available 5m price.
+    """
+    now = now or utc_now()
+    age_minutes = max(0.0, (now - target).total_seconds() / 60.0)
+    choices = [("1m", 1), ("5m", 5), ("1h", 60)]
+    interval, minutes = next(((i, m) for i, m in choices if age_minutes + m <= 1000 * m), ("1h", 60))
     try:
-        rows = client.klines(symbol, "5m", 1000)
-        result: list[tuple[datetime, float, float, float]] = []
-        for item in rows or []:
-            ts = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
-            result.append((ts, float(item[4]), float(item[2]), float(item[3])))
+        rows = client.klines(symbol, interval, 1000) or []
+        result: list[tuple[datetime, datetime, float, float, float]] = []
+        for item in rows:
+            start = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
+            end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc) if len(item) > 6 and item[6] is not None else start + timedelta(minutes=minutes)
+            result.append((start, end, float(item[4]), float(item[2]), float(item[3])))
         return sorted(result, key=lambda x: x[0])
     except Exception as exc:
         logger.warning("Historical candle recovery unavailable for %s: %s", symbol, exc)
         return []
 
 
-def _price_at(candles: list[tuple[datetime, float, float, float]], target: datetime) -> float | None:
+def _price_at(candles: list[tuple[datetime, datetime, float, float, float]], target: datetime) -> float | None:
     if not candles:
         return None
-    eligible = [row for row in candles if row[0] <= target]
-    return eligible[-1][1] if eligible else candles[0][1]
+    # Candle close is known only at candle_end. Never use a close from a bar that
+    # finishes after the target timestamp (the previous implementation looked ahead).
+    eligible = [row for row in candles if row[1] <= target]
+    if not eligible:
+        return None
+    latest = eligible[-1]
+    # Reject large gaps instead of inventing an outcome from a stale candle.
+    interval = max(timedelta(minutes=1), latest[1] - latest[0])
+    if target - latest[1] > interval * 2:
+        return None
+    return latest[2]
 
 def _label(row: sqlite3.Row, price: float) -> str:
     direction = str(row["direction"] or "").upper()
@@ -226,8 +247,9 @@ def _cloud_result_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[st
     returns = {str(o["horizon"]): float(o["return_percent"] or 0) for o in outcomes}
     prices = {str(o["horizon"]): float(o["price"] or 0) for o in outcomes}
     labels = {str(o["horizon"]): str(o["result_label"] or "OPEN") for o in outcomes}
-    latest = outcomes[-1]
-    ready = PRIMARY_READY_HORIZON in returns or len(returns) > 0
+    rank = {name: hours for name, hours in HORIZONS.items()}
+    latest = max(outcomes, key=lambda o: rank.get(str(o["horizon"]), 0))
+    complete = OUTCOME_COMPLETE_HORIZON in returns
     return {
         "market_price_after": float(latest["price"] or 0),
         "price_change_pct": float(latest["return_percent"] or 0),
@@ -243,8 +265,10 @@ def _cloud_result_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[st
             "success": float(latest["return_percent"] or 0) > 0,
             "updated_at": utc_iso(),
         },
-        "resolved_at": str(latest["observed_at"]) if ready else None,
-        "training_status": "ready" if ready else "pending",
+        "resolved_at": str(latest["observed_at"]) if complete else None,
+        # Keep the cloud row pending until the longest configured outcome exists so
+        # a lost local SQLite cache can still restore it and finish later horizons.
+        "training_status": "ready" if complete else "pending",
     }
 
 
@@ -272,6 +296,7 @@ def update_trade_outcomes() -> dict[str, Any]:
     updated = 0
     cloud_synced = 0
     errors: list[str] = []
+    candle_cache: dict[tuple[str, str], list[tuple[datetime, datetime, float, float, float]]] = {}
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM tracked_signals ORDER BY created_at").fetchall()
         for row in rows:
@@ -280,7 +305,6 @@ def update_trade_outcomes() -> dict[str, Any]:
             except Exception as exc:
                 errors.append(f"fingerprint={row['fingerprint']}: bad created_at: {exc}")
                 continue
-            candles = _historical_prices(client, row["symbol"])
             row_changed = False
             for horizon, hours in HORIZONS.items():
                 if now < created + timedelta(hours=hours):
@@ -292,12 +316,17 @@ def update_trade_outcomes() -> dict[str, Any]:
                     continue
                 try:
                     target_time = created + timedelta(hours=hours)
-                    historical_price = _price_at(candles, target_time)
-                    if historical_price is not None:
-                        price = float(historical_price)
-                    else:
-                        ticker = client.ticker_24h(row["symbol"])
-                        price = float(ticker.get("lastPrice") or ticker.get("last_price") or 0)
+                    age_minutes = max(0.0, (now - target_time).total_seconds() / 60.0)
+                    interval = "1m" if age_minutes + 1 <= 1000 else ("5m" if age_minutes + 5 <= 5000 else "1h")
+                    cache_key = (str(row["symbol"]), interval)
+                    if cache_key not in candle_cache:
+                        candle_cache[cache_key] = _historical_prices(client, row["symbol"], target_time, now=now)
+                    historical_price = _price_at(candle_cache[cache_key], target_time)
+                    if historical_price is None:
+                        # A historical label must never fall back to the *current* ticker.
+                        # Retry on the next cycle when history is available.
+                        raise RuntimeError(f"historical price unavailable at {target_time.isoformat()}")
+                    price = float(historical_price)
                     entry = float(row["entry_price"] or 0)
                     if price <= 0 or entry <= 0:
                         raise ValueError(f"invalid price entry={entry} current={price}")
@@ -339,11 +368,15 @@ def get_trade_performance() -> list[dict[str, Any]]:
 
 def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str | None:
     """Durably save a signal to Supabase first, then cache it locally."""
-    fingerprint = str(signal.get("fingerprint") or "")
-    if not fingerprint:
+    signal_fingerprint = str(signal.get("fingerprint") or "")
+    if not signal_fingerprint:
         return None
     created_at = str(signal.get("signal_created_at") or utc_iso())
-    resolve_after = (_parse_dt(created_at) + timedelta(hours=1)).isoformat()
+    created_dt = _parse_dt(created_at)
+    event_hours = max(1.0, float(os.getenv("LEARNING_EVENT_BUCKET_HOURS", os.getenv("TRADE_SIGNAL_COOLDOWN_HOURS", "6"))))
+    event_bucket = int(created_dt.timestamp() // int(event_hours * 3600))
+    fingerprint = hashlib.sha256(f"{signal_fingerprint}|{event_bucket}".encode("utf-8")).hexdigest()
+    resolve_after = (created_dt + timedelta(hours=1)).isoformat()
     chronos = signal.get("chronos") or {}
     direction = str(signal.get("direction") or "").upper()
     chronos_probability = (
@@ -366,6 +399,7 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
         "metadata": {
             "source": source,
             "fingerprint": fingerprint,
+            "signal_fingerprint": signal_fingerprint,
             "ai_score": signal.get("aiScore"),
             "ai_tier": signal.get("aiTier"),
             "tp2": signal.get("tp2"),
@@ -408,9 +442,13 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
     except Exception:
         logger.exception("Durable signal save failed: %s", fingerprint)
         cloud_id = None
+    tracked_signal = dict(signal)
+    tracked_signal["fingerprint"] = fingerprint
+    tracked_signal["signalFingerprint"] = signal_fingerprint
+    tracked_signal["signal_created_at"] = created_at
     if cloud_id:
-        register_trade_signal(signal, cloud_id=cloud_id)
+        register_trade_signal(tracked_signal, cloud_id=cloud_id)
     else:
         # Keep a local retryable cache, but return None so callers/logs know cloud failed.
-        register_trade_signal(signal)
+        register_trade_signal(tracked_signal)
     return cloud_id

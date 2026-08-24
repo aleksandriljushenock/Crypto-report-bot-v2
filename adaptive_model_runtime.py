@@ -29,6 +29,10 @@ def _load() -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     return _CACHE["model"], _CACHE["version"]
 
 
+
+def invalidate_cache() -> None:
+    _CACHE.update(at=0.0, model=None, version=None)
+
 def _num(v, d=0.0):
     try:return float(v)
     except:return d

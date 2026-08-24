@@ -16,3 +16,6 @@
 
 ## V39
 Для V39 обязательно выполнить `SUPABASE_PAPER_V39_ATOMIC_LIFECYCLE.sql` после миграции V38. Она закрывает SECURITY DEFINER RPC от public/anon/authenticated и добавляет атомарные close/reconcile/reset.
+
+## V43
+Для V43 обязательно один раз выполнить `SUPABASE_ADAPTIVE_MODEL_V43_ATOMIC_STORE.sql` после создания таблицы `adaptive_model_versions` из V18. Миграция добавляет атомарное сохранение/promotion Adaptive Champion и закрывает RPC от public/anon/authenticated.

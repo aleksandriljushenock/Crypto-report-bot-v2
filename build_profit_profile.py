@@ -56,10 +56,24 @@ def _normalize(source: Dict[str, Any]) -> Dict[str, Any] | None:
     f = _json(source.get('features') or source.get('payload_json') or source.get('signal_payload'))
     result = _json(source.get('real_result') or source.get('result') or source.get('outcome'))
     factors = f.get('aiFactors') or f.get('tradeProfile') or {}
-    ret = _num(result.get('return_percent', result.get('returnPercent', result.get('pnl_percent', source.get('price_change_pct')))), 0.0)
-    success_raw = result.get('success')
-    if success_raw is None:
+    target_horizon = str(os.getenv('LEARNING_TARGET_HORIZON', '24h')).lower()
+    returns = _json(result.get('returns'))
+    if returns:
+        if target_horizon not in returns:
+            return None
+        ret = _num(returns.get(target_horizon), 0.0)
         success_raw = ret > 0
+    else:
+        horizon = str(result.get('horizon') or '').lower()
+        if horizon and horizon != target_horizon:
+            return None
+        raw_ret = result.get('return_percent', result.get('returnPercent', result.get('pnl_percent')))
+        if raw_ret is None:
+            return None
+        ret = _num(raw_ret, 0.0)
+        success_raw = result.get('success')
+        if success_raw is None:
+            success_raw = ret > 0
     created = source.get('signal_created_at') or source.get('created_at') or f.get('createdAt') or f.get('timestamp')
     item = {
         'created_at': created,
@@ -169,13 +183,14 @@ def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int] = DEFAULT_W
         recent = [r for r in rows if r.get('_dt') and r['_dt'] >= cutoff]
         recent_windows[str(days)] = _groups(recent)
     profile = {
-        'version': 'profit-profile-v41-' + now.strftime('%Y%m%d%H%M%S'),
+        'version': 'profit-profile-v43-' + now.strftime('%Y%m%d%H%M%S'),
         'generated_at': now.isoformat(),
+        'target_horizon': str(os.getenv('LEARNING_TARGET_HORIZON', '24h')).lower(),
         'overall': _stats(rows),
         'groups': _groups(rows),
         'recent_windows': recent_windows,
         'recent_window_options': windows,
-        'rules': _rules(rows),
+        'rule_diagnostics': _rules(rows),
     }
     return profile
 

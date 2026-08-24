@@ -560,23 +560,27 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             setup = str((position.get("signal_payload") or {}).get("setup") or "").upper()
             since = _parse_ts(position.get("last_checked_at") or position.get("created_at"))
             pending_until = _parse_ts(position.get("pending_until")) if position.get("pending_until") else None
-            rows, _, interval_minutes = _execution_klines(client, position["symbol"])
+            lookback_hours = max(0.05, (_now() - since).total_seconds() / 3600.0 + 0.05)
+            rows, _, interval_minutes = _execution_klines(client, position["symbol"], lookback_hours=lookback_hours)
             covered_until = _next_paper_cursor(since, rows, interval_minutes=interval_minutes, ceiling=pending_until)
             touched = False
             touch_time = None
             for ts, open_price, high, low, close, partial_start, partial_end in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until):
                 if partial_start or partial_end:
-                    # OHLC extrema are temporally ambiguous on a boundary candle.
-                    # Only its close is safe if that close belongs to the legal window.
-                    effective_low = effective_high = close
-                else:
-                    effective_low, effective_high = low, high
+                    # A boundary OHLC bar contains prices outside the legal event-time
+                    # window. Its close can also occur after the deadline, so do not use
+                    # any part of an ambiguous bar for entry execution.
+                    continue
+                effective_low, effective_high = low, high
                 if setup == "PULLBACK":
                     touched = effective_low <= target if side == "LONG" else effective_high >= target
                 else:
                     touched = effective_high >= target if side == "LONG" else effective_low <= target
                 if touched:
-                    touch_time = max(ts, _parse_ts(position.get("created_at")))
+                    # OHLC does not reveal the intra-bar touch time. Conservatively
+                    # establish the fill at the end of the completed candle so the same
+                    # candle can never also generate a TP/SL after an unknown-order entry.
+                    touch_time = ts + timedelta(minutes=interval_minutes)
                     break
             if touched:
                 fill = target
@@ -618,7 +622,8 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             max_hold = _parse_ts(position.get("max_hold_until")) if position.get("max_hold_until") else opened_at + timedelta(hours=max(1, _int("PAPER_MAX_HOLD_HOURS", 72)))
             provider = str(position.get("execution_provider") or "").strip()
             position_client = create_trade_market_client(providers=[provider]) if provider else client
-            rows, _, interval_minutes = _execution_klines(position_client, position["symbol"])
+            lookback_hours = max(0.05, (_now() - last_checked).total_seconds() / 3600.0 + 0.05)
+            rows, _, interval_minutes = _execution_klines(position_client, position["symbol"], lookback_hours=lookback_hours)
             covered_until = _next_paper_cursor(last_checked, rows, interval_minutes=interval_minutes, ceiling=max_hold)
             if not provider:
                 provider = str(getattr(position_client, "last_provider", None) or "").strip()
@@ -639,11 +644,10 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             # an earlier SL/liquidation after downtime.
             for ts, open_price, high, low, close, partial_start, partial_end in candles:
                 if partial_start or partial_end:
-                    # Never attribute an unknown intra-candle wick to the legal window.
-                    # The close is the only timestamp-safe observation available from OHLC.
-                    safe_open = safe_high = safe_low = close
-                else:
-                    safe_open, safe_high, safe_low = open_price, high, low
+                    # Do not use a bar that overlaps opened_at/max_hold. Neither its wick
+                    # nor its close can be assigned safely to the legal sub-window.
+                    continue
+                safe_open, safe_high, safe_low = open_price, high, low
                 liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=safe_open, high=safe_high, low=safe_low)
                 stop_hit = safe_low <= stop if side == "LONG" else safe_high >= stop
                 tp_hit = safe_high >= tp if side == "LONG" else safe_low <= tp
@@ -675,7 +679,8 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             if reason is None and now_dt >= max_hold and covered_until >= max_hold:
                 # TIME_EXIT is allowed only once market history covers the hold deadline.
                 # This prevents a stale API response from silently skipping unseen TP/SL events.
-                legal = [c for c in candles if c[0] < max_hold]
+                # Only a fully completed legal candle may provide the time-exit price.
+                legal = [c for c in candles if not c[5] and not c[6] and c[0] + timedelta(minutes=interval_minutes) <= max_hold]
                 exit_price = legal[-1][4] if legal else float(position.get("entry_price") or 0)
                 reason, exit_time = "TIME_EXIT", max_hold.isoformat()
             if reason and exit_price and exit_price > 0:

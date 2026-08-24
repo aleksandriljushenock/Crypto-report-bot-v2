@@ -166,7 +166,7 @@ class AutomationSupervisor:
             PeriodicWorker(
                 'profit-profile-rebuild', profile_rebuild_minutes * 60,
                 self._guarded('profit-profile-rebuild', self._run_profit_profile_rebuild), self.logger,
-                enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=900,
+                enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=30,
             ),
         ]
 

@@ -94,10 +94,12 @@ def _strategy_profile(signal):
 
 def _profile_thresholds(profile, base_score, base_rr, base_probability):
     prefix = f'TRADE_{profile}_MIN_'
+    # Global thresholds are hard safety floors. A profile may tighten them,
+    # but must never silently weaken an operator-selected global minimum.
     return {
-        'score': _env_float(prefix + 'SCORE', base_score),
-        'rr': _env_float(prefix + 'RR', base_rr),
-        'probability': _env_float(prefix + 'PROBABILITY', base_probability),
+        'score': max(float(base_score), _env_float(prefix + 'SCORE', base_score)),
+        'rr': max(float(base_rr), _env_float(prefix + 'RR', base_rr)),
+        'probability': max(float(base_probability), _env_float(prefix + 'PROBABILITY', base_probability)),
     }
 
 

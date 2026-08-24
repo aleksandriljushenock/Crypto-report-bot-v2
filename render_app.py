@@ -43,7 +43,9 @@ def _public_base_url() -> str:
 
 
 def _webhook_secret() -> str:
-    return _env("TELEGRAM_WEBHOOK_SECRET")
+    secret = _env("TELEGRAM_WEBHOOK_SECRET")
+    placeholders = {"CHANGE_ME_TO_RANDOM_32_PLUS_CHARS", "changeme", "change_me", "replace_me"}
+    return "" if secret.lower() in {x.lower() for x in placeholders} else secret
 
 
 def _ensure_runtime() -> None:

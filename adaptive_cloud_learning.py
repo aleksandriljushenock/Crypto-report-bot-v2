@@ -47,9 +47,10 @@ def train_cloud_overlay(base_weights: dict[str, float], min_samples: int | None 
     parsed = []
     for row in rows:
         features = _as_dict(row.get('features'))
+        factors = _as_dict(features.get('aiFactors') or features.get('tradeProfile')) or features
         target = _target(row)
-        if features and target is not None:
-            parsed.append((features, target))
+        if factors and target is not None:
+            parsed.append((factors, target))
     if len(parsed) < min_samples:
         return {'status': 'collecting-data', 'samples': len(parsed), 'required': min_samples}
 
@@ -73,7 +74,12 @@ def train_cloud_overlay(base_weights: dict[str, float], min_samples: int | None 
 
     SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
     payload = {'status': 'updated', 'samples': len(parsed), 'weights': adjusted, 'deltas': diagnostics}
-    SNAPSHOT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    tmp = SNAPSHOT.with_name(SNAPSHOT.name + '.tmp')
+    with tmp.open('w', encoding='utf-8') as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, indent=2))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, SNAPSHOT)
     return payload
 
 

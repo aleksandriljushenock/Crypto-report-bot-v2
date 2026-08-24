@@ -66,13 +66,14 @@ def test_update_positions_ignores_pre_open_candle_extremes(monkeypatch):
     monkeypatch.setattr(pt, '_current_market_price', lambda client, symbol: 100.0)
     from datetime import datetime, timezone
     rows = [[int(datetime(2026,8,13,12,0,tzinfo=timezone.utc).timestamp()*1000),'100','101','89','92','0',int(datetime(2026,8,13,12,4,59,tzinfo=timezone.utc).timestamp()*1000)]]
-    monkeypatch.setattr(pt, '_execution_klines', lambda client, symbol: (rows, '5m', 5))
+    monkeypatch.setattr(pt, '_execution_klines', lambda client, symbol, **kwargs: (rows, '5m', 5))
     closed=[]
     monkeypatch.setattr(pt, '_close_position', lambda pos, price, reason, when=None: closed.append((price,reason)) or {'close_reason':reason,'net_pnl':-10})
     monkeypatch.setattr(pt.paper_repo, 'update_position', lambda *a, **k: {'id':'p1'})
     out = pt.update_positions()
     assert out['liquidated'] == 0
-    assert closed == [(95.0, 'SL')]
+    # The bar overlaps opened_at; its pre-entry wick cannot be attributed safely.
+    assert closed == []
 
 
 def test_live_price_is_not_used_when_execution_history_is_missing(monkeypatch):

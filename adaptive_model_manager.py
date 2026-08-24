@@ -138,7 +138,7 @@ def _metrics(rows: List[Dict[str, Any]], model: Dict[str, Any]) -> Dict[str, flo
             "baseline_log_loss": base_loss/n, "baseline_brier": base_brier/n}
 
 
-def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
+def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
     # Runtime Model Control must disable every automatic learner, not only v14.
     # Manual Telegram training remains available even while auto-learning is OFF.
     if str(trigger).lower() == "scheduled":
@@ -188,18 +188,27 @@ def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
     metrics["benchmark_log_loss"] = benchmark_log_loss if math.isfinite(benchmark_log_loss) else None
     metrics["champion_version"] = champion_version
     promote = metrics["samples"] >= min_validation and improvement >= min_improvement
-    version = datetime.now(timezone.utc).strftime("paper-logit-%Y%m%d-%H%M%S")
+    version = datetime.now(timezone.utc).strftime("paper-logit-%Y%m%d-%H%M%S-%f")
     row = {
         "version": version, "status": "champion" if promote else "candidate", "algorithm": "pure_python_logistic_v1",
         "samples_train": len(train_rows), "samples_validation": len(val_rows), "metrics": metrics,
         "model_json": model, "trigger": trigger, "created_at": _now(), "activated_at": _now() if promote else None,
     }
     try:
-        if promote:
-            _client().table("adaptive_model_versions").update({"status": "archived"}).eq("status", "champion").execute()
-        _client().table("adaptive_model_versions").insert(row).execute()
-    except Exception:
+        response = _client().rpc("adaptive_model_store_v43", {"p_row": row, "p_promote": bool(promote)}).execute()
+        if response.data is None:
+            raise RuntimeError("adaptive_model_store_v43 returned no data")
+    except Exception as exc:
         log.exception("Adaptive model persistence failed")
+        emit("MODEL_PERSISTENCE_FAILED", version=version, promoted=promote, error=str(exc))
+        return {"status": "persistence-error", "version": version, "metrics": metrics,
+                "samples_train": len(train_rows), "samples_validation": len(val_rows),
+                "improvement": improvement, "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        from adaptive_model_runtime import invalidate_cache
+        invalidate_cache()
+    except Exception:
+        pass
     emit("MODEL_PROMOTED" if promote else "MODEL_CANDIDATE", version=version, improvement=improvement, samples_validation=len(val_rows))
     return {"status": "promoted" if promote else "candidate", "version": version, "metrics": metrics,
             "samples_train": len(train_rows), "samples_validation": len(val_rows), "improvement": improvement}
@@ -211,3 +220,11 @@ def latest_models(limit: int = 5) -> List[Dict[str, Any]]:
                 .order("created_at", desc=True).limit(limit).execute().data or [])
     except Exception:
         return []
+
+
+def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
+    from model_training_coordinator import training_slot
+    with training_slot() as acquired:
+        if not acquired:
+            return {"status": "already-running", "trigger": trigger}
+        return _train_candidate_unlocked(trigger)

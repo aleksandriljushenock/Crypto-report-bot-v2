@@ -16,7 +16,7 @@ def test_profile_threshold_overrides(monkeypatch):
     monkeypatch.setenv('TRADE_PULLBACK_MIN_RR','2.1')
     monkeypatch.setenv('TRADE_PULLBACK_MIN_PROBABILITY','67')
     t=trade_engine._profile_thresholds('PULLBACK',72,2.3,70)
-    assert t == {'score':71.0,'rr':2.1,'probability':67.0}
+    assert t == {'score':72.0,'rr':2.3,'probability':70.0}
 
 
 def test_near_signal_watchlist(monkeypatch,tmp_path):

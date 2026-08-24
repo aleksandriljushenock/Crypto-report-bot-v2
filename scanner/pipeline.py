@@ -71,8 +71,13 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
                 from ai_intelligence import rank_signals, get_last_rank_diagnostics
                 signals = rank_signals(signals)[:max_results]
                 ai_diag = get_last_rank_diagnostics()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Final AI/Hedge ranking is a safety gate. If it is unavailable,
+                # never leak pre-ranked candidates to Telegram/Paper.
+                ai_diag = {"input": len(signals), "quality": 0, "ev": 0, "passed": 0,
+                           "rejected": [], "error": f"{type(exc).__name__}: {exc}"}
+                emit('SIGNAL_RANKING_FAILED', source=source, error=ai_diag["error"])
+                signals = []
         _set_scan_state(phase='finalizing', processed=len(signals), total=max(len(signals), 1))
         stages = {
             "analyzed": int(filter_diag.get("analyzed") or len(rows)),

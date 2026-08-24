@@ -21,7 +21,6 @@ env/
 *.joblib
 
 data/*
-!data/profit_profile_v2.json
 logs/
 models/
 checkpoints/
@@ -40,7 +39,6 @@ Thumbs.db
 !.env.example
 logs/
 data/*
-!data/profit_profile_v2.json
 *.db
 *.sqlite
 *.sqlite3

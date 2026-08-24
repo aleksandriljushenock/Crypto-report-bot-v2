@@ -26,10 +26,9 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    raw = string(name, '', strategy=True)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {'1','true','yes','on','y'}
+    # Use the central runtime-config parser so an absent variable preserves the
+    # requested default and Telegram/Supabase overrides remain effective.
+    return boolean(name, default)
 
 def _rule_weight(env_name: str, default: float) -> float:
     return _env_float(env_name, default)

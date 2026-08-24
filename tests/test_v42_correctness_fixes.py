@@ -112,11 +112,16 @@ def test_adaptive_candidate_cannot_replace_better_champion(monkeypatch):
             return Resp([])
     class Client:
         def table(self,name): return Q()
+        def rpc(self,name,args):
+            class R:
+                def execute(self): return Resp({'status':'ok'})
+            return R()
     monkeypatch.setattr(am,'_client',lambda:Client())
     out=am.train_candidate('manual')
     assert out['status']=='candidate'
     assert not calls['archived']
-    assert calls['inserted']['status']=='candidate'
+    # V43 persists candidate/champion atomically through RPC.
+    assert calls['inserted'] is None
 
 
 def test_trade_monitor_registers_paper_even_when_telegram_fails(monkeypatch):

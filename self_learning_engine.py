@@ -1,17 +1,16 @@
 """Self-learning facade for v14 maximum-learning engine."""
-import threading
+from model_training_coordinator import training_slot
 
 from ai_score_engine import DEFAULT_WEIGHTS
 from learning_engine_v14 import diagnostics, train
 
-_TRAIN_LOCK = threading.Lock()
 
 
 def retrain():
-    if not _TRAIN_LOCK.acquire(blocking=False):
-        local = {"status": "already-running", "message": "training is already running"}
-        return {"local": local, "cloudAdaptive": {"status": "skipped"}, "status": "already-running"}
-    try:
+    with training_slot() as acquired:
+        if not acquired:
+            local = {"status": "already-running", "message": "another model training is already running"}
+            return {"local": local, "cloudAdaptive": {"status": "skipped"}, "status": "already-running"}
         result = train(DEFAULT_WEIGHTS)
         try:
             from adaptive_cloud_learning import train_cloud_overlay
@@ -19,12 +18,12 @@ def retrain():
         except Exception as exc:
             cloud = {"status": "error", "error": str(exc)}
         return {"local": result, "cloudAdaptive": cloud, "status": result.get("status") if isinstance(result, dict) else "done"}
-    finally:
-        _TRAIN_LOCK.release()
 
 
 def build_learning_report():
-    result = retrain()
+    # A report is read-only. Training is started only by the explicit Model Control
+    # action or the scheduled learner; opening /learn/professional report must not mutate models.
+    result = {"status": "report-only"}
     data = diagnostics(DEFAULT_WEIGHTS)
     active = data["active"]
     metrics = data["metrics"]
@@ -34,7 +33,7 @@ def build_learning_report():
         "<b>🧬 AI SELF LEARNING MAX v14</b>", "",
         f"Активная модель: <b>{active['version']}</b>",
         f"Завершённых прогнозов: <b>{data['samples']}</b>",
-        f"Результат обучения: <b>{result.get('status')}</b>",
+        f"Режим: <b>диагностика без запуска обучения</b>",
         f"Рыночный drift: <b>{drift.get('status', 'n/a')}</b> ({float(drift.get('score', 0)):.3f})",
         f"Специалистов режимов: <b>{len((config.get('specialists') or {}))}</b>",
     ]

@@ -271,18 +271,18 @@ def load_samples() -> List[Dict[str, Any]]:
             grouped[fp] = item
     grouped_samples = _dedupe_samples(list(grouped.values()))
     result = []
-    horizon_weights = {"1h": 0.10, "4h": 0.20, "24h": 0.45, "72h": 0.25}
+    target_horizon = str(os.getenv("LEARNING_TARGET_HORIZON", "24h")).lower()
+    if target_horizon not in HORIZONS:
+        target_horizon = "24h"
     for item in grouped_samples:
-        available = [(h, item["returns"][h]) for h in HORIZONS if h in item["returns"]]
-        if not available:
+        # Train and validate on exactly the same matured horizon. Mixing 1h-only
+        # fresh samples with 72h mature samples changes the target definition over time.
+        if target_horizon not in item["returns"]:
             continue
-        denom = sum(horizon_weights[h] for h, _ in available)
-        target_return = sum(max(-30.0, min(30.0, r)) * horizon_weights[h] for h, r in available) / denom
-        # A win requires positive risk-adjusted composite return, not merely one positive tick.
-        wins = [1.0 if r > 0 else 0.0 for _, r in available]
-        target_win = sum(w * horizon_weights[h] for (h, _), w in zip(available, wins)) / denom
+        target_return = max(-30.0, min(30.0, float(item["returns"][target_horizon])))
         item["return"] = target_return
-        item["win"] = target_win
+        item["win"] = 1.0 if target_return > 0 else 0.0
+        item["target_horizon"] = target_horizon
         item["regime"] = classify_regime(item["factors"])
         result.append(item)
     return sorted(result, key=lambda x: str(x["created_at"]))
@@ -445,8 +445,12 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
             from cloud_model_store import CloudModelStore
             cloud = CloudModelStore().load_active_model()
             if cloud and cloud.get("version"):
-                cfg = cloud.get("config") or _model_config(cloud.get("weights") or defaults)
-                return {"version": cloud["version"], "weights": cfg.get("global_weights", defaults),
+                cfg = dict(cloud.get("config") or _model_config(cloud.get("weights") or defaults))
+                learned = dict(cfg.get("learned_global_weights") or cfg.get("global_weights") or cloud.get("weights") or defaults)
+                effective = _apply_operator_weight_policy(learned, defaults)
+                cfg["learned_global_weights"] = learned
+                cfg["global_weights"] = effective
+                return {"version": cloud["version"], "weights": effective, "learned_weights": learned,
                         "config": cfg, "metrics": cloud.get("metrics") or {}, "rules": cloud.get("rules") or []}
         except Exception:
             pass
@@ -485,7 +489,7 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
 def specialist_weights(model: Dict[str, Any], regime: str, direction: str) -> Dict[str, float]:
     cfg = model.get("config") or {}
     specialists = cfg.get("specialists") or {}
-    direction = str(direction or "").upper()
+    direction = _normalize_direction(direction)
     selected = specialists.get(f"{regime}:{direction}") or specialists.get(regime) or cfg.get("global_weights") or model.get("weights") or {}
     defaults = model.get("learned_weights") or cfg.get("learned_global_weights") or selected
     return _apply_operator_weight_policy(dict(selected), dict(defaults))
@@ -505,7 +509,7 @@ def calibrated_probability(score: float, regime: str, model: Dict[str, Any]) -> 
 
 def apply_learning_adjustments(factors: Dict[str, float], rules: Iterable[Dict[str, Any]], regime: str = "all", direction: str = "") -> Dict[str, Any]:
     triggered, total = [], 0.0
-    direction = str(direction or "").upper()
+    direction = _normalize_direction(direction)
     for rule in rules:
         if rule.get("regime") not in ("all", regime):
             continue
@@ -717,6 +721,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
               "version": version, "promoted": promoted,
               "metrics": metrics, "specialists": len(specialists), "rules": len(rules),
               "feature_names": list(FEATURES),
+              "target_horizon": str(os.getenv("LEARNING_TARGET_HORIZON", "24h")).lower(),
               "active": version if promoted else current["version"]}
     with connect() as conn:
         conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", ("completed", json.dumps(result), now_iso()))
