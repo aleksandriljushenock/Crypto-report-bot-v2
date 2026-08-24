@@ -77,17 +77,19 @@ class TradeMonitor:
             cloud_id = persist_trade_signal(signal, source='automatic_monitor' if source == 'monitor' else source)
             if not cloud_id:
                 self.logger(f"Monitor signal not confirmed in Supabase: {signal.get('fingerprint')}")
-            message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
-            self.sender(chat_id, message)
+            # Paper registration is a durable processing step and must not depend
+            # on Telegram availability. Register first; notification failures only
+            # affect delivery, never the simulation.
+            paper_messages = []
             try:
                 from paper_trading import open_from_signal, format_open_message, format_pending_message, format_missed_message
                 paper_result = open_from_signal(signal, source='automatic_monitor' if source == 'monitor' else source)
                 if paper_result.get('status') == 'opened':
-                    self.sender(chat_id, format_open_message(paper_result))
+                    paper_messages.append(format_open_message(paper_result))
                 elif paper_result.get('status') == 'pending_entry':
-                    self.sender(chat_id, format_pending_message(paper_result))
+                    paper_messages.append(format_pending_message(paper_result))
                 elif paper_result.get('status') == 'missed_entry':
-                    self.sender(chat_id, format_missed_message(paper_result.get('position') or {}, 'MISSED_BREAKOUT'))
+                    paper_messages.append(format_missed_message(paper_result.get('position') or {}, 'MISSED_BREAKOUT'))
                 elif paper_result.get('status') not in {'disabled', 'duplicate'}:
                     self.logger(
                         f"Paper trading skipped: status={paper_result.get('status')} "
@@ -96,8 +98,22 @@ class TradeMonitor:
                     )
             except Exception as exc:
                 self.logger(f"Paper trading open error: {exc}")
-            mark_signal_sent(signal_id)
-            new_count += 1
+
+            message = '<b>🚨 НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n' + build_signal_block(signal)
+            delivered = False
+            try:
+                self.sender(chat_id, message)
+                delivered = True
+                for paper_message in paper_messages:
+                    try:
+                        self.sender(chat_id, paper_message)
+                    except Exception as exc:
+                        self.logger(f"Paper notification delivery error: {exc}")
+            except Exception as exc:
+                self.logger(f"Trade signal Telegram delivery error: {exc}")
+            if delivered:
+                mark_signal_sent(signal_id)
+                new_count += 1
         return new_count
 
     def _run_near_signal_cycle(self, chat_id):

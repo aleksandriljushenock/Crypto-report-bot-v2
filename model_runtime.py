@@ -1,76 +1,28 @@
+"""Compatibility runtime for the retired champion.pkl model.
+
+Predictions now come from the active V14 model so legacy imports cannot diverge
+from the model used by the production scoring pipeline.
+"""
 from __future__ import annotations
-
-import time
-from threading import Lock
 from typing import Any
-
-import numpy as np
-
-from cloud_model_store import load_model
-
+from ai_score_engine import DEFAULT_WEIGHTS
+from learning_engine_v14 import active_model, calibrated_probability, classify_regime, specialist_weights
 
 class CloudModelRuntime:
-    def __init__(
-        self,
-        refresh_seconds: int = 1800,
-    ) -> None:
+    def __init__(self, refresh_seconds: int = 1800) -> None:
         self.refresh_seconds = refresh_seconds
-        self._artifact: dict[str, Any] | None = None
-        self._loaded_at = 0.0
-        self._lock = Lock()
-
     def refresh(self) -> None:
-        with self._lock:
-            artifact = load_model(
-                "champion.pkl",
-                default=None,
-            )
-
-            if isinstance(artifact, dict):
-                self._artifact = artifact
-                self._loaded_at = time.time()
-
-    def predict(
-        self,
-        features: dict[str, float],
-    ) -> dict[str, Any]:
-        if (
-            self._artifact is None
-            or time.time() - self._loaded_at
-            > self.refresh_seconds
-        ):
-            self.refresh()
-
-        if not self._artifact:
-            return {
-                "available": False,
-                "probability": 0.5,
-                "confidence": 0.0,
-            }
-
-        model = self._artifact["model"]
-        feature_names = self._artifact[
-            "feature_names"
-        ]
-
-        vector = np.asarray([[
-            float(features.get(name, 0.0))
-            for name in feature_names
-        ]])
-
-        probability = float(
-            model.predict_proba(vector)[0, 1]
-        )
-
-        return {
-            "available": True,
-            "probability": probability,
-            "confidence": abs(
-                probability - 0.5
-            ) * 200,
-            "model_version":
-                self._artifact.get("version"),
-        }
-
+        return None
+    def predict(self, features: dict[str, float]) -> dict[str, Any]:
+        try:
+            model = active_model(DEFAULT_WEIGHTS)
+            regime = classify_regime(features)
+            weights = specialist_weights(model, regime, str(features.get("direction") or ""))
+            denom = sum(max(0.01, float(weights.get(k, DEFAULT_WEIGHTS[k]))) for k in DEFAULT_WEIGHTS)
+            score = sum(float(features.get(k, 50)) * float(weights.get(k, DEFAULT_WEIGHTS[k])) for k in DEFAULT_WEIGHTS) / denom
+            prob, unc = calibrated_probability(score, regime, model)
+            return {"available": True, "probability": prob, "confidence": max(0.0, 1.0-float(unc)), "model_version": model.get("version")}
+        except Exception:
+            return {"available": False, "probability": 0.5, "confidence": 0.0}
 
 runtime_model = CloudModelRuntime()

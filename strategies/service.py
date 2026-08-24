@@ -164,6 +164,9 @@ def update_outcomes(max_rows: int = 5000, strategy: str = DEFAULT_STRATEGY) -> d
                     result["events"].append(event)
                 continue
             rows = normalize_klines(client.klines(setup["symbol"], "1h", 500))
+            # Forward tracking must use completed 1H candles only. The exchange
+            # commonly returns the currently forming candle as the last row.
+            rows = [x for x in rows if _iso_ms(x["ts"]) + timedelta(hours=1) <= now]
             created = datetime.fromisoformat(str(setup["created_at"]).replace("Z", "+00:00"))
             state = setup.get("state") or "waiting_entry"
             entered_boundary = None
@@ -192,15 +195,12 @@ def update_outcomes(max_rows: int = 5000, strategy: str = DEFAULT_STRATEGY) -> d
                 if state == "waiting_entry":
                     if _entry_touched(safe_candle, direction, entry, entry_mode):
                         state = "open"
-                        entered_dt = max(created, cdt)
+                        # OHLC cannot tell whether TP/SL happened before or after an
+                        # intra-bar entry touch. Establish the fill at the end of this
+                        # completed bar and start outcome tracking from the NEXT bar.
+                        entered_dt = candle_end
                         entered_at = entered_dt.isoformat()
                         entered_boundary = entered_dt
-                        # Same-bar OHLC cannot establish ordering after a mid-bar fill.
-                        # Only a close-only boundary view is allowed.
-                        same_bar = _bar_resolution(safe_candle, direction, stop, tp)
-                        if same_bar:
-                            resolved = (same_bar[0], same_bar[1], candle_end)
-                            break
                     continue
                 if state == "open":
                     bar = _bar_resolution(safe_candle, direction, stop, tp)

@@ -89,7 +89,7 @@ def save_observation(signal: Mapping[str, Any]) -> None:
         "probability": signal.get("probability"), "confidence": signal.get("confidence"),
     }
     fingerprint = str(signal.get("fingerprint") or f"{signal.get('symbol','UNKNOWN')}:{_now()}")
-    regime = signal.get("marketRegime") or classify_regime(features) if features else "unknown"
+    regime = signal.get("marketRegime") or (classify_regime(features) if features else "unknown")
     with connect() as conn:
         conn.execute("""
         INSERT INTO feature_store(fingerprint,symbol,observed_at,market_regime,features_json,context_json,prediction_json,real_result_json)
@@ -162,9 +162,13 @@ def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
     ensemble = _clamp(0.55 * specialist_ensemble + 0.45 * weighted_score)
 
     try:
-        probability01, calibration_uncertainty = calibrated_probability(ensemble, regime, model)
-        probability = float(probability01) * 100.0
+        # V14 calibration bins were fitted on the V14 weighted score. Never feed
+        # the differently-distributed Learning MAX ensemble into those bins.
+        probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model)
+        calibrated_v14_probability = float(probability01) * 100.0
+        probability = _clamp(0.55 * specialist_ensemble + 0.45 * calibrated_v14_probability)
     except Exception:
+        calibrated_v14_probability = weighted_score
         probability = ensemble
         calibration_uncertainty = 0.25
     disagreement = pstdev(values) if len(values) > 1 else 0.0
@@ -176,6 +180,7 @@ def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
         "specialists": {k: round(v, 2) for k, v in scores.items()},
         "specialist_ensemble": round(specialist_ensemble, 2),
         "weighted_v14_score": round(weighted_score, 2),
+        "calibrated_v14_probability": round(_clamp(calibrated_v14_probability), 2),
         "ensemble_score": round(ensemble, 2), "probability": round(_clamp(probability), 2),
         "confidence": round(confidence, 2), "uncertainty": round(uncertainty, 2),
         "selected_features": list(selected), "feature_importance": feature_importance(features),

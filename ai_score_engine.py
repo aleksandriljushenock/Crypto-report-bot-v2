@@ -89,6 +89,21 @@ def get_model_config() -> Dict[str, Any]:
     try:
         model = active_model(DEFAULT_WEIGHTS)
         if model.get("version") != "12.0-base":
+            try:
+                from adaptive_cloud_learning import load_cloud_overlay
+                from learning_engine_v14 import _apply_operator_weight_policy
+                learned = dict(model.get("learned_weights") or model.get("weights") or DEFAULT_WEIGHTS)
+                cloud_weights = load_cloud_overlay(learned)
+                effective = _apply_operator_weight_policy(cloud_weights, DEFAULT_WEIGHTS)
+                model = dict(model)
+                model["weights"] = effective
+                cfg = dict(model.get("config") or {})
+                cfg["global_weights"] = effective
+                cfg["cloud_overlay_weights"] = cloud_weights
+                model["config"] = cfg
+                model["adaptiveCloud"] = cloud_weights != learned
+            except Exception:
+                pass
             return model
     except Exception:
         model = {"version": "12.0-base", "weights": dict(DEFAULT_WEIGHTS), "rules": [], "metrics": {}}

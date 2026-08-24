@@ -75,19 +75,22 @@ def test_update_positions_ignores_pre_open_candle_extremes(monkeypatch):
     assert closed == [(95.0, 'SL')]
 
 
-def test_live_price_beyond_liquidation_heals_stale_position(monkeypatch):
+def test_live_price_is_not_used_when_execution_history_is_missing(monkeypatch):
     import paper_trading as pt
     position = _open_position()
     monkeypatch.setattr(pt, '_pending_positions', lambda: [])
     monkeypatch.setattr(pt, '_open_positions', lambda: [position])
     monkeypatch.setattr(pt, 'create_trade_market_client', lambda: object())
-    monkeypatch.setattr(pt, '_current_market_price', lambda client, symbol: 89.0)
+    ticker=[]
+    monkeypatch.setattr(pt, '_current_market_price', lambda client, symbol: ticker.append(True) or 89.0)
     monkeypatch.setattr(pt, '_execution_klines', lambda client, symbol: ([], '1m', 1))
+    monkeypatch.setattr(pt.paper_repo, 'update_position', lambda *a, **k: {'id':'p1'})
     closed=[]
     monkeypatch.setattr(pt, '_close_position', lambda pos, price, reason, when=None: closed.append((price,reason)) or {'close_reason':reason,'net_pnl':-10})
     out=pt.update_positions()
-    assert out['liquidated'] == 1
-    assert closed == [(90.0, 'LIQUIDATION')]
+    assert out['liquidated'] == 0
+    assert ticker == []
+    assert closed == []
 
 
 def test_liquidation_loss_is_capped_to_isolated_margin(monkeypatch):

@@ -261,6 +261,29 @@ def _iter_execution_candles(rows: list[Any], *, since: datetime, interval_minute
     out.sort(key=lambda x: x[0])
     return out
 
+
+def _covered_until(rows: list[Any], *, interval_minutes: int, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Latest fully observed candle end. Never advance a Paper cursor past data actually returned."""
+    now = now or _now()
+    covered = None
+    for item in rows or []:
+        try:
+            start = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
+            end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc) if len(item) > 6 and item[6] is not None else start + timedelta(minutes=interval_minutes)
+            if end <= now and (covered is None or end > covered):
+                covered = end
+        except Exception:
+            continue
+    return covered
+
+def _next_paper_cursor(previous: datetime, rows: list[Any], *, interval_minutes: int, ceiling: Optional[datetime] = None) -> datetime:
+    covered = _covered_until(rows, interval_minutes=interval_minutes)
+    if covered is None:
+        return previous
+    if ceiling is not None:
+        covered = min(covered, ceiling)
+    return max(previous, covered)
+
 def _liquidation_hit(side: str, liquidation: float, *, open_price: float, high: float, low: float) -> tuple[bool, bool]:
     if liquidation <= 0:
         return False, False
@@ -538,6 +561,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             since = _parse_ts(position.get("last_checked_at") or position.get("created_at"))
             pending_until = _parse_ts(position.get("pending_until")) if position.get("pending_until") else None
             rows, _, interval_minutes = _execution_klines(client, position["symbol"])
+            covered_until = _next_paper_cursor(since, rows, interval_minutes=interval_minutes, ceiling=pending_until)
             touched = False
             touch_time = None
             for ts, open_price, high, low, close, partial_start, partial_end in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until):
@@ -565,17 +589,17 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     if notifier:
                         notifier(format_open_message(result))
                     continue
-            if pending_until and _now() >= pending_until:
+            if pending_until and _now() >= pending_until and covered_until >= pending_until:
                 paper_repo.update_position(position.get("id"), {
                     "status": "cancelled", "close_reason": "ENTRY_EXPIRED", "pending_reason": "price_never_reached_entry",
-                    "closed_at": _iso(), "last_checked_at": _iso(), "updated_at": _iso(),
+                    "closed_at": _iso(), "last_checked_at": covered_until.isoformat(), "updated_at": _iso(),
                 }, expected_status="pending_entry")
                 emit("PAPER_ENTRY_CANCELLED", symbol=position.get("symbol"), fingerprint=position.get("fingerprint"), reason="ENTRY_EXPIRED")
                 pending_cancelled += 1
                 if notifier:
                     notifier(format_missed_message(position, "ENTRY_EXPIRED"))
             else:
-                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()}, expected_status="pending_entry")
+                paper_repo.update_position(position.get("id"), {"last_checked_at": covered_until.isoformat(), "updated_at": _iso()}, expected_status="pending_entry")
         except Exception as exc:
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             pending_errors.append(text)
@@ -595,6 +619,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             provider = str(position.get("execution_provider") or "").strip()
             position_client = create_trade_market_client(providers=[provider]) if provider else client
             rows, _, interval_minutes = _execution_klines(position_client, position["symbol"])
+            covered_until = _next_paper_cursor(last_checked, rows, interval_minutes=interval_minutes, ceiling=max_hold)
             if not provider:
                 provider = str(getattr(position_client, "last_provider", None) or "").strip()
                 if provider:
@@ -633,7 +658,9 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     reason, exit_price, exit_time = "TP1", tp, ts.isoformat(); break
 
             market = 0.0
-            if reason is None and _now() < max_hold:
+            now_dt = _now()
+            history_fresh = covered_until >= now_dt - timedelta(minutes=max(2, interval_minutes * 2))
+            if reason is None and now_dt < max_hold and history_fresh:
                 try:
                     market = _current_market_price(position_client, position["symbol"])
                 except Exception:
@@ -645,9 +672,9 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 elif market > 0 and (market >= tp if side == "LONG" else market <= tp):
                     reason, exit_price, exit_time = "TP1", tp, _iso()
 
-            if reason is None and _now() >= max_hold:
-                # TIME_EXIT is priced at/just before the deadline, never at a later
-                # current price. The last legal candle close is the conservative proxy.
+            if reason is None and now_dt >= max_hold and covered_until >= max_hold:
+                # TIME_EXIT is allowed only once market history covers the hold deadline.
+                # This prevents a stale API response from silently skipping unseen TP/SL events.
                 legal = [c for c in candles if c[0] < max_hold]
                 exit_price = legal[-1][4] if legal else float(position.get("entry_price") or 0)
                 reason, exit_time = "TIME_EXIT", max_hold.isoformat()
@@ -660,7 +687,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     if notifier:
                         notifier(format_close_message(trade))
             else:
-                paper_repo.update_position(position.get("id"), {"last_checked_at": _iso(), "updated_at": _iso()}, expected_status="open")
+                paper_repo.update_position(position.get("id"), {"last_checked_at": covered_until.isoformat(), "updated_at": _iso()}, expected_status="open")
         except Exception as exc:
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             errors.append(text)

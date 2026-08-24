@@ -297,8 +297,9 @@ class AutomationSupervisor:
             if not auto_learning_enabled():
                 self.logger("Self Learning Engine: runtime auto-learning disabled")
                 return {"status": "disabled-by-runtime-setting"}
-        except Exception:
-            pass
+        except Exception as exc:
+            self.logger(f"Self Learning Engine: model-control unavailable, fail-closed: {exc}")
+            return {"status": "disabled-control-error"}
         return retrain()
 
     def _run_learning_checkpoint(self):
@@ -339,8 +340,9 @@ class AutomationSupervisor:
         try:
             from model_control import auto_learning_enabled
             learning_enabled = auto_learning_enabled()
-        except Exception:
-            learning_enabled = True
+        except Exception as exc:
+            self.logger(f"AI Optimizer: model-control unavailable, adaptive training fail-closed: {exc}")
+            learning_enabled = False
         if learning_enabled:
             model = train_candidate(trigger='scheduled')
         else:

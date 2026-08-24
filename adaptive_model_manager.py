@@ -76,7 +76,8 @@ def _extract(row: Dict[str, Any]) -> Tuple[List[float], int]:
 
 def _load_rows(limit: int) -> List[Dict[str, Any]]:
     try:
-        return load_valid_closed_positions(limit, ascending=True)
+        rows = load_valid_closed_positions(limit, ascending=False)
+        return list(reversed(rows))
     except Exception:
         log.exception("Adaptive model could not load valid filled paper positions")
         return []
@@ -145,8 +146,9 @@ def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
             from model_control import auto_learning_enabled
             if not auto_learning_enabled():
                 return {"status": "disabled-by-runtime-setting", "trigger": trigger}
-        except Exception:
-            pass
+        except Exception as exc:
+            log.error("Auto-learning control unavailable; scheduled adaptive training blocked: %s", exc)
+            return {"status": "disabled-control-error", "trigger": trigger}
     emit("MODEL_TRAIN_STARTED", trigger=trigger)
     rows = _load_rows(_int("ADAPTIVE_MODEL_MAX_TRADES", 1500))
     min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 40)
@@ -161,8 +163,30 @@ def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
     weights, bias = _train(zx, ys)
     model = {"features": list(FEATURES), "means": means, "stds": stds, "weights": weights, "bias": bias}
     metrics = _metrics(val_rows, model)
-    improvement = metrics["baseline_log_loss"] - metrics["log_loss"]
     min_improvement = _float("ADAPTIVE_MODEL_MIN_LOGLOSS_IMPROVEMENT", 0.01)
+    benchmark_name = "signal_baseline"
+    benchmark_log_loss = metrics["baseline_log_loss"]
+    champion_version = None
+    try:
+        champions = (_client().table("adaptive_model_versions")
+                     .select("version,model_json,metrics").eq("status", "champion")
+                     .order("activated_at", desc=True).limit(1).execute().data or [])
+        if champions and isinstance(champions[0].get("model_json"), dict):
+            champion_version = champions[0].get("version")
+            champion_metrics = _metrics(val_rows, champions[0]["model_json"])
+            benchmark_log_loss = champion_metrics["log_loss"]
+            benchmark_name = "champion"
+            metrics["champion_log_loss"] = champion_metrics["log_loss"]
+            metrics["champion_brier"] = champion_metrics["brier"]
+    except Exception:
+        log.exception("Adaptive champion comparison unavailable; candidate will not replace an existing champion blindly")
+        # If a champion lookup fails, fail closed: store candidate only.
+        benchmark_log_loss = float("-inf")
+        benchmark_name = "champion_lookup_error"
+    improvement = benchmark_log_loss - metrics["log_loss"]
+    metrics["promotion_benchmark"] = benchmark_name
+    metrics["benchmark_log_loss"] = benchmark_log_loss if math.isfinite(benchmark_log_loss) else None
+    metrics["champion_version"] = champion_version
     promote = metrics["samples"] >= min_validation and improvement >= min_improvement
     version = datetime.now(timezone.utc).strftime("paper-logit-%Y%m%d-%H%M%S")
     row = {

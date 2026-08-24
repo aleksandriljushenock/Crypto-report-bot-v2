@@ -140,7 +140,7 @@ class CloudLearningStore:
                 self.client.table(self.TABLE_NAME)
                 .select("*")
                 .eq("training_status", "pending")
-                .order("signal_created_at", desc=False)
+                .order("signal_created_at", desc=True)
                 .limit(max(1, int(limit)))
             )
             if due_only:
@@ -197,11 +197,13 @@ class CloudLearningStore:
                 self.client.table(self.TABLE_NAME)
                 .select("*")
                 .not_.is_("real_result", "null")
-                .order("signal_created_at", desc=False)
+                .order("signal_created_at", desc=True)
                 .limit(max(1, int(limit)))
                 .execute()
             )
-            return list(response.data or [])
+            rows = list(response.data or [])
+            rows.reverse()  # newest LIMIT, chronological order for training
+            return rows
         except Exception:
             logger.exception("Ошибка загрузки resolved learning observations")
             return []

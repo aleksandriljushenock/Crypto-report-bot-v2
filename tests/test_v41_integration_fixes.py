@@ -22,7 +22,8 @@ def test_learning_max2_uses_calibrated_tuple_and_active_model(monkeypatch):
         return 0.77, 0.11
     monkeypatch.setattr(lm, 'calibrated_probability', fake_cal)
     pred = lm.predict(_features(70), 'LONG_BIAS')
-    assert pred['probability'] == 77.0
+    assert pred['calibrated_v14_probability'] == 77.0
+    assert 70.0 < pred['probability'] < 77.0
     assert pred['uncertainty'] >= 11.0
     assert called['model'] is model
 
@@ -65,7 +66,7 @@ def test_background_optimizer_does_not_train_adaptive_when_auto_off(monkeypatch)
 
 def test_discovery_callback_is_wired(monkeypatch):
     import telegram_ui.router as r
-    called = []
+    sent = []
     monkeypatch.setattr(r, 'log', lambda *a, **k: None, raising=False)
     monkeypatch.setattr(r, 'is_authorized', lambda chat_id: True, raising=False)
     monkeypatch.setattr(r, 'telegram_request', lambda *a, **k: {}, raising=False)
@@ -76,10 +77,12 @@ def test_discovery_callback_is_wired(monkeypatch):
     monkeypatch.setattr(r, 'trade_scan_thread', None, raising=False)
     monkeypatch.setattr(r, 'report_thread', None, raising=False)
     monkeypatch.setattr(r, 'new_scan_thread', None, raising=False)
-    monkeypatch.setattr(r, 'start_early_discovery', lambda chat_id: called.append(chat_id), raising=False)
+    monkeypatch.setattr(r, 'send_message', lambda chat_id, text, **kw: sent.append((chat_id, text, kw)), raising=False)
     update = {'callback_query': {'id': '1', 'data': 'menu_discovery', 'message': {'chat': {'id': 42}}}}
     r._process_update(update)
-    assert called == [42]
+    assert sent and sent[0][0] == 42
+    assert 'DISCOVERY' in sent[0][1]
+    assert sent[0][2].get('reply_markup')
 
 
 def test_profit_profile_builder_creates_multiple_recent_windows():

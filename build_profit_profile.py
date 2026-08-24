@@ -181,13 +181,23 @@ def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int] = DEFAULT_W
 
 
 
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    data = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
 def rebuild_from_supabase(output: str | Path | None = None, limit: int | None = None, windows: Iterable[int] = DEFAULT_WINDOWS) -> Dict[str, Any]:
     """Rebuild the runtime profile from durable Supabase observations."""
     max_rows = int(limit or os.getenv('PROFILE_REBUILD_MAX_ROWS', '10000'))
     profile = build(_load_supabase(max(100, max_rows)), windows)
     out = Path(output or os.getenv('PROFIT_PROFILE_PATH', 'data/profit_profile_v2.json'))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(profile, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    _atomic_write_json(out, profile)
     try:
         import ai_hedge_fund_engine
         ai_hedge_fund_engine._CACHE = None
@@ -206,8 +216,7 @@ def main() -> None:
     windows = [int(x.strip()) for x in args.windows.split(',') if x.strip()]
     profile = build(rows_raw, windows)
     out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(profile, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    _atomic_write_json(out, profile)
     print(f"{out} samples={profile['overall']['samples']} windows={profile['recent_window_options']}")
 
 

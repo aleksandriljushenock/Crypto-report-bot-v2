@@ -187,7 +187,8 @@ def _process_update(update):
             return
 
         if callback_data == "menu_discovery":
-            start_early_discovery(chat_id)
+            from telegram_ui.keyboards import discovery_keyboard
+            send_message(chat_id, "🔭 <b>DISCOVERY</b>\nEarly Discovery, Listing Hunter и управление базой листингов.", reply_markup=discovery_keyboard())
             return
 
         if callback_data == "menu_market":

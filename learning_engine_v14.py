@@ -655,12 +655,22 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
         return result
 
     current = active_model(defaults)
-    seed = int(hashlib.sha256((str(len(samples)) + samples[-1]["fingerprint"]).encode()).hexdigest()[:8], 16)
-    global_weights = optimize_weights(samples, defaults, seed)
+    # Split BEFORE any optimization.  The final chronological holdout must remain
+    # completely unseen by global and specialist optimizers.
+    holdout_fraction = min(0.40, max(0.10, float(_runtime_env("LEARNING_HOLDOUT_FRACTION", "0.18"))))
+    min_holdout = max(20, int(_runtime_env("LEARNING_MIN_HOLDOUT_SAMPLES", "30")))
+    holdout_size = max(min_holdout, int(len(samples) * holdout_fraction))
+    holdout_size = min(max(1, len(samples) - 1), holdout_size)
+    split = len(samples) - holdout_size
+    train_samples = samples[:split]
+    holdout = samples[split:]
+    seed_source = train_samples[-1]["fingerprint"] if train_samples else samples[0]["fingerprint"]
+    seed = int(hashlib.sha256((str(len(train_samples)) + seed_source).encode()).hexdigest()[:8], 16)
+    global_weights = optimize_weights(train_samples, defaults, seed)
     specialists: Dict[str, Dict[str, float]] = {}
     specialist_min = max(50, int(_runtime_env("LEARNING_SPECIALIST_MIN_SAMPLES", "80")))
-    for regime in sorted({s["regime"] for s in samples}):
-        subset = [s for s in samples if s["regime"] == regime]
+    for regime in sorted({s["regime"] for s in train_samples}):
+        subset = [s for s in train_samples if s["regime"] == regime]
         if len(subset) >= specialist_min:
             specialists[regime] = optimize_weights(subset, global_weights, seed + len(specialists) + 1)
         for direction in ("LONG", "SHORT"):
@@ -668,14 +678,11 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
             if len(directional) >= specialist_min:
                 specialists[f"{regime}:{direction}"] = optimize_weights(directional, specialists.get(regime, global_weights), seed + len(specialists) + 11)
 
-    # Final chronological holdout remains unseen by optimizer.
-    split = max(1, min(len(samples) - 1, int(len(samples) * 0.82)))
-    holdout = samples[split:]
     base_metrics = evaluate(holdout, current.get("weights") or defaults)
     candidate_metrics = evaluate(holdout, global_weights)
     drift = _drift(samples)
     promoted = _candidate_better(base_metrics, candidate_metrics, drift)
-    rules = _derive_rules(samples[:split])
+    rules = _derive_rules(train_samples)
     calibration = {"all": _calibration(holdout, global_weights)}
     for regime in sorted({s["regime"] for s in holdout}):
         subset = [s for s in holdout if s["regime"] == regime]
@@ -684,7 +691,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
 
     config = {"global_weights": global_weights, "specialists": specialists,
               "calibration": calibration, "rules": rules, "drift": drift,
-              "training": {"samples": len(samples), "holdout": len(holdout), "seed": seed}}
+              "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed}}
     version = "14." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     model_status = "active" if promoted else "challenger"
     metrics = {"baseline": base_metrics, "candidate": candidate_metrics, "promoted": promoted,

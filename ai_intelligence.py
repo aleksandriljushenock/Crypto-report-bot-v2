@@ -53,7 +53,7 @@ def rank_signals(signals):
     ranked = []
     rejected = []
     base_min_quality = float(os.getenv("HEDGE_MIN_QUALITY", "70"))
-    base_min_ev = float(os.getenv("HEDGE_MIN_EV_PCT", "0.20"))
+    base_min_ev = float(os.getenv("HEDGE_MIN_EV_PCT", "2.0"))
     quality_count = 0
     ev_count = 0
     for item in prepared:
