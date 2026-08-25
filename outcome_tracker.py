@@ -4,11 +4,11 @@ from core.sqlite_utils import connect as safe_sqlite_connect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import requests
+from trade_market_client import create_trade_market_client
+from historical_prices import historical_price_at
 
 
 DATABASE_PATH = Path("data") / "alpha_outcomes.db"
-COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 HORIZONS = {"1h": 1, "24h": 24, "7d": 24 * 7, "30d": 24 * 30}
 
 
@@ -30,15 +30,15 @@ def _connect():
 
 
 def register_prediction(project_key, coin_id, symbol, score, components, entry_price):
+    now=datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
+        conn.execute("DELETE FROM outcomes WHERE project_key=?", (project_key,))
         conn.execute(
             """INSERT INTO predictions(project_key,coin_id,symbol,score,components_json,created_at,entry_price)
             VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_key) DO UPDATE SET
-            coin_id=COALESCE(excluded.coin_id,predictions.coin_id), symbol=excluded.symbol,
-            score=excluded.score, components_json=excluded.components_json,
-            entry_price=COALESCE(predictions.entry_price,excluded.entry_price)""",
-            (project_key, coin_id, symbol, score, json.dumps(components, ensure_ascii=False),
-             datetime.now(timezone.utc).isoformat(), entry_price),
+            coin_id=excluded.coin_id, symbol=excluded.symbol, score=excluded.score,
+            components_json=excluded.components_json, created_at=excluded.created_at, entry_price=excluded.entry_price""",
+            (project_key, coin_id, symbol, score, json.dumps(components, ensure_ascii=False), now, entry_price),
         )
 
 
@@ -57,13 +57,13 @@ def update_due_outcomes(timeout=20):
                 if exists:
                     continue
                 try:
-                    response = requests.get(COINGECKO_URL, params={"ids": row["coin_id"], "vs_currencies": "usd"}, timeout=(6, timeout))
-                    response.raise_for_status()
-                    price = response.json().get(row["coin_id"], {}).get("usd")
+                    target=created+timedelta(hours=hours)
+                    client=create_trade_market_client()
+                    price=historical_price_at(client,row["symbol"],target,now=now)
                     if price is None:
-                        continue
-                    ret = (float(price) - float(row["entry_price"])) / float(row["entry_price"]) * 100
-                    conn.execute("INSERT INTO outcomes VALUES(?,?,?,?,?)", (row["project_key"], horizon, now.isoformat(), price, ret))
+                        raise RuntimeError("historical price unavailable")
+                    ret=(float(price)-float(row["entry_price"]))/float(row["entry_price"])*100
+                    conn.execute("INSERT INTO outcomes VALUES(?,?,?,?,?)",(row["project_key"],horizon,target.isoformat(),price,ret))
                     updated += 1
                 except Exception as exc:
                     errors.append(f"{row['symbol']} {horizon}: {exc}")

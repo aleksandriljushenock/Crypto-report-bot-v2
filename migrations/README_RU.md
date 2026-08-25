@@ -19,3 +19,6 @@
 
 ## V43
 Для V43 обязательно один раз выполнить `SUPABASE_ADAPTIVE_MODEL_V43_ATOMIC_STORE.sql` после создания таблицы `adaptive_model_versions` из V18. Миграция добавляет атомарное сохранение/promotion Adaptive Champion и закрывает RPC от public/anon/authenticated.
+
+## V45
+После V43/V44 выполнить `SUPABASE_V45_INTEGRITY.sql`. Миграция удаляет fingerprint-дубли, включает idempotent create learning observations и compare-and-promote для Adaptive Champion между несколькими инстансами.

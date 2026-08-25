@@ -229,6 +229,21 @@ def runtime_value(param_key: str) -> float:
         return float(spec.default)
 
 
+def calibration_valid() -> bool:
+    initialize()
+    with _connect() as conn:
+        row=conn.execute("SELECT value_json FROM model_runtime_settings WHERE key='calibration_valid'").fetchone()
+    if not row:
+        return True
+    return str(_decode(row["value_json"])).strip().lower() not in {"false","0","off","no"}
+
+
+def mark_calibration_valid(valid: bool, updated_by: str = "training") -> None:
+    initialize()
+    with _connect() as conn:
+        conn.execute("INSERT INTO model_runtime_settings(key,value_json,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by", ("calibration_valid", _encode(bool(valid)), _now(), updated_by))
+
+
 def runtime_env(env_name: str, fallback: Any) -> str:
     for key, spec in PARAMS.items():
         if spec.env == env_name:
@@ -408,6 +423,8 @@ def set_weight_control(feature: str, *, mode: str | None = None, base_weight: fl
             "INSERT INTO model_control_audit(action,key,old_value,new_value,updated_by,created_at) VALUES(?,?,?,?,?,?)",
             ("set_weight", feature, _encode(current), _encode({"mode": new_mode, "base_weight": new_base, "bound_pct": new_bound}), updated_by, _now()),
         )
+    with _connect() as conn:
+        conn.execute("INSERT INTO model_runtime_settings(key,value_json,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by", ("calibration_valid", "false", _now(), updated_by))
     return weight_control(feature)
 
 
@@ -437,6 +454,7 @@ def reset_weight(feature: str, updated_by: str = "telegram") -> None:
             "INSERT INTO model_control_audit(action,key,old_value,new_value,updated_by,created_at) VALUES(?,?,?,?,?,?)",
             ("reset_weight", feature, _encode(dict(old)) if old else None, "auto/default", updated_by, _now()),
         )
+        conn.execute("INSERT INTO model_runtime_settings(key,value_json,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by", ("calibration_valid", "false", _now(), updated_by))
 
 
 def apply_weight_policy(weights: Dict[str, float], defaults: Dict[str, float]) -> Dict[str, float]:
@@ -482,12 +500,21 @@ def activate_version(version: str, updated_by: str = "telegram") -> Dict[str, An
             "INSERT INTO model_control_audit(action,key,old_value,new_value,updated_by,created_at) VALUES(?,?,?,?,?,?)",
             ("activate_version", "model", old_version, version, updated_by, _now()),
         )
+    cloud_sync = True
     try:
         from learning_checkpoint_manager import save_checkpoint
         save_checkpoint(DB_PATH, reason=f"manual-activate-{version}")
+        from cloud_model_store import CloudModelStore
+        cfg=json.loads(target["config_json"] or "{}")
+        metrics=json.loads(target["metrics_json"] or "{}")
+        cloud_sync=CloudModelStore().save_model({"version":version,"config":cfg,"metrics":metrics},"active",int(target["sample_count"] or 0))
+    except Exception:
+        cloud_sync=False
+    try:
+        mark_calibration_valid(True, updated_by=updated_by)
     except Exception:
         pass
-    return {"status": "activated", "version": version, "previous": old_version}
+    return {"status": "activated", "version": version, "previous": old_version, "cloud_sync": cloud_sync}
 
 
 def recent_versions(limit: int = 6) -> list[Dict[str, Any]]:

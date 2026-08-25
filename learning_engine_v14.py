@@ -281,7 +281,7 @@ def load_samples() -> List[Dict[str, Any]]:
             continue
         target_return = max(-30.0, min(30.0, float(item["returns"][target_horizon])))
         item["return"] = target_return
-        item["win"] = 1.0 if target_return > 0 else 0.0
+        item["win"] = 1.0 if target_return > 1e-9 else (0.0 if target_return < -1e-9 else 0.5)
         item["target_horizon"] = target_horizon
         item["regime"] = classify_regime(item["factors"])
         result.append(item)
@@ -371,6 +371,29 @@ def evaluate(samples: Sequence[Dict[str, Any]], weights: Dict[str, float]) -> Di
         "high_conf_precision": round(high_conf_precision, 2),
         "utility": round(utility, 6),
     }
+
+
+def evaluate_routed_model(samples: Sequence[Dict[str, Any]], global_weights: Dict[str, float], specialists: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    if not samples:
+        return evaluate(samples, global_weights)
+    scores=[]; wins=[]; returns=[]; ws=[]
+    for sample in samples:
+        regime=str(sample.get("regime") or "unknown")
+        direction=_normalize_direction(sample.get("direction"))
+        weights=specialists.get(f"{regime}:{direction}") or specialists.get(regime) or global_weights
+        scores.append(_score(sample["factors"], weights)); wins.append(float(sample["win"])); returns.append(float(sample["return"])); ws.append(_sample_weight(sample))
+    probs=[max(0.02,min(0.98,x/100.0)) for x in scores]
+    brier=_weighted_mean([(p-w)**2 for p,w in zip(probs,wins)],ws)
+    ranked=sorted(zip(scores,samples,ws),key=lambda x:x[0],reverse=True); top=ranked[:max(1,int(len(ranked)*0.25))]
+    top_wr=_weighted_mean([float(x[1]["win"]) for x in top],[x[2] for x in top])*100
+    top_ret=_weighted_mean([float(x[1]["return"]) for x in top],[x[2] for x in top]); rank_corr=_corr(scores,returns,ws)
+    gp=sum(max(0,r)*w for r,w in zip(returns,ws)); gl=sum(abs(min(0,r))*w for r,w in zip(returns,ws)); pf=gp/gl if gl else (99.0 if gp else 0.0)
+    equity=peak=dd=0.0
+    for r in returns:
+        equity+=r; peak=max(peak,equity); dd=max(dd,peak-equity)
+    hi=[(p,w,r) for p,w,r in zip(probs,wins,returns) if p>=0.70]; hp=(sum(w for _,w,_ in hi)/len(hi)*100) if hi else 0.0
+    utility=0.28*rank_corr+0.22*(top_wr/100)+0.22*math.tanh(top_ret/4)+0.13*math.tanh((pf-1)/2)+0.08*(hp/100)-0.12*brier-0.05*math.tanh(dd/15)
+    return {"samples":len(samples),"brier":round(brier,6),"rank_corr":round(rank_corr,5),"top_win_rate":round(top_wr,2),"top_avg_return":round(top_ret,4),"overall_win_rate":round(_weighted_mean(wins,ws)*100,2),"overall_avg_return":round(_weighted_mean(returns,ws),4),"profit_factor":round(min(pf,99),4),"max_drawdown_pct_points":round(dd,4),"high_conf_samples":len(hi),"high_conf_precision":round(hp,2),"utility":round(utility,6)}
 
 
 def walk_forward_folds(samples: Sequence[Dict[str, Any]], folds: int = 4) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
@@ -496,6 +519,12 @@ def specialist_weights(model: Dict[str, Any], regime: str, direction: str) -> Di
 
 
 def calibrated_probability(score: float, regime: str, model: Dict[str, Any]) -> Tuple[float, float]:
+    try:
+        from model_control import calibration_valid as _calibration_valid
+        if not _calibration_valid():
+            return round(max(0.02, min(0.98, score / 100.0)), 4), 0.35
+    except Exception:
+        pass
     calibration = (model.get("config") or {}).get("calibration") or {}
     bins = calibration.get(regime) or calibration.get("all") or []
     for item in bins:
@@ -682,8 +711,11 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
             if len(directional) >= specialist_min:
                 specialists[f"{regime}:{direction}"] = optimize_weights(directional, specialists.get(regime, global_weights), seed + len(specialists) + 11)
 
-    base_metrics = evaluate(holdout, current.get("weights") or defaults)
-    candidate_metrics = evaluate(holdout, global_weights)
+    current_config = current.get("config") or {}
+    current_global = current.get("weights") or current_config.get("global_weights") or defaults
+    current_specialists = current_config.get("specialists") or {}
+    base_metrics = evaluate_routed_model(holdout, current_global, current_specialists)
+    candidate_metrics = evaluate_routed_model(holdout, global_weights, specialists)
     drift = _drift(samples)
     promoted = _candidate_better(base_metrics, candidate_metrics, drift)
     rules = _derive_rules(train_samples)
@@ -715,6 +747,11 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
                              (version, regime, b["score_min"], int(b["score_max"]), b["samples"], b["wins"], b["avg_return"], b["probability"]))
         conn.execute("INSERT INTO drift_snapshots(model_version,drift_score,details_json,created_at) VALUES(?,?,?,?)",
                      (version, drift["score"], json.dumps(drift), now_iso()))
+    try:
+        from model_control import mark_calibration_valid
+        mark_calibration_valid(True, updated_by="training")
+    except Exception:
+        pass
     result = {"status": "completed", "model_status": model_status,
               "samples": len(samples), "samples_total": len(samples),
               "samples_train": split, "samples_validation": len(holdout),
@@ -728,12 +765,16 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     try:
         from cloud_model_store import CloudModelStore
         store = CloudModelStore()
-        store.save_model({"version": version, "config": config, "metrics": metrics}, model_status, len(samples))
-        store.save_training_run(result)
+        model_saved = store.save_model({"version": version, "config": config, "metrics": metrics}, model_status, len(samples))
+        run_saved = store.save_training_run(result)
+        if not model_saved or not run_saved:
+            result["cloud_sync"] = "degraded"
+            result["cloud_sync_error"] = "model_registry or training_runs persistence failed"
         from learning_checkpoint_manager import save_checkpoint
         save_checkpoint(DB_PATH, reason=f"training-{model_status}-{version}")
-    except Exception:
-        pass
+    except Exception as exc:
+        result["cloud_sync"] = "degraded"
+        result["cloud_sync_error"] = f"{type(exc).__name__}: {exc}"
     return result
 
 

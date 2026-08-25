@@ -86,8 +86,9 @@ class StrategyRepository:
                 .limit(1).execute().data or [])
         return rows[0] if rows else None
 
-    def update_setup(self, setup_id: Any, values: dict[str, Any]) -> None:
+    def update_setup(self, setup_id: Any, values: dict[str, Any]) -> bool:
         _client().table("strategy_setups").update(values).eq("id", setup_id).execute()
+        return True
 
     def pending_notifications(self, max_age_hours: int = 24, limit: int = 30, strategies: list[str] | None = None) -> list[dict[str, Any]]:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()

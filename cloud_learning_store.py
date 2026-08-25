@@ -4,7 +4,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from cloud_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +51,7 @@ class CloudLearningStore:
         return result
 
     def __init__(self) -> None:
+        from cloud_client import get_supabase_client
         self.client = get_supabase_client()
 
     @staticmethod
@@ -119,6 +119,25 @@ class CloudLearningStore:
             return str(existing["id"]) if response.data else None
 
         payload.setdefault("created_at", self._now())
+        if fingerprint:
+            try:
+                response = self.client.rpc("learning_observation_upsert_v45", {"p_row": payload}).execute()
+                data = response.data
+                if isinstance(data, dict) and data.get("id"):
+                    return str(data["id"])
+                if isinstance(data, list) and data and isinstance(data[0], dict) and data[0].get("id"):
+                    return str(data[0]["id"])
+            except Exception:
+                logger.warning("V45 observation RPC failed; verifying fingerprint before fallback", exc_info=True)
+                # The server may have committed before the client observed a timeout.
+                # Never blind-insert after an ambiguous RPC failure.
+                try:
+                    verified=self.find_by_fingerprint(fingerprint)
+                    if verified and verified.get('id'):
+                        return str(verified['id'])
+                except Exception:
+                    pass
+                return None
         try:
             response = self.client.table(self.TABLE_NAME).insert(payload).execute()
         except Exception:
@@ -134,18 +153,21 @@ class CloudLearningStore:
         return str(response.data[0].get("id")) if response.data[0].get("id") else None
 
     def pending(self, limit: int = 1000, due_only: bool = False) -> list[dict[str, Any]]:
-        """Return pending observations, optionally only those whose first horizon is due."""
+        """Return oldest pending observations with pagination to prevent starvation."""
+        wanted=max(1,int(limit)); page_size=min(500,wanted); rows=[]; start=0
         try:
-            query = (
-                self.client.table(self.TABLE_NAME)
-                .select("*")
-                .eq("training_status", "pending")
-                .order("signal_created_at", desc=False)
-                .limit(max(1, int(limit)))
-            )
-            if due_only:
-                query = query.lte("resolve_after", self._now())
-            return list(query.execute().data or [])
+            while len(rows) < wanted:
+                take=min(page_size,wanted-len(rows))
+                q=(self.client.table(self.TABLE_NAME).select("*").eq("training_status","pending")
+                   .order("signal_created_at", desc=False))
+                if due_only:
+                    q=q.lte("resolve_after", self._now())
+                chunk=list(q.range(start,start+take-1).execute().data or [])
+                rows.extend(chunk)
+                if len(chunk)<take:
+                    break
+                start += len(chunk)
+            return rows
         except Exception:
             logger.exception("Ошибка загрузки pending learning observations")
             return []

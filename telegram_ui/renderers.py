@@ -565,7 +565,7 @@ def build_paper_status_text():
         f"Закрыто: <b>{stats.get('closed_count', 0)}</b> • ✅ {stats.get('wins',0)} / ❌ {stats.get('losses',0)} / ➖ {stats.get('breakeven',0)}\n"
         f"Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b> • PF <b>{pf_text}</b>\n"
         f"TP: <b>{stats.get('tp_closes',0)}</b> • SL: <b>{stats.get('sl_closes',0)}</b> • 💥 Liquidation: <b>{stats.get('liquidations',0)}</b> • Time: <b>{stats.get('time_exits',0)}</b>\n"
-        f"Открытых: <b>{len(stats.get('open_positions') or [])}</b> • ждут entry: <b>{len(stats.get('pending_positions') or [])}</b>\n"
+        f"Открытых: <b>{len(stats.get('open_positions') or [])}</b> • ждут entry: <b>{len(stats.get('pending_positions') or [])}</b> • ⚠️ unresolved: <b>{int(stats.get('execution_unresolved_count') or 0)}</b>\n"
         f"Учёт: <b>{sync_line}</b>\n\n"
         "Liquidation отслеживается по 1m/5m OHLC с перекрытием окна; если свеча достигает liquidation level, Paper использует консервативный liquidation outcome."
     )

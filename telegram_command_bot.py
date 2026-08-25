@@ -9,6 +9,7 @@ from listing_cache import get_cache_stats
 from listing_database import get_database_stats
 from pathlib import Path
 import telegram_ui.keyboards as ui_keyboards
+from telegram_update_store import processed as _update_processed, mark_processed as _mark_update_processed, next_offset as _durable_next_offset
 from telegram_ui.client import telegram_request as _tg_request, send_message as _tg_send_message, split_telegram_message as _tg_split, set_webhook as _tg_set_webhook, delete_webhook as _tg_delete_webhook, get_webhook_info as _tg_get_webhook_info
 from telegram_ui.commands import register_bot_commands
 from telegram_ui.status_view import render_dashboard
@@ -221,23 +222,18 @@ def run_report(chat_id):
 
         log(f"Запуск app.py по команде chat_id={chat_id}")
 
-        result = subprocess.run(
-            [sys.executable, str(BASE_DIR / "app.py")],
-            cwd=BASE_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30 * 60,
-        )
-
-        if result.stdout:
-            log("app.py STDOUT:")
-            for line in result.stdout.splitlines():
-                log(f"  {line}")
-
-        if result.stderr:
-            log("app.py STDERR:")
-            for line in result.stderr.splitlines():
-                log(f"  {line}")
+        import tempfile
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
+            result = subprocess.run(
+                [sys.executable, str(BASE_DIR / "app.py")], cwd=BASE_DIR,
+                stdout=output, stderr=subprocess.STDOUT, text=True, timeout=30 * 60,
+            )
+            output.seek(0)
+            tail=output.readlines()[-300:]
+            if tail:
+                log("app.py output (last 300 lines):")
+                for line in tail:
+                    log(f"  {line.rstrip()}")
 
         if result.returncode == 0:
             # Сам отчет уже отправляет telegram_sender.py.
@@ -1435,7 +1431,7 @@ def listen():
     automation_supervisor = AutomationSupervisor(send_message, log, ALLOWED_CHAT_ID)
     automation_supervisor.start()
 
-    offset = None
+    offset = _durable_next_offset()
 
     log("Telegram command bot запущен.")
     log(
@@ -1463,8 +1459,13 @@ def listen():
             )
 
             for update in updates:
-                offset = update["update_id"] + 1
+                update_id = int(update["update_id"])
+                if _update_processed(update_id):
+                    offset = update_id + 1
+                    continue
                 process_update(update)
+                _mark_update_processed(update_id)
+                offset = update_id + 1
 
         except KeyboardInterrupt:
             if trade_monitor is not None:

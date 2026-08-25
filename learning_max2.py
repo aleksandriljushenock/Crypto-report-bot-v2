@@ -104,8 +104,18 @@ def save_observation(signal: Mapping[str, Any]) -> None:
 
 def update_result(fingerprint: str, result: Mapping[str, Any]) -> None:
     initialize()
-    payload = json.dumps(dict(result), ensure_ascii=False)
+    payload = json.dumps(dict(result), ensure_ascii=False, sort_keys=True)
     with connect() as conn:
+        row=conn.execute("SELECT real_result_json FROM feature_store WHERE fingerprint=?", (fingerprint,)).fetchone()
+        if not row:
+            return
+        previous=row[0]
+        if previous:
+            try:
+                if json.dumps(json.loads(previous), ensure_ascii=False, sort_keys=True) == payload:
+                    return
+            except Exception:
+                pass
         conn.execute("UPDATE feature_store SET real_result_json=? WHERE fingerprint=?", (payload, fingerprint))
         conn.execute("INSERT INTO online_updates(fingerprint,result_json,created_at) VALUES(?,?,?)", (fingerprint, payload, _now()))
 
@@ -206,8 +216,12 @@ def explain(features: Mapping[str, Any], prediction: Mapping[str, Any]) -> Dict[
 
 
 def train_incremental() -> Dict[str, Any]:
-    """Safe online/incremental trigger; promotion remains delegated to v14 gates."""
-    return train(DEFAULT_WEIGHTS)
+    """Safe incremental trigger through the global training coordinator."""
+    from model_training_coordinator import training_slot
+    with training_slot() as acquired:
+        if not acquired:
+            return {"status": "already-running"}
+        return train(DEFAULT_WEIGHTS)
 
 
 def status() -> Dict[str, Any]:

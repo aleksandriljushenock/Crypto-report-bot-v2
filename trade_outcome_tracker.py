@@ -63,6 +63,12 @@ def initialize_trade_outcomes() -> None:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS outcome_failures (
+                fingerprint TEXT NOT NULL, horizon TEXT NOT NULL, reason TEXT NOT NULL, marked_at TEXT NOT NULL,
+                PRIMARY KEY(fingerprint,horizon)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_outcomes (
                 fingerprint TEXT NOT NULL,
                 horizon TEXT NOT NULL,
@@ -102,6 +108,32 @@ def _entry_from_signal(signal: dict[str, Any]) -> float | None:
         return None
 
 
+
+def _market_price_at_signal(signal: dict[str, Any]) -> float | None:
+    """Snapshot actual market price, never substitute a planned limit entry."""
+    for key in ("marketPriceAtSignal", "market_price_at_signal", "currentPrice", "current_price", "marketPrice", "lastPrice"):
+        try:
+            value = signal.get(key)
+            if value is not None and float(value) > 0:
+                return float(value)
+        except Exception:
+            pass
+    try:
+        created_raw=signal.get("signal_created_at") or signal.get("created_at")
+        if created_raw:
+            created=_parse_dt(created_raw)
+            if abs((utc_now()-created).total_seconds()) > 300:
+                return None
+        client = create_trade_market_client()
+        ticker = client.ticker_24h(str(signal.get("symbol") or "").upper()) or {}
+        for key in ("markPrice", "lastPrice", "price", "close"):
+            value = ticker.get(key)
+            if value is not None and float(value) > 0:
+                return float(value)
+    except Exception:
+        logger.exception("Could not snapshot market price for learning signal %s", signal.get("symbol"))
+    return None
+
 def register_trade_signal(signal: dict[str, Any], cloud_id: str | None = None, preserve_created_at: bool = False) -> bool:
     """Idempotently cache a cloud/local signal for outcome processing."""
     initialize_trade_outcomes()
@@ -121,8 +153,10 @@ def register_trade_signal(signal: dict[str, Any], cloud_id: str | None = None, p
         with get_connection() as conn:
             duplicate = conn.execute(
                 "SELECT 1 FROM tracked_signals WHERE symbol=? AND direction=? "
-                "AND COALESCE(timeframe,'unknown')=? AND created_at>=? LIMIT 1",
-                (symbol, direction, timeframe, cutoff),
+                "AND COALESCE(timeframe,'unknown')=? AND created_at>=? "
+                "AND ABS(COALESCE(entry_price,0)-?) <= MAX(0.00000001, ABS(?) * 0.001) "
+                "AND COALESCE(json_extract(payload_json,'$.setup'),'')=COALESCE(?, '') LIMIT 1",
+                (symbol, direction, timeframe, cutoff, entry, entry, signal.get('setup')),
             ).fetchone()
             if duplicate:
                 return False
@@ -146,7 +180,7 @@ def register_trade_signal(signal: dict[str, Any], cloud_id: str | None = None, p
     return True
 
 
-def sync_pending_from_cloud(limit: int = 2000) -> int:
+def sync_pending_from_cloud(limit: int = 10000) -> int:
     """Rebuild the ephemeral local tracker from durable Supabase rows."""
     try:
         from cloud_learning_store import CloudLearningStore
@@ -281,7 +315,27 @@ def _sync_row_to_cloud(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
         store = CloudLearningStore()
         if row["cloud_id"]:
             return store.update_by_id(str(row["cloud_id"]), payload)
-        return store.update_outcome(str(row["fingerprint"]), payload)
+        ok = store.update_outcome(str(row["fingerprint"]), payload)
+        if not ok:
+            try:
+                original = json.loads(row["payload_json"] or "{}")
+                original_payload = {
+                    "symbol": row["symbol"], "timeframe": row["timeframe"],
+                    "signal_type": original.get("signal_type") or "trade",
+                    "signal_direction": row["direction"], "signal_score": row["score"],
+                    "signal_confidence": row["probability"], "entry_price": row["entry_price"],
+                    "target_price": row["tp1"], "stop_loss": row["stop"],
+                    "market_price_at_signal": original.get("marketPriceAtSignal") or original.get("market_price_at_signal") or original.get("currentPrice") or original.get("current_price"), "features": original,
+                    "metadata": {"fingerprint": row["fingerprint"], "recovered_from_local": True},
+                    "signal_created_at": row["created_at"], "training_status": "pending",
+                }
+                new_id = store.save(original_payload)
+                if new_id:
+                    conn.execute("UPDATE tracked_signals SET cloud_id=? WHERE fingerprint=?", (str(new_id), row["fingerprint"]))
+                    return store.update_by_id(str(new_id), payload)
+            except Exception:
+                logger.exception("Cloud observation recreation failed: %s", row["fingerprint"])
+        return ok
     except Exception:
         logger.exception("Cloud outcome sync failed: %s", row["fingerprint"])
         return False
@@ -314,11 +368,15 @@ def update_trade_outcomes() -> dict[str, Any]:
                 if conn.execute(
                     "SELECT 1 FROM trade_outcomes WHERE fingerprint=? AND horizon=?",
                     (row["fingerprint"], horizon),
+                ).fetchone() or conn.execute(
+                    "SELECT 1 FROM outcome_failures WHERE fingerprint=? AND horizon=?",
+                    (row["fingerprint"], horizon),
                 ).fetchone():
                     continue
                 try:
                     target_time = created + timedelta(hours=hours)
                     if (now - target_time) > timedelta(days=recovery_days):
+                        conn.execute("INSERT OR REPLACE INTO outcome_failures VALUES (?,?,?,?)", (row['fingerprint'],horizon,'unrecoverable-history',now.isoformat()))
                         errors.append(f"fingerprint={row['fingerprint']}, horizon={horizon}: unrecoverable-history")
                         continue
                     age_minutes = max(0.0, (now - target_time).total_seconds() / 60.0)
@@ -345,7 +403,7 @@ def update_trade_outcomes() -> dict[str, Any]:
                         raise ValueError(f"unsupported direction: {direction!r}")
                     conn.execute(
                         "INSERT OR IGNORE INTO trade_outcomes VALUES (?,?,?,?,?,?)",
-                        (row["fingerprint"], horizon, now.isoformat(), price, signed_ret, _label(row, price)),
+                        (row["fingerprint"], horizon, target_time.isoformat(), price, signed_ret, _label(row, price)),
                     )
                     updated += 1
                     row_changed = True
@@ -359,6 +417,20 @@ def update_trade_outcomes() -> dict[str, Any]:
             ).fetchone():
                 if _sync_row_to_cloud(conn, row):
                     cloud_synced += 1
+                try:
+                    result_payload = _cloud_result_payload(conn, row)
+                    if result_payload and result_payload.get("real_result"):
+                        from learning_max2 import update_result as _learning_max_update_result
+                        _learning_max_update_result(str(row["fingerprint"]), result_payload["real_result"])
+                        try:
+                            original=json.loads(row["payload_json"] or "{}")
+                            original_fp=str(original.get("signalFingerprint") or original.get("fingerprint") or "")
+                            if original_fp and original_fp != str(row["fingerprint"]):
+                                _learning_max_update_result(original_fp, result_payload["real_result"])
+                        except Exception:
+                            pass
+                except Exception:
+                    logger.debug("Learning MAX result sync failed for %s", row["fingerprint"], exc_info=True)
         cutoff = (now - timedelta(days=retention_days)).isoformat()
         conn.execute("DELETE FROM tracked_signals WHERE created_at < ? AND fingerprint IN (SELECT fingerprint FROM trade_outcomes WHERE horizon=?)", (cutoff, OUTCOME_COMPLETE_HORIZON))
     return {"imported": imported, "updated": updated, "cloud_synced": cloud_synced, "errors": errors}
@@ -396,6 +468,10 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
         if direction in {"LONG", "LONG_BIAS", "BUY"}
         else chronos.get("probabilityDown")
     )
+    market_price = _market_price_at_signal(signal)
+    planned_entry = _entry_from_signal(signal)
+    if market_price is None:
+        logger.warning("Learning signal saved without outcome baseline because actual market price is unavailable: %s", signal.get("symbol"))
     payload = {
         "symbol": signal.get("symbol"),
         "timeframe": signal.get("timeframe") or signal.get("interval") or "unknown",
@@ -403,13 +479,14 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
         "signal_direction": signal.get("direction"),
         "signal_score": signal.get("score"),
         "signal_confidence": signal.get("probability"),
-        "entry_price": _entry_from_signal(signal),
+        "entry_price": market_price,
         "target_price": signal.get("tp1"),
         "stop_loss": signal.get("stop"),
-        "market_price_at_signal": _entry_from_signal(signal),
+        "market_price_at_signal": market_price,
         "features": signal,
         "metadata": {
             "source": source,
+            "planned_entry_price": planned_entry,
             "fingerprint": fingerprint,
             "signal_fingerprint": signal_fingerprint,
             "ai_score": signal.get("aiScore"),
@@ -454,13 +531,16 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
     except Exception:
         logger.exception("Durable signal save failed: %s", fingerprint)
         cloud_id = None
-    tracked_signal = dict(signal)
-    tracked_signal["fingerprint"] = fingerprint
-    tracked_signal["signalFingerprint"] = signal_fingerprint
-    tracked_signal["signal_created_at"] = created_at
-    if cloud_id:
-        register_trade_signal(tracked_signal, cloud_id=cloud_id)
-    else:
-        # Keep a local retryable cache, but return None so callers/logs know cloud failed.
-        register_trade_signal(tracked_signal)
+    if market_price is not None:
+        tracked_signal = dict(signal)
+        tracked_signal["entryPrice"] = market_price
+        tracked_signal["marketPriceAtSignal"] = market_price
+        tracked_signal["plannedEntryPrice"] = planned_entry
+        tracked_signal["fingerprint"] = fingerprint
+        tracked_signal["signalFingerprint"] = signal_fingerprint
+        tracked_signal["signal_created_at"] = created_at
+        if cloud_id:
+            register_trade_signal(tracked_signal, cloud_id=cloud_id)
+        else:
+            register_trade_signal(tracked_signal)
     return cloud_id

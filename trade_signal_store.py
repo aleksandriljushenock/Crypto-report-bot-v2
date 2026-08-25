@@ -109,9 +109,9 @@ def signal_recently_sent(fingerprint, cooldown_hours=6):
     with get_connection() as conn:
         row = conn.execute('''
             SELECT id FROM trade_signals
-            WHERE fingerprint = ? AND sent_at IS NOT NULL AND sent_at >= ?
+            WHERE fingerprint = ? AND ((sent_at IS NOT NULL AND sent_at >= ?) OR (sent_at IS NULL AND created_at >= ?))
             LIMIT 1
-        ''', (fingerprint, cutoff)).fetchone()
+        ''', (fingerprint, cutoff, (utc_now() - timedelta(minutes=10)).isoformat())).fetchone()
     return row is not None
 
 

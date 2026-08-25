@@ -9,7 +9,11 @@ from ai_score_engine import DEFAULT_WEIGHTS
 from learning_engine_v14 import train as train_v14
 
 def train():
-    return train_v14(DEFAULT_WEIGHTS)
+    from model_training_coordinator import training_slot
+    with training_slot() as acquired:
+        if not acquired:
+            return {"status": "already-running"}
+        return train_v14(DEFAULT_WEIGHTS)
 
 def main():
     print(json.dumps(train(), ensure_ascii=False, default=str))

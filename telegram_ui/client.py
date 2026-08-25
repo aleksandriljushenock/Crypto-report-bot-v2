@@ -28,31 +28,39 @@ def telegram_request(method, payload=None, timeout=40):
 
 
 def split_telegram_message(text, limit=TELEGRAM_MESSAGE_LIMIT):
-    text = str(text or "").strip()
+    """Split Telegram HTML without cutting tags/entities; balance simple formatting tags."""
+    text=str(text or "").strip()
     if not text:
         return []
-    if len(text) <= limit:
-        return [text]
-    parts, current, current_length = [], [], 0
-    for line in text.splitlines():
-        line_with_break = line + "\n"
-        if len(line_with_break) > limit:
-            if current:
-                parts.append("".join(current).rstrip())
-                current, current_length = [], 0
-            for start in range(0, len(line_with_break), limit):
-                chunk = line_with_break[start:start + limit].rstrip()
-                if chunk:
-                    parts.append(chunk)
-            continue
-        if current_length + len(line_with_break) > limit:
-            parts.append("".join(current).rstrip())
-            current, current_length = [], 0
-        current.append(line_with_break)
-        current_length += len(line_with_break)
-    if current:
-        parts.append("".join(current).rstrip())
-    return [part for part in parts if part]
+    token_re=re.compile(r"(<[^>]+>|&[A-Za-z0-9#]+;|\n|[^<&\n]+|[<&])")
+    tokens=token_re.findall(text)
+    parts=[]; cur=""; stack=[]
+    tag_re=re.compile(r"^<(/?)(b|strong|i|em|u|s|code|pre)(?:\s[^>]*)?>$",re.I)
+    def closing(): return "".join(f"</{t}>" for t in reversed(stack))
+    def opening(): return "".join(f"<{t}>" for t in stack)
+    for tok in tokens:
+        m=tag_re.match(tok)
+        projected=len(cur)+len(tok)+len(closing())
+        if cur and projected>limit:
+            parts.append((cur+closing()).strip()); cur=opening()
+        max_piece=max(1,limit-len(closing())-len(opening()))
+        if len(tok)>max_piece:
+            for i in range(0,len(tok),max_piece):
+                piece=tok[i:i+max_piece]
+                if cur and len(cur)+len(piece)+len(closing())>limit:
+                    parts.append((cur+closing()).strip()); cur=opening()
+                cur+=piece
+        else:
+            cur+=tok
+        if m:
+            is_close=bool(m.group(1)); tag=m.group(2).lower()
+            if is_close:
+                if tag in stack:
+                    idx=len(stack)-1-stack[::-1].index(tag); stack.pop(idx)
+            else:
+                stack.append(tag)
+    if cur.strip(): parts.append((cur+closing()).strip())
+    return [p for p in parts if p]
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):

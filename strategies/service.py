@@ -155,7 +155,10 @@ def update_outcomes(max_rows: int = 5000, strategy: str = DEFAULT_STRATEGY) -> d
                 if values:
                     old_state = setup.get("state") or "waiting_entry"
                     new_state = values.get("state", old_state)
-                    _safe_repo(lambda s=setup, v=values: repository.update_setup(s["id"], v), None)
+                    persisted = _safe_repo(lambda s=setup, v=values: repository.update_setup(s["id"], v), False)
+                    if persisted is False or persisted is None:
+                        result["errors"] += 1
+                        continue
                     if old_state == "waiting_entry" and new_state == "open":
                         result["opened"] += 1
                     if new_state in {"won", "lost", "breakeven", "expired"} and new_state != old_state:
@@ -225,7 +228,13 @@ def update_outcomes(max_rows: int = 5000, strategy: str = DEFAULT_STRATEGY) -> d
                 values.update(state="expired", outcome="ENTRY_EXPIRED", resolved_at=now.isoformat(), return_pct=0)
                 result["expired"] += 1
             if values:
-                _safe_repo(lambda s=setup, v=values: repository.update_setup(s["id"], v), None)
+                persisted = _safe_repo(lambda s=setup, v=values: repository.update_setup(s["id"], v), False)
+                if persisted is False or persisted is None:
+                    result["errors"] += 1
+                    # Roll back optimistic counters for unsaved transition.
+                    if resolved and result.get(resolved[0],0)>0: result[resolved[0]]-=1
+                    elif values.get("state")=="open" and result["opened"]>0: result["opened"]-=1
+                    elif values.get("state")=="expired" and result["expired"]>0: result["expired"]-=1
         except Exception as exc:
             result["errors"] += 1
             logger.debug("Outcome update failed %s/%s: %s", spec.key, setup.get("symbol"), exc)

@@ -70,7 +70,8 @@ def _extract(row: Dict[str, Any]) -> Tuple[List[float], int]:
         _num(factors.get("momentum"), 50), _num(factors.get("alignment"), 50),
         _num(factors.get("capital_flow"), 50), _num(factors.get("smart_money"), 50),
     ]
-    y = 1 if _num(row.get("net_pnl")) > 0 else 0
+    pnl = _num(row.get("net_pnl"))
+    y = 1 if pnl > 1e-9 else (0 if pnl < -1e-9 else -1)
     return x, y
 
 
@@ -157,6 +158,11 @@ def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
         return {"status": "insufficient_data", "samples": len(rows), "required": min_samples}
     split = max(min_samples - min_validation, int(len(rows) * 0.72))
     split = min(split, len(rows)-min_validation)
+    rows = [r for r in rows if _extract(r)[1] in {0, 1}]
+    if len(rows) < min_samples:
+        return {"status": "insufficient_non_breakeven_data", "samples": len(rows), "required": min_samples}
+    split = max(min_samples - min_validation, int(len(rows) * 0.72))
+    split = min(split, len(rows) - min_validation)
     train_rows, val_rows = rows[:split], rows[split:]
     raw_x = [_extract(r)[0] for r in train_rows]; ys = [_extract(r)[1] for r in train_rows]
     zx, means, stds = _standardize(raw_x)
@@ -195,9 +201,14 @@ def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
         "model_json": model, "trigger": trigger, "created_at": _now(), "activated_at": _now() if promote else None,
     }
     try:
-        response = _client().rpc("adaptive_model_store_v43", {"p_row": row, "p_promote": bool(promote)}).execute()
+        response = _client().rpc("adaptive_model_compare_promote_v45", {
+            "p_row": row, "p_promote": bool(promote), "p_expected_champion": champion_version
+        }).execute()
         if response.data is None:
-            raise RuntimeError("adaptive_model_store_v43 returned no data")
+            raise RuntimeError("adaptive_model_compare_promote_v45 returned no data")
+        data = response.data[0] if isinstance(response.data, list) and response.data else response.data
+        if isinstance(data, dict) and data.get("status") == "champion-changed":
+            return {"status": "champion-changed", "version": version, "metrics": metrics, "improvement": improvement}
     except Exception as exc:
         log.exception("Adaptive model persistence failed")
         emit("MODEL_PERSISTENCE_FAILED", version=version, promoted=promote, error=str(exc))

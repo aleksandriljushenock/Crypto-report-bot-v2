@@ -20,6 +20,7 @@ log = get_logger("paper_trading")
 ACCOUNT_ID = "main"
 _PAPER_LOCK = threading.RLock()
 _LAST_RECONCILE_AT: Optional[datetime] = None
+_LAST_LEDGER_REPAIR_AT: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -149,14 +150,20 @@ def _repair_paper_state(*, force_reconcile: bool = False) -> dict[str, Any]:
     periodically rebuilds account aggregates. Read-side statistics also merge
     closed positions, so UI remains correct even before persistence repair.
     """
-    global _LAST_RECONCILE_AT
+    global _LAST_RECONCILE_AT, _LAST_LEDGER_REPAIR_AT
     if not _bool("PAPER_LEDGER_REPAIR_ENABLED", True):
         return {"status": "disabled", "repaired": 0, "errors": []}
-    try:
-        backfill = paper_repo.backfill_missing_trades(max(100, _int("PAPER_LEDGER_REPAIR_LIMIT", 2000)))
-    except Exception as exc:
-        log.warning("Paper ledger repair failed: %s", exc)
-        return {"status": "error", "repaired": 0, "errors": [f"{type(exc).__name__}: {exc}"]}
+    repair_interval=max(60,_int("PAPER_LEDGER_REPAIR_INTERVAL_SECONDS",900))
+    repair_due=_LAST_LEDGER_REPAIR_AT is None or (_now()-_LAST_LEDGER_REPAIR_AT).total_seconds() >= repair_interval
+    if repair_due:
+        try:
+            backfill = paper_repo.backfill_missing_trades(max(100, _int("PAPER_LEDGER_REPAIR_LIMIT", 2000)))
+            _LAST_LEDGER_REPAIR_AT=_now()
+        except Exception as exc:
+            log.warning("Paper ledger repair failed: %s", exc)
+            return {"status": "error", "repaired": 0, "errors": [f"{type(exc).__name__}: {exc}"]}
+    else:
+        backfill={"status":"not-due","repaired":0,"errors":[]}
 
     interval = max(1, _int("PAPER_RECONCILE_INTERVAL_MINUTES", 5))
     due = _LAST_RECONCILE_AT is None or (_now() - _LAST_RECONCILE_AT) >= timedelta(minutes=interval)
@@ -589,8 +596,10 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             covered_until = _next_paper_cursor(since, rows, interval_minutes=interval_minutes, ceiling=pending_until)
             touched = False
             touch_time = None
+            boundary_uncertain = False
             for ts, open_price, high, low, close, partial_start, partial_end in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until):
                 if partial_start or partial_end:
+                    boundary_uncertain = True
                     # A boundary OHLC bar contains prices outside the legal event-time
                     # window. Its close can also occur after the deadline, so do not use
                     # any part of an ambiguous bar for entry execution.
@@ -618,6 +627,10 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                         notifier(format_open_message(result))
                     continue
             if pending_until and _now() >= pending_until and covered_until >= pending_until:
+                if boundary_uncertain:
+                    paper_repo.update_position(position.get('id'), {'status':'execution_unresolved','close_reason':'ENTRY_UNRESOLVED','pending_reason':'boundary_candle_ambiguous','last_checked_at':covered_until.isoformat(),'updated_at':_iso()}, expected_status='pending_entry')
+                    pending_errors.append(f"{position.get('symbol')}: execution-unresolved-boundary")
+                    continue
                 paper_repo.update_position(position.get("id"), {
                     "status": "cancelled", "close_reason": "ENTRY_EXPIRED", "pending_reason": "price_never_reached_entry",
                     "closed_at": _iso(), "last_checked_at": covered_until.isoformat(), "updated_at": _iso(),
@@ -668,8 +681,8 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             # an earlier SL/liquidation after downtime.
             for ts, open_price, high, low, close, partial_start, partial_end in candles:
                 if partial_start or partial_end:
-                    # Do not use a bar that overlaps opened_at/max_hold. Neither its wick
-                    # nor its close can be assigned safely to the legal sub-window.
+                    # A boundary OHLC bar is ambiguous; do not manufacture event order.
+                    # Fresh positions are queried at 1m granularity to minimize this blind window.
                     continue
                 safe_open, safe_high, safe_low = open_price, high, low
                 liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=safe_open, high=safe_high, low=safe_low)
@@ -705,7 +718,12 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 # This prevents a stale API response from silently skipping unseen TP/SL events.
                 # Only a fully completed legal candle may provide the time-exit price.
                 legal = [c for c in candles if not c[5] and not c[6] and c[0] + timedelta(minutes=interval_minutes) <= max_hold]
-                exit_price = legal[-1][4] if legal else float(position.get("entry_price") or 0)
+                if not legal:
+                    # OHLC cannot establish a fair deadline price when the only bar
+                    # intersects the boundary. Preserve the position as unresolved.
+                    paper_repo.update_position(position.get('id'), {'status':'execution_unresolved','close_reason':'TIME_EXIT_UNRESOLVED','pending_reason':'execution_unresolved_at_time_exit','last_checked_at':covered_until.isoformat(),'updated_at':_iso()}, expected_status='open')
+                    continue
+                exit_price = legal[-1][4]
                 reason, exit_time = "TIME_EXIT", max_hold.isoformat()
             if reason and exit_price and exit_price > 0:
                 trade = _close_position(position, exit_price, reason, exit_time)
@@ -727,7 +745,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
 def performance() -> dict[str, Any]:
     account = ensure_account()
     try:
-        stats_cap = _int("PAPER_STATS_MAX_TRADES", 0)
+        stats_cap = _int("PAPER_STATS_MAX_TRADES", 10000)
         trades = paper_repo.all_closed_trades(max_rows=stats_cap if stats_cap > 0 else None)
     except Exception:
         log.debug("Lifetime Paper history unavailable; falling back to recent ledger", exc_info=True)
@@ -735,6 +753,10 @@ def performance() -> dict[str, Any]:
         trades = get_recent_trades(max(1000, stats_cap if stats_cap > 0 else 100000))
     positions = _open_positions()
     pending = _pending_positions()
+    try:
+        unresolved = paper_repo.positions_by_status("execution_unresolved", "updated_at")
+    except Exception:
+        unresolved = []
     pnls = [float(t.get("net_pnl") or 0) for t in trades]
     eps = 1e-9
     wins = [x for x in pnls if x > eps]
@@ -779,6 +801,8 @@ def performance() -> dict[str, Any]:
         "account": account,
         "open_positions": positions,
         "pending_positions": pending,
+        "execution_unresolved_positions": unresolved,
+        "execution_unresolved_count": len(unresolved),
         "trades": trades,
         "closed_count": len(trades),
         "wins": len(wins),

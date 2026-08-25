@@ -68,7 +68,14 @@ class AutomationSupervisor:
             runtime_start(runtime_key, name=name)
             emit('BACKGROUND_TASK_STARTED', name=name)
             try:
-                return callback()
+                result=callback()
+                try: save_service_state(name, True, payload=result if isinstance(result,dict) else {"result":str(result)[:500]})
+                except Exception: pass
+                return result
+            except Exception as exc:
+                try: save_service_state(name, False, payload={}, error=f"{type(exc).__name__}: {exc}")
+                except Exception: pass
+                raise
             finally:
                 emit('BACKGROUND_TASK_FINISHED', name=name)
                 runtime_finish(runtime_key)

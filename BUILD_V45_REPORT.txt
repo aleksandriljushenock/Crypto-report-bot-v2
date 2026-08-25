@@ -1,0 +1,14 @@
+Crypto-report-bot V45.0.0
+Base: V44.0.0
+
+Pre-package verification:
+- python -m compileall -q . : PASS
+- pytest -q -W error : 178 passed, 0 failed
+- V45 regression tests: 15 passed
+- cross-process training lock subprocess test: PASS
+
+Mandatory migration:
+- migrations/SUPABASE_V45_INTEGRITY.sql
+
+Network limitations of local verification:
+- no authenticated live Supabase/Telegram/exchange calls were executed from the build environment.

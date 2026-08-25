@@ -1,0 +1,6 @@
+Crypto-report-bot V46.0.0 build verification
+Base: V45.0.0
+compileall: PASS
+pytest -W error: 188 passed, 0 failed
+Required migration: migrations/SUPABASE_V46_INTEGRITY.sql
+Key fixes: Shadow event-time/TTL/recovery, Paper unresolved boundaries, terminal outcome failures, precise dedupe, cloud fail-closed RPC recovery, completeness-first migration dedupe, distributed V14 training lease, safe low-memory defaults.
