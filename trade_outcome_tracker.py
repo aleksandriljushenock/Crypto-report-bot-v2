@@ -225,15 +225,15 @@ def _label(row: sqlite3.Row, price: float) -> str:
     direction = str(row["direction"] or "").upper()
     stop, tp1, tp2, tp3 = row["stop"], row["tp1"], row["tp2"], row["tp3"]
     if direction in {"LONG", "LONG_BIAS"}:
-        if tp3 and price >= tp3: return "TP3"
-        if tp2 and price >= tp2: return "TP2"
-        if tp1 and price >= tp1: return "TP1"
-        if stop and price <= stop: return "SL"
+        if tp3 and price >= tp3: return "HORIZON_TP3"
+        if tp2 and price >= tp2: return "HORIZON_TP2"
+        if tp1 and price >= tp1: return "HORIZON_TP1"
+        if stop and price <= stop: return "HORIZON_SL"
     elif direction in {"SHORT", "SHORT_BIAS"}:
-        if tp3 and price <= tp3: return "TP3"
-        if tp2 and price <= tp2: return "TP2"
-        if tp1 and price <= tp1: return "TP1"
-        if stop and price >= stop: return "SL"
+        if tp3 and price <= tp3: return "HORIZON_TP3"
+        if tp2 and price <= tp2: return "HORIZON_TP2"
+        if tp1 and price <= tp1: return "HORIZON_TP1"
+        if stop and price >= stop: return "HORIZON_SL"
     return "OPEN"
 
 
@@ -293,6 +293,8 @@ def update_trade_outcomes() -> dict[str, Any]:
     imported = sync_pending_from_cloud()
     client = create_trade_market_client()
     now = utc_now()
+    retention_days = max(7, int(os.getenv("TRACKED_SIGNAL_RETENTION_DAYS", "30")))
+    recovery_days = max(retention_days, int(os.getenv("OUTCOME_MAX_RECOVERY_DAYS", "45")))
     updated = 0
     cloud_synced = 0
     errors: list[str] = []
@@ -316,6 +318,9 @@ def update_trade_outcomes() -> dict[str, Any]:
                     continue
                 try:
                     target_time = created + timedelta(hours=hours)
+                    if (now - target_time) > timedelta(days=recovery_days):
+                        errors.append(f"fingerprint={row['fingerprint']}, horizon={horizon}: unrecoverable-history")
+                        continue
                     age_minutes = max(0.0, (now - target_time).total_seconds() / 60.0)
                     interval = "1m" if age_minutes + 1 <= 1000 else ("5m" if age_minutes + 5 <= 5000 else "1h")
                     cache_key = (str(row["symbol"]), interval)
@@ -332,7 +337,12 @@ def update_trade_outcomes() -> dict[str, Any]:
                         raise ValueError(f"invalid price entry={entry} current={price}")
                     raw_ret = (price - entry) / entry * 100
                     direction = str(row["direction"] or "").upper()
-                    signed_ret = raw_ret if direction in {"LONG", "LONG_BIAS"} else -raw_ret
+                    if direction in {"LONG", "LONG_BIAS", "BUY"}:
+                        signed_ret = raw_ret
+                    elif direction in {"SHORT", "SHORT_BIAS", "SELL"}:
+                        signed_ret = -raw_ret
+                    else:
+                        raise ValueError(f"unsupported direction: {direction!r}")
                     conn.execute(
                         "INSERT OR IGNORE INTO trade_outcomes VALUES (?,?,?,?,?,?)",
                         (row["fingerprint"], horizon, now.isoformat(), price, signed_ret, _label(row, price)),
@@ -349,6 +359,8 @@ def update_trade_outcomes() -> dict[str, Any]:
             ).fetchone():
                 if _sync_row_to_cloud(conn, row):
                     cloud_synced += 1
+        cutoff = (now - timedelta(days=retention_days)).isoformat()
+        conn.execute("DELETE FROM tracked_signals WHERE created_at < ? AND fingerprint IN (SELECT fingerprint FROM trade_outcomes WHERE horizon=?)", (cutoff, OUTCOME_COMPLETE_HORIZON))
     return {"imported": imported, "updated": updated, "cloud_synced": cloud_synced, "errors": errors}
 
 
@@ -358,8 +370,8 @@ def get_trade_performance() -> list[dict[str, Any]]:
         rows = conn.execute("""
             SELECT horizon, COUNT(*) count, AVG(return_percent) avg_return,
                    SUM(CASE WHEN return_percent > 0 THEN 1 ELSE 0 END) wins,
-                   SUM(CASE WHEN result_label LIKE 'TP%' THEN 1 ELSE 0 END) tp_hits,
-                   SUM(CASE WHEN result_label = 'SL' THEN 1 ELSE 0 END) sl_hits
+                   SUM(CASE WHEN result_label LIKE 'HORIZON_TP%' THEN 1 ELSE 0 END) tp_hits,
+                   SUM(CASE WHEN result_label = 'HORIZON_SL' THEN 1 ELSE 0 END) sl_hits
             FROM trade_outcomes GROUP BY horizon
             ORDER BY CASE horizon WHEN '1h' THEN 1 WHEN '4h' THEN 2 WHEN '24h' THEN 3 WHEN '72h' THEN 4 ELSE 5 END
         """).fetchall()

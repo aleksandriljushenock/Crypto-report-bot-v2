@@ -35,7 +35,7 @@ class StrategyRepository:
         while offset < cap:
             end = min(offset + 999, cap - 1)
             rows = (_client().table("strategy_setups").select("*").eq("strategy", strategy)
-                    .in_("state", ["waiting_entry", "open"]).order("created_at", desc=False)
+                    .in_("state", ["waiting_entry", "open"]).order("created_at", desc=True)
                     .range(offset, end).execute().data or [])
             out.extend(rows)
             if len(rows) < (end - offset + 1): break

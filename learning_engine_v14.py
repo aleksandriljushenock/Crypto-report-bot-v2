@@ -696,7 +696,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     config = {"global_weights": global_weights, "specialists": specialists,
               "calibration": calibration, "rules": rules, "drift": drift,
               "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed}}
-    version = "14." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    version = "14." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     model_status = "active" if promoted else "challenger"
     metrics = {"baseline": base_metrics, "candidate": candidate_metrics, "promoted": promoted,
                "drift": drift, "specialists": len(specialists)}

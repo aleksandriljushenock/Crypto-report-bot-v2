@@ -82,9 +82,9 @@ class CloudLearningStore:
             )
             rows = list(response.data or [])
             return rows[0] if rows else None
-        except Exception:
+        except Exception as exc:
             logger.exception("Ошибка поиска learning observation: fingerprint=%s", fingerprint)
-            return None
+            raise RuntimeError("learning observation lookup failed") from exc
 
     def save(self, observation: dict[str, Any]) -> str | None:
         """Idempotently create or merge an observation by fingerprint."""
@@ -116,7 +116,7 @@ class CloudLearningStore:
                 except Exception:
                     logger.exception("Ошибка сохранения learning observation")
                     return None
-            return str(existing["id"]) if response.data is not None else None
+            return str(existing["id"]) if response.data else None
 
         payload.setdefault("created_at", self._now())
         try:
@@ -140,7 +140,7 @@ class CloudLearningStore:
                 self.client.table(self.TABLE_NAME)
                 .select("*")
                 .eq("training_status", "pending")
-                .order("signal_created_at", desc=True)
+                .order("signal_created_at", desc=False)
                 .limit(max(1, int(limit)))
             )
             if due_only:
@@ -163,7 +163,7 @@ class CloudLearningStore:
                 .eq("id", observation_id)
                 .execute()
             )
-            return response.data is not None
+            return bool(response.data)
         except Exception:
             logger.warning("Hedge columns unavailable; retrying id update via metadata")
             try:
@@ -173,7 +173,7 @@ class CloudLearningStore:
                     .eq("id", observation_id)
                     .execute()
                 )
-                return response.data is not None
+                return bool(response.data)
             except Exception:
                 logger.exception("Ошибка обновления learning observation id=%s", observation_id)
                 return False

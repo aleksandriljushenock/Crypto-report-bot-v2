@@ -1,0 +1,11 @@
+Crypto Report Bot V44.0.0 - build verification
+
+Source: V43.0.0 full-integrity release
+Target: V44.0.0 operational-integrity
+
+Verification before packaging:
+- compileall: PASS
+- pytest -W error: 163 passed, 0 failed
+- V44 regression tests added for Paper history continuity, Cloud fail-closed/update semantics, V14 version uniqueness, and ENV duplicate protection.
+
+Important: live authenticated Supabase/Telegram/exchange calls are not available in the isolated build environment and must be smoke-tested after deployment.

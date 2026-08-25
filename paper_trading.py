@@ -112,9 +112,9 @@ def get_account() -> dict[str, Any]:
 def _open_positions() -> list[dict[str, Any]]:
     try:
         return paper_repo.positions_by_status("open", "opened_at")
-    except Exception:
+    except Exception as exc:
         log.exception("Paper positions load failed")
-        return []
+        raise RuntimeError("Paper positions unavailable; tracker is fail-closed") from exc
 
 
 def get_open_positions() -> list[dict[str, Any]]:
@@ -124,9 +124,9 @@ def get_open_positions() -> list[dict[str, Any]]:
 def _pending_positions() -> list[dict[str, Any]]:
     try:
         return paper_repo.positions_by_status("pending_entry", "created_at")
-    except Exception:
+    except Exception as exc:
         log.exception("Paper pending positions load failed")
-        return []
+        raise RuntimeError("Paper pending positions unavailable; tracker is fail-closed") from exc
 
 
 def get_pending_positions() -> list[dict[str, Any]]:
@@ -277,12 +277,36 @@ def _covered_until(rows: list[Any], *, interval_minutes: int, now: Optional[date
     return covered
 
 def _next_paper_cursor(previous: datetime, rows: list[Any], *, interval_minutes: int, ceiling: Optional[datetime] = None) -> datetime:
-    covered = _covered_until(rows, interval_minutes=interval_minutes)
-    if covered is None:
-        return previous
+    """Advance only across a contiguous sequence of completed candles.
+
+    Never jump over an API/history gap: doing so could permanently hide an
+    entry, SL or TP that occurred inside the missing interval.
+    """
+    now = _now()
+    step = timedelta(minutes=max(1, interval_minutes))
+    parsed = []
+    for item in rows or []:
+        try:
+            start = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
+            end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc) if len(item) > 6 and item[6] is not None else start + step
+            if end <= now:
+                parsed.append((start, end))
+        except Exception:
+            continue
+    parsed.sort(key=lambda x: x[0])
+    cursor = previous
+    tolerance = timedelta(seconds=2)
+    for start, end in parsed:
+        if end <= cursor:
+            continue
+        if start > cursor + tolerance:
+            break
+        cursor = max(cursor, end)
+        if ceiling is not None and cursor >= ceiling:
+            return ceiling
     if ceiling is not None:
-        covered = min(covered, ceiling)
-    return max(previous, covered)
+        cursor = min(cursor, ceiling)
+    return max(previous, cursor)
 
 def _liquidation_hit(side: str, liquidation: float, *, open_price: float, high: float, low: float) -> tuple[bool, bool]:
     if liquidation <= 0:
