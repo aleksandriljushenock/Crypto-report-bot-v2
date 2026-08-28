@@ -733,54 +733,111 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
               "calibration": calibration, "rules": rules, "drift": drift,
               "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed}}
     version = "14." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-    model_status = "active" if promoted else "challenger"
-    metrics = {"baseline": base_metrics, "candidate": candidate_metrics, "promoted": promoted,
-               "drift": drift, "specialists": len(specialists)}
+    candidate_better = _candidate_better(base_metrics, candidate_metrics, drift)
+    metrics = {"baseline": base_metrics, "candidate": candidate_metrics, "candidate_better": candidate_better,
+               "promoted": False, "drift": drift, "specialists": len(specialists)}
+
+    # Persist locally as challenger first. Local activation happens only after the
+    # authoritative cloud compare-and-promote commits (when cloud is configured).
     with connect() as conn:
-        if promoted:
-            conn.execute("UPDATE model_versions SET status='retired' WHERE status='active'")
         conn.execute("INSERT INTO model_versions(version,status,config_json,metrics_json,sample_count,created_at,activated_at) VALUES(?,?,?,?,?,?,?)",
-                     (version, model_status, json.dumps(config), json.dumps(metrics), len(samples), now_iso(), now_iso() if promoted else None))
+                     (version, "challenger", json.dumps(config), json.dumps(metrics), len(samples), now_iso(), None))
         for rule in rules:
             payload = {k: v for k, v in rule.items() if k not in {"kind", "regime", "direction", "samples", "win_rate", "avg_return", "adjustment"}}
             conn.execute("INSERT INTO learning_rules(model_version,kind,regime,direction,rule_json,samples,win_rate,avg_return,adjustment,active,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                         (version, rule["kind"], rule["regime"], rule["direction"], json.dumps(payload), rule["samples"], rule["win_rate"], rule["avg_return"], rule["adjustment"], 1 if promoted else 0, now_iso()))
+                         (version, rule["kind"], rule["regime"], rule["direction"], json.dumps(payload), rule["samples"], rule["win_rate"], rule["avg_return"], rule["adjustment"], 0, now_iso()))
         for regime, bins in calibration.items():
             for b in bins:
                 conn.execute("INSERT OR REPLACE INTO calibration_bins VALUES(?,?,?,?,?,?,?,?)",
                              (version, regime, b["score_min"], int(b["score_max"]), b["samples"], b["wins"], b["avg_return"], b["probability"]))
         conn.execute("INSERT INTO drift_snapshots(model_version,drift_score,details_json,created_at) VALUES(?,?,?,?)",
                      (version, drift["score"], json.dumps(drift), now_iso()))
-    try:
-        from model_control import mark_calibration_valid
-        mark_calibration_valid(True, updated_by="training")
-    except Exception:
-        pass
+
+    cloud_required = bool(os.getenv("SUPABASE_URL")) and bool(os.getenv("SUPABASE_SERVICE_KEY"))
+    cloud_sync = "disabled" if not cloud_required else "pending"
+    cloud_error = None
+    promotion_committed = False
+    expected_cloud_version = None
+    store = None
+    if cloud_required:
+        try:
+            from cloud_model_store import CloudModelStore
+            store = CloudModelStore()
+            cloud_current = store.load_active_model("learning-v14")
+            expected_cloud_version = str(cloud_current.get("version")) if cloud_current and cloud_current.get("version") else None
+            if not store.save_model({"model_name":"learning-v14","version": version, "config": config, "metrics": metrics}, "challenger", len(samples)):
+                raise RuntimeError("candidate model persistence failed")
+            cloud_sync = "candidate-saved"
+        except Exception as exc:
+            cloud_sync = "degraded"; cloud_error = f"{type(exc).__name__}: {exc}"
+
+    if candidate_better:
+        lease_ok = True
+        try:
+            from model_training_coordinator import lease_healthy
+            lease_ok = lease_healthy()
+        except Exception:
+            lease_ok = True
+        if not lease_ok:
+            cloud_sync = "lease-lost"
+            cloud_error = "distributed training lease was lost; promotion fenced"
+        elif cloud_required:
+            if store is not None and cloud_sync != "degraded":
+                try:
+                    lease_token=None; lease_generation=None
+                    try:
+                        from model_training_coordinator import lease_fence
+                        lease_token,lease_generation=lease_fence()
+                    except Exception:
+                        pass
+                    promotion_committed = store.promote_version_atomic("learning-v14", version, expected_cloud_version, lease_token=lease_token, lease_generation=lease_generation)
+                    if not promotion_committed:
+                        cloud_sync = "promotion-rejected"
+                        cloud_error = "cloud champion changed or target promotion failed"
+                    else:
+                        cloud_sync = "ok"
+                except Exception as exc:
+                    cloud_sync = "degraded"; cloud_error = f"{type(exc).__name__}: {exc}"
+        else:
+            promotion_committed = True
+
+    if promotion_committed:
+        with connect() as conn:
+            conn.execute("UPDATE model_versions SET status='retired' WHERE status='active' AND version<>?", (version,))
+            conn.execute("UPDATE model_versions SET status='active', activated_at=? WHERE version=?", (now_iso(), version))
+            conn.execute("UPDATE learning_rules SET active=0")
+            conn.execute("UPDATE learning_rules SET active=1 WHERE model_version=?", (version,))
+        try:
+            from model_control import mark_calibration_valid
+            mark_calibration_valid(True, updated_by="training")
+        except Exception:
+            pass
+
+    model_status = "active" if promotion_committed else "challenger"
+    metrics["promoted"] = promotion_committed
     result = {"status": "completed", "model_status": model_status,
               "samples": len(samples), "samples_total": len(samples),
               "samples_train": split, "samples_validation": len(holdout),
-              "version": version, "promoted": promoted,
+              "version": version, "promoted": promotion_committed, "candidate_better": candidate_better,
               "metrics": metrics, "specialists": len(specialists), "rules": len(rules),
               "feature_names": list(FEATURES),
               "target_horizon": str(os.getenv("LEARNING_TARGET_HORIZON", "24h")).lower(),
-              "active": version if promoted else current["version"]}
+              "active": version if promotion_committed else current["version"],
+              "cloud_sync": cloud_sync}
+    if cloud_error:
+        result["cloud_sync_error"] = cloud_error
     with connect() as conn:
+        conn.execute("UPDATE model_versions SET metrics_json=? WHERE version=?", (json.dumps(metrics), version))
         conn.execute("INSERT INTO learning_runs(status,summary_json,created_at) VALUES(?,?,?)", ("completed", json.dumps(result), now_iso()))
     try:
-        from cloud_model_store import CloudModelStore
-        store = CloudModelStore()
-        model_saved = store.save_model({"version": version, "config": config, "metrics": metrics}, ("challenger" if promoted else model_status), len(samples))
-        if promoted and model_saved:
-            model_saved = store.promote_version_atomic("learning-v14", version)
-        run_saved = store.save_training_run(result)
-        if not model_saved or not run_saved:
-            result["cloud_sync"] = "degraded"
-            result["cloud_sync_error"] = "model_registry or training_runs persistence failed"
+        if store is not None:
+            store.save_training_run(result)
         from learning_checkpoint_manager import save_checkpoint
         save_checkpoint(DB_PATH, reason=f"training-{model_status}-{version}")
     except Exception as exc:
-        result["cloud_sync"] = "degraded"
-        result["cloud_sync_error"] = f"{type(exc).__name__}: {exc}"
+        if result.get("cloud_sync") == "ok":
+            result["cloud_sync"] = "degraded"
+        result["cloud_sync_error"] = result.get("cloud_sync_error") or f"{type(exc).__name__}: {exc}"
     return result
 
 

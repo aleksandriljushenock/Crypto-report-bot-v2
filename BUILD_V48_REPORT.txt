@@ -1,0 +1,17 @@
+Crypto-report-bot V48.0.0 build report
+
+Scope:
+- Cloud model namespace isolation and cloud-first promotion
+- fenced distributed training lease
+- event identity across scanner/Paper/Shadow/Learning
+- historical Shadow/Paper recovery
+- terminal unresolved Paper lifecycle without fabricated PnL
+- V48 Supabase migration
+
+Validation before packaging:
+- python -m compileall -q . : PASS
+- pytest -q : 205 passed
+- V48 behavioral regression tests: included in tests/test_v48_behavior.py
+
+Coverage note:
+Global line coverage remains ~39% because large Telegram UI/report/legacy modules are not executed by the unit suite. V48 adds behavioral regression coverage for every bug fixed in this release; no claim is made that 39% global line coverage equals exhaustive correctness.

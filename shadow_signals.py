@@ -18,7 +18,7 @@ from pathlib import Path
 
 from analyzer import parse_klines
 from trade_market_client import create_trade_market_client
-from historical_prices import historical_price_at
+from historical_prices import historical_price_at, historical_candles_between
 
 DB_PATH = Path('data') / 'shadow_signals.db'
 HORIZONS = (6, 12, 24)
@@ -168,9 +168,13 @@ def update_shadow_signals():
         for row in rows:
             created=_dt(row['created_at']); expires=_dt(row['expires_at'])
             if not created: continue
+            candles=[]; history_start=None; history_end=None; interval_minutes=5
             try:
-                raw=client.klines(row['symbol'],'5m',300) or []
-                candles=parse_klines(raw)
+                window_end=expires or now
+                hist, _iv, interval_minutes, history_start, history_end = historical_candles_between(
+                    client,row['symbol'],created,window_end,now=now,max_bars=max(300,integer('SHADOW_HISTORY_MAX_BARS',1000))
+                )
+                candles=[{'open_time':c[0].timestamp()*1000,'close':c[2],'high':c[3],'low':c[4],'_end':c[1]} for c in hist]
             except Exception:
                 candles=[]
             if row['status'] in ('pending_entry','entry_unresolved'):
@@ -179,15 +183,13 @@ def update_shadow_signals():
                     c.execute("UPDATE shadow_signals SET status='invalid', updated_at=? WHERE id=?",(_iso(now),row['id']))
                     continue
                 setup=str(row['setup'] or '').upper(); fill=None; fill_dt=None
-                history_end=None
                 for candle in candles:
                     try:
                         cdt=datetime.fromtimestamp(float(candle['open_time'])/1000,tz=timezone.utc)
-                        cend=cdt+timedelta(minutes=5)
+                        cend=candle.get('_end') or (cdt+timedelta(minutes=interval_minutes))
                     except Exception: continue
                     # Only completed candles wholly inside the legal entry window.
                     if cdt < created or cend > now or (expires and cend > expires): continue
-                    history_end=max(history_end,cend) if history_end else cend
                     if setup=='BREAKOUT':
                         touched = candle['high'] >= target if side=='LONG' else candle['low'] <= target
                     else:

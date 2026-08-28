@@ -82,8 +82,14 @@ class PaperRepository:
             return data[0] if data else None
         return data or None
 
+    def void_execution_atomic(self, *, position_id: Any, reason: str, closed_at: str) -> dict[str, Any] | None:
+        data = _client().rpc("paper_void_execution_v48", {"p_position_id": str(position_id), "p_reason": str(reason), "p_closed_at": closed_at}).execute().data
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data or None
+
     def reconcile_atomic(self, account_id: str) -> dict[str, Any]:
-        data = _client().rpc("paper_reconcile_v39", {"p_account_id": account_id}).execute().data
+        data = _client().rpc("paper_reconcile_v48", {"p_account_id": account_id}).execute().data
         if isinstance(data, list):
             return data[0] if data else {}
         return data or {}

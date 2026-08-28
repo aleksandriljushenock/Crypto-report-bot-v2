@@ -22,3 +22,7 @@
 
 ## V45
 После V43/V44 выполнить `SUPABASE_V45_INTEGRITY.sql`. Миграция удаляет fingerprint-дубли, включает idempotent create learning observations и compare-and-promote для Adaptive Champion между несколькими инстансами.
+
+## V48
+После V47 выполните `SUPABASE_V48_INTEGRITY.sql`.
+Миграция исправляет namespace Cloud Champion, добавляет fenced lease generation, атомарный compare-and-promote V48 и terminal void/reconcile для Paper execution-data gaps.

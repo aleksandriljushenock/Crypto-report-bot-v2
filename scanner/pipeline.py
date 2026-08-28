@@ -6,6 +6,7 @@ gate -> AI/finalization. Heavy implementation details live in focused modules.
 from __future__ import annotations
 import gc
 import threading
+import hashlib
 from datetime import datetime, timezone
 
 from core.events import emit
@@ -98,7 +99,23 @@ def run_trade_scan(include_watch=False, max_results=5, apply_ai=True, source='un
             "probability": dict(ai_diag.get("probabilityBands") or {}),
             "ev": dict(ai_diag.get("evBands") or {}),
         }
+        # One immutable event id per scanner run/signal. Structural fingerprints are
+        # for similarity; event fingerprints are for identity/idempotency.
+        def _attach_event_identity(item, idx, kind):
+            if not isinstance(item, dict):
+                return item
+            if not item.get("signal_created_at"):
+                item["signal_created_at"] = run_time
+            if not item.get("event_id"):
+                raw = f"{source}|{run_time}|{kind}|{idx}|{item.get('fingerprint') or item.get('symbol') or ''}"
+                item["event_id"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            item.setdefault("eventFingerprint", item["event_id"])
+            return item
+        for _i,_signal in enumerate(signals):
+            _attach_event_identity(_signal,_i,"signal")
         near_misses = list(ai_diag.get("rejected") or []) + list(filter_diag.get("nearMisses") or [])
+        for _i,_near in enumerate(near_misses):
+            _attach_event_identity(_near,_i,"near")
         # v22: near-signal candidates stay hot between full scans, while shadow
         # candidates are tracked without being sent/opened as trades.
         near_watch = []

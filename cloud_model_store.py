@@ -64,7 +64,7 @@ class CloudModelStore:
 
     MODEL_TABLE = "model_registry"
     RUN_TABLE = "training_runs"
-    DEFAULT_MODEL_NAME = "learning-engine-v14"
+    DEFAULT_MODEL_NAME = "learning-v14"
 
     def __init__(self) -> None:
         self.client = get_supabase_client()
@@ -147,6 +147,7 @@ class CloudModelStore:
         version = str(model.get("model_version") or model.get("version") or "unknown")
         status_text = str(status or "challenger").strip().lower()
         active = status_text in {"active", "champion"}
+        requested_active = active
         config = _as_dict(model.get("config") or model.get("parameters"))
         now = _now()
 
@@ -175,7 +176,7 @@ class CloudModelStore:
             "feature_names": _as_list(model.get("feature_names")),
             "metadata": metadata,
             "training_run_id": model.get("training_run_id"),
-            "is_active": active,
+            "is_active": False if requested_active else active,
             "created_at": model.get("created_at") or now,
             "activated_at": now if active else model.get("activated_at"),
         }
@@ -204,8 +205,8 @@ class CloudModelStore:
             else:
                 self.client.table(self.MODEL_TABLE).insert(payload).execute()
 
-            if active:
-                self._retire_other_active_models(model_name, version)
+            if requested_active:
+                return self.promote_version_atomic(model_name, version)
             return True
         except Exception as exc:
             logger.error(
@@ -218,20 +219,27 @@ class CloudModelStore:
             )
             return False
 
-    def promote_version_atomic(self, model_name: str, version: str) -> bool:
-        """Atomically make exactly one cloud V14 version active."""
+    def promote_version_atomic(self, model_name: str, version: str, expected_version: str | None = None, *, lease_token: str | None = None, lease_generation: int | None = None) -> bool:
+        """Atomically promote one version inside one model namespace, optionally fenced by a training lease."""
         try:
-            data = self.client.rpc("model_registry_promote_v47", {"p_model_name": str(model_name), "p_model_version": str(version)}).execute().data
+            data = self.client.rpc("model_registry_promote_v48", {
+                "p_model_name": str(model_name),
+                "p_model_version": str(version),
+                "p_expected_version": expected_version,
+                "p_lease_token": lease_token,
+                "p_lease_generation": lease_generation,
+            }).execute().data
             return bool(data)
         except Exception:
             logger.exception("Atomic cloud model promotion failed: %s/%s", model_name, version)
             return False
 
-    def load_active_model(self) -> dict[str, Any] | None:
+    def load_active_model(self, model_name: str | None = None) -> dict[str, Any] | None:
         try:
             response = (
                 self.client.table(self.MODEL_TABLE)
                 .select("*")
+                .eq("model_name", str(model_name or self.DEFAULT_MODEL_NAME))
                 .eq("is_active", True)
                 .order("activated_at", desc=True)
                 .order("created_at", desc=True)

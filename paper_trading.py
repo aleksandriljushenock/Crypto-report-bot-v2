@@ -232,15 +232,22 @@ def _execution_klines(client: Any, symbol: str, *, lookback_hours: Optional[floa
     limit = max(100, min(1000, _int("PAPER_EXECUTION_KLINE_LIMIT", 1000)))
     hours = float(lookback_hours if lookback_hours is not None else max(_int("PAPER_MAX_HOLD_HOURS", 72), _int("PAPER_ENTRY_MAX_WAIT_HOURS", 12)))
     need_minutes = max(1.0, hours * 60.0 + 5.0)
-    if need_minutes <= limit:
+    choices=(("1m",1),("5m",5),("1h",60),("4h",240))
+    last_exc=None
+    for interval,minutes in choices:
+        if need_minutes > limit*minutes:
+            continue
         try:
-            rows = client.klines(symbol, "1m", limit) or []
+            rows=client.klines(symbol,interval,limit) or []
             if rows:
-                return rows, "1m", 1
+                return rows,interval,minutes
         except Exception as exc:
-            log.debug("Paper 1m klines unavailable for %s: %s", symbol, exc)
-    rows = client.klines(symbol, "5m", limit) or []
-    return rows, "5m", 5
+            last_exc=exc
+            log.debug("Paper %s klines unavailable for %s: %s", interval, symbol, exc)
+    if last_exc:
+        raise last_exc
+    rows=client.klines(symbol,"4h",limit) or []
+    return rows,"4h",240
 
 def _iter_execution_candles(rows: list[Any], *, since: datetime, interval_minutes: int, not_before: Optional[datetime] = None, not_after: Optional[datetime] = None) -> list[tuple[datetime, float, float, float, float, bool, bool]]:
     """Return candles intersecting the legal event-time window.
@@ -644,10 +651,15 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     if notifier:
                         notifier(format_open_message(result))
                     continue
+            grace=timedelta(hours=max(1,_int('PAPER_UNRESOLVED_GRACE_HOURS',24)))
             if pending_until and _now() >= pending_until and covered_until >= pending_until:
                 if boundary_uncertain:
-                    paper_repo.update_position(position.get('id'), {'close_reason':'ENTRY_UNRESOLVED','pending_reason':'boundary_candle_ambiguous','updated_at':_iso()}, expected_status='pending_entry')
-                    pending_errors.append(f"{position.get('symbol')}: execution-unresolved-boundary")
+                    if _now() >= pending_until + grace:
+                        paper_repo.update_position(position.get('id'), {'status':'cancelled','close_reason':'EXECUTION_DATA_UNAVAILABLE','pending_reason':'boundary_candle_unresolvable','closed_at':_iso(),'updated_at':_iso()}, expected_status='pending_entry')
+                        pending_cancelled += 1
+                    else:
+                        paper_repo.update_position(position.get('id'), {'close_reason':'ENTRY_UNRESOLVED','pending_reason':'boundary_candle_ambiguous','updated_at':_iso()}, expected_status='pending_entry')
+                        pending_errors.append(f"{position.get('symbol')}: execution-unresolved-boundary")
                     continue
                 paper_repo.update_position(position.get("id"), {
                     "status": "cancelled", "close_reason": "ENTRY_EXPIRED", "pending_reason": "price_never_reached_entry",
@@ -657,6 +669,9 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 pending_cancelled += 1
                 if notifier:
                     notifier(format_missed_message(position, "ENTRY_EXPIRED"))
+            elif pending_until and _now() >= pending_until + grace:
+                paper_repo.update_position(position.get('id'), {'status':'cancelled','close_reason':'EXECUTION_DATA_UNAVAILABLE','pending_reason':'history_gap_unrecoverable','closed_at':_iso(),'updated_at':_iso()}, expected_status='pending_entry')
+                pending_cancelled += 1
             else:
                 paper_repo.update_position(position.get("id"), {"last_checked_at": covered_until.isoformat(), "updated_at": _iso()}, expected_status="pending_entry")
         except Exception as exc:
@@ -740,12 +755,21 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 # Only a fully completed legal candle may provide the time-exit price.
                 legal = [c for c in candles if not c[5] and not c[6] and c[0] + timedelta(minutes=interval_minutes) <= max_hold]
                 if not legal:
-                    # OHLC cannot establish a fair deadline price when the only bar
-                    # intersects the boundary. Preserve the position as unresolved.
-                    paper_repo.update_position(position.get('id'), {'close_reason':'TIME_EXIT_UNRESOLVED','pending_reason':'execution_unresolved_at_time_exit','updated_at':_iso()}, expected_status='open')
+                    grace=timedelta(hours=max(1,_int('PAPER_UNRESOLVED_GRACE_HOURS',24)))
+                    if now_dt >= max_hold + grace:
+                        voided=paper_repo.void_execution_atomic(position_id=position.get('id'),reason='EXECUTION_DATA_UNAVAILABLE',closed_at=_iso())
+                        if not voided:
+                            errors.append(f"{position.get('symbol')}: void-execution-failed")
+                    else:
+                        paper_repo.update_position(position.get('id'), {'close_reason':'TIME_EXIT_UNRESOLVED','pending_reason':'execution_unresolved_at_time_exit','updated_at':_iso()}, expected_status='open')
                     continue
                 exit_price = legal[-1][4]
                 reason, exit_time = "TIME_EXIT", max_hold.isoformat()
+            if reason is None and now_dt >= max_hold + timedelta(hours=max(1,_int('PAPER_UNRESOLVED_GRACE_HOURS',24))) and covered_until < max_hold:
+                voided=paper_repo.void_execution_atomic(position_id=position.get('id'),reason='EXECUTION_DATA_UNAVAILABLE',closed_at=_iso())
+                if not voided:
+                    errors.append(f"{position.get('symbol')}: void-execution-failed")
+                continue
             if reason and exit_price and exit_price > 0:
                 trade = _close_position(position, exit_price, reason, exit_time)
                 if trade:

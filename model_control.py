@@ -484,7 +484,7 @@ def weight_controls(defaults: Dict[str, float] | None = None) -> Dict[str, Dict[
 
 
 def activate_version(version: str, updated_by: str = "telegram") -> Dict[str, Any]:
-    """Manually promote a stored local model version and its learning rules."""
+    """Manually promote a stored local version; cloud is authoritative when configured."""
     initialize()
     with _connect() as conn:
         target = conn.execute("SELECT * FROM model_versions WHERE version=?", (version,)).fetchone()
@@ -492,32 +492,38 @@ def activate_version(version: str, updated_by: str = "telegram") -> Dict[str, An
             return {"status": "not-found", "version": version}
         old = conn.execute("SELECT version FROM model_versions WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
         old_version = old["version"] if old else None
-        conn.execute("UPDATE model_versions SET status='retired' WHERE status='active'")
+        target_dict=dict(target)
+    cloud_required=bool(os.getenv("SUPABASE_URL")) and bool(os.getenv("SUPABASE_SERVICE_KEY"))
+    cloud_sync = not cloud_required
+    if cloud_required:
+        try:
+            from cloud_model_store import CloudModelStore
+            cfg=json.loads(target_dict.get("config_json") or "{}")
+            metrics=json.loads(target_dict.get("metrics_json") or "{}")
+            store=CloudModelStore()
+            cloud_current=store.load_active_model("learning-v14")
+            expected=str(cloud_current.get("version")) if cloud_current and cloud_current.get("version") else None
+            cloud_sync=store.save_model({"model_name":"learning-v14","version":version,"config":cfg,"metrics":metrics},"challenger",int(target_dict.get("sample_count") or 0))
+            if cloud_sync:
+                cloud_sync=store.promote_version_atomic("learning-v14",version,expected)
+        except Exception:
+            cloud_sync=False
+        if not cloud_sync:
+            return {"status":"cloud-promotion-failed","version":version,"previous":old_version,"cloud_sync":False}
+    with _connect() as conn:
+        conn.execute("UPDATE model_versions SET status='retired' WHERE status='active' AND version<>?",(version,))
         conn.execute("UPDATE learning_rules SET active=0")
-        conn.execute("UPDATE model_versions SET status='active', activated_at=? WHERE version=?", (_now(), version))
-        conn.execute("UPDATE learning_rules SET active=1 WHERE model_version=?", (version,))
-        conn.execute(
-            "INSERT INTO model_control_audit(action,key,old_value,new_value,updated_by,created_at) VALUES(?,?,?,?,?,?)",
-            ("activate_version", "model", old_version, version, updated_by, _now()),
-        )
-    cloud_sync = True
+        conn.execute("UPDATE model_versions SET status='active', activated_at=? WHERE version=?",(_now(),version))
+        conn.execute("UPDATE learning_rules SET active=1 WHERE model_version=?",(version,))
+        conn.execute("INSERT INTO model_control_audit(action,key,old_value,new_value,updated_by,created_at) VALUES(?,?,?,?,?,?)",
+                     ("activate_version","model",old_version,version,updated_by,_now()))
     try:
         from learning_checkpoint_manager import save_checkpoint
-        save_checkpoint(DB_PATH, reason=f"manual-activate-{version}")
-        from cloud_model_store import CloudModelStore
-        cfg=json.loads(target["config_json"] or "{}")
-        metrics=json.loads(target["metrics_json"] or "{}")
-        store=CloudModelStore()
-        cloud_sync=store.save_model({"version":version,"config":cfg,"metrics":metrics},"challenger",int(target["sample_count"] or 0))
-        if cloud_sync:
-            cloud_sync=store.promote_version_atomic("learning-v14", version)
-    except Exception:
-        cloud_sync=False
-    try:
-        mark_calibration_valid(True, updated_by=updated_by)
+        save_checkpoint(DB_PATH,reason=f"manual-activate-{version}")
+        mark_calibration_valid(True,updated_by=updated_by)
     except Exception:
         pass
-    return {"status": "activated", "version": version, "previous": old_version, "cloud_sync": cloud_sync}
+    return {"status":"activated","version":version,"previous":old_version,"cloud_sync":cloud_sync}
 
 
 def recent_versions(limit: int = 6) -> list[Dict[str, Any]]:

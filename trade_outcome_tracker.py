@@ -465,9 +465,14 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
         return None
     created_at = str(signal.get("signal_created_at") or utc_iso())
     created_dt = _parse_dt(created_at)
-    event_hours = max(1.0, float(os.getenv("LEARNING_EVENT_BUCKET_HOURS", os.getenv("TRADE_SIGNAL_COOLDOWN_HOURS", "6"))))
-    event_bucket = int(created_dt.timestamp() // int(event_hours * 3600))
-    fingerprint = hashlib.sha256(f"{signal_fingerprint}|{event_bucket}".encode("utf-8")).hexdigest()
+    explicit_event = signal.get("eventFingerprint") or signal.get("event_id") or signal.get("signal_created_at")
+    if explicit_event:
+        fingerprint = hashlib.sha256(f"{signal_fingerprint}|{explicit_event}".encode("utf-8")).hexdigest()
+    else:
+        # Legacy callers without an event id remain retry-stable only for a short window.
+        bucket_seconds = max(60, int(float(os.getenv("LEARNING_EVENT_FALLBACK_BUCKET_SECONDS", "300"))))
+        event_bucket = int(created_dt.timestamp() // bucket_seconds)
+        fingerprint = hashlib.sha256(f"{signal_fingerprint}|{event_bucket}".encode("utf-8")).hexdigest()
     resolve_after = (created_dt + timedelta(hours=1)).isoformat()
     chronos = signal.get("chronos") or {}
     direction = str(signal.get("direction") or "").upper()
