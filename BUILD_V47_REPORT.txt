@@ -1,0 +1,12 @@
+Crypto-report-bot V47.0.0
+Base: V46.0.0
+Focus: Paper/Shadow event-time, recovery, learning integrity, V14 cloud atomicity, distributed training lease.
+
+Validation performed before packaging:
+- compileall
+- full pytest with warnings as errors
+- V47 behavioral regressions
+- static dangerous-pattern checks
+- duplicate ENV key check
+
+Final ZIP is tested again after extraction; see release response for final counts/hash.

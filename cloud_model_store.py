@@ -218,6 +218,15 @@ class CloudModelStore:
             )
             return False
 
+    def promote_version_atomic(self, model_name: str, version: str) -> bool:
+        """Atomically make exactly one cloud V14 version active."""
+        try:
+            data = self.client.rpc("model_registry_promote_v47", {"p_model_name": str(model_name), "p_model_version": str(version)}).execute().data
+            return bool(data)
+        except Exception:
+            logger.exception("Atomic cloud model promotion failed: %s/%s", model_name, version)
+            return False
+
     def load_active_model(self) -> dict[str, Any] | None:
         try:
             response = (

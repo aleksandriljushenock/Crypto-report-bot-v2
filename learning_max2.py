@@ -174,7 +174,10 @@ def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
     try:
         # V14 calibration bins were fitted on the V14 weighted score. Never feed
         # the differently-distributed Learning MAX ensemble into those bins.
-        probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model)
+        try:
+            probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model, direction)
+        except TypeError:  # compatibility with older injected runtimes/tests
+            probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model)
         calibrated_v14_probability = float(probability01) * 100.0
         probability = _clamp(0.55 * specialist_ensemble + 0.45 * calibrated_v14_probability)
     except Exception:

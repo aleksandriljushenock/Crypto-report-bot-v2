@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_v46_version():
-    assert Path('VERSION').read_text().strip() == '46.0.0'
+    assert Path('VERSION').read_text().strip() == '47.0.0'
 
 
 def test_training_coordinator_is_cross_process(tmp_path):

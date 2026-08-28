@@ -85,7 +85,7 @@ def initialize():
         try:
             rows=[]; start=0; page=max(50, integer('SHADOW_RECOVERY_PAGE_SIZE', 500)); cap=max(page, integer('SHADOW_RECOVERY_MAX_ROWS', 10000))
             while len(rows)<cap:
-                chunk=(_cloud().table('shadow_signals_v22').select('*').in_('status',['pending_entry','filled']).order('created_at', desc=False).range(start,min(start+page-1,cap-1)).execute().data or [])
+                chunk=(_cloud().table('shadow_signals_v22').select('*').in_('status',['pending_entry','entry_unresolved','filled']).order('created_at', desc=False).range(start,min(start+page-1,cap-1)).execute().data or [])
                 rows.extend(chunk)
                 if len(chunk)<page: break
                 start += len(chunk)
@@ -123,8 +123,11 @@ def register_shadow_candidates(items, source='scan'):
             symbol=str(item.get('symbol') or '').upper(); entry=_entry(item)
             if not symbol or not entry: continue
             reason=str(item.get('reason') or 'filter')
-            event_key=str(item.get('fingerprint') or item.get('event_id') or _iso(now))
-            raw='|'.join([symbol,str(item.get('direction') or ''),str(item.get('setup') or ''),f'{entry:.8f}',reason,event_key])
+            structural_key=str(item.get('fingerprint') or '')
+            explicit=item.get('eventFingerprint') or item.get('event_id') or item.get('signal_created_at') or item.get('created_at') or item.get('generated_at')
+            bucket_seconds=max(60,int(number('SHADOW_EVENT_BUCKET_SECONDS',900)))
+            event_key=str(explicit) if explicit else str(int(now.timestamp())//bucket_seconds)
+            raw='|'.join([symbol,str(item.get('direction') or ''),str(item.get('setup') or ''),f'{entry:.8f}',reason,structural_key,event_key])
             sid=hashlib.sha256(raw.encode()).hexdigest()
             row=(sid,symbol,item.get('direction'),item.get('setup'),reason,source,_iso(now),_iso(now+timedelta(hours=ttl)),
                  'pending_entry',entry,None,None,item.get('stop'),item.get('tp1'),item.get('tp2'),item.get('tp3'),
@@ -147,21 +150,21 @@ def _label(row, price):
     if side is None: return 'INVALID_DIRECTION'
     stop=float(row['stop'] or 0); tp1=float(row['tp1'] or 0); tp2=float(row['tp2'] or 0); tp3=float(row['tp3'] or 0)
     if side=='LONG':
-        if tp3 and price>=tp3:return 'TP3'
-        if tp2 and price>=tp2:return 'TP2'
-        if tp1 and price>=tp1:return 'TP1'
-        if stop and price<=stop:return 'SL'
+        if tp3 and price>=tp3:return 'HORIZON_AT_OR_BEYOND_TP3'
+        if tp2 and price>=tp2:return 'HORIZON_AT_OR_BEYOND_TP2'
+        if tp1 and price>=tp1:return 'HORIZON_AT_OR_BEYOND_TP1'
+        if stop and price<=stop:return 'HORIZON_AT_OR_BEYOND_SL'
     else:
-        if tp3 and price<=tp3:return 'TP3'
-        if tp2 and price<=tp2:return 'TP2'
-        if tp1 and price<=tp1:return 'TP1'
-        if stop and price>=stop:return 'SL'
+        if tp3 and price<=tp3:return 'HORIZON_AT_OR_BEYOND_TP3'
+        if tp2 and price<=tp2:return 'HORIZON_AT_OR_BEYOND_TP2'
+        if tp1 and price<=tp1:return 'HORIZON_AT_OR_BEYOND_TP1'
+        if stop and price>=stop:return 'HORIZON_AT_OR_BEYOND_SL'
     return 'OPEN'
 
 def update_shadow_signals():
     initialize(); client=create_trade_market_client(); now=_now(); updated=0
     with _conn() as c:
-        rows=c.execute("SELECT * FROM shadow_signals WHERE status IN ('pending_entry','filled')").fetchall()
+        rows=c.execute("SELECT * FROM shadow_signals WHERE status IN ('pending_entry','entry_unresolved','filled')").fetchall()
         for row in rows:
             created=_dt(row['created_at']); expires=_dt(row['expires_at'])
             if not created: continue
@@ -170,7 +173,7 @@ def update_shadow_signals():
                 candles=parse_klines(raw)
             except Exception:
                 candles=[]
-            if row['status']=='pending_entry':
+            if row['status'] in ('pending_entry','entry_unresolved'):
                 target=float(row['target_entry'] or 0); side=_side(row['direction'])
                 if side is None:
                     c.execute("UPDATE shadow_signals SET status='invalid', updated_at=? WHERE id=?",(_iso(now),row['id']))
@@ -198,8 +201,8 @@ def update_shadow_signals():
                     row=dict(row); row['status']='filled'; row['actual_entry']=fill; row['filled_at']=_iso(fill_dt)
                 elif expires and now>=expires and history_end and history_end >= expires:
                     c.execute("UPDATE shadow_signals SET status='expired', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'expired','updated_at':_iso(now)}); updated+=1; continue
-                elif expires and now>=expires and not history_end:
-                    # Missing/ambiguous history cannot prove that entry was never touched.
+                elif expires and now>=expires and (not history_end or history_end < expires):
+                    # Missing or partial history cannot prove that entry was never touched.
                     c.execute("UPDATE shadow_signals SET status='entry_unresolved', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'entry_unresolved','updated_at':_iso(now)}); updated+=1; continue
             if row['status']=='filled':
                 filled=_dt(row['filled_at']); entry=float(row['actual_entry'] or row['target_entry'] or 0)
@@ -217,8 +220,10 @@ def update_shadow_signals():
                     if not price: continue
                     raw_ret=(price-entry)/entry*100; signed=raw_ret if side=='LONG' else -raw_ret
                     label=_label(row,price); c.execute('INSERT INTO shadow_outcomes VALUES (?,?,?,?,?,?)',(row['id'],hours,_iso(target_time),price,signed,label)); _cloud_insert_outcome({'shadow_id':row['id'],'horizon_hours':hours,'observed_at':_iso(target_time),'price':price,'return_pct':signed,'label':label}); updated+=1
-                if now >= filled+timedelta(hours=24):
-                    c.execute("UPDATE shadow_signals SET status='observed', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'observed','updated_at':_iso(now)})
+                if now >= filled+timedelta(hours=max(HORIZONS)):
+                    have=int(c.execute('SELECT COUNT(DISTINCT horizon_hours) n FROM shadow_outcomes WHERE shadow_id=?',(row['id'],)).fetchone()['n'] or 0)
+                    if have >= len(HORIZONS):
+                        c.execute("UPDATE shadow_signals SET status='observed', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'observed','updated_at':_iso(now)})
     return {'updated':updated}
 
 def summary():

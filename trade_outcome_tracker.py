@@ -377,6 +377,11 @@ def update_trade_outcomes() -> dict[str, Any]:
                     target_time = created + timedelta(hours=hours)
                     if (now - target_time) > timedelta(days=recovery_days):
                         conn.execute("INSERT OR REPLACE INTO outcome_failures VALUES (?,?,?,?)", (row['fingerprint'],horizon,'unrecoverable-history',now.isoformat()))
+                        try:
+                            from cloud_learning_store import CloudLearningStore
+                            CloudLearningStore().update_outcome(str(row['fingerprint']), {'metadata': {'terminal_outcomes': {horizon: 'unrecoverable-history'}}})
+                        except Exception:
+                            logger.warning('Could not persist terminal outcome to cloud: %s/%s', row['fingerprint'], horizon)
                         errors.append(f"fingerprint={row['fingerprint']}, horizon={horizon}: unrecoverable-history")
                         continue
                     age_minutes = max(0.0, (now - target_time).total_seconds() / 60.0)
@@ -432,7 +437,10 @@ def update_trade_outcomes() -> dict[str, Any]:
                 except Exception:
                     logger.debug("Learning MAX result sync failed for %s", row["fingerprint"], exc_info=True)
         cutoff = (now - timedelta(days=retention_days)).isoformat()
-        conn.execute("DELETE FROM tracked_signals WHERE created_at < ? AND fingerprint IN (SELECT fingerprint FROM trade_outcomes WHERE horizon=?)", (cutoff, OUTCOME_COMPLETE_HORIZON))
+        conn.execute("""DELETE FROM tracked_signals WHERE created_at < ? AND (
+            fingerprint IN (SELECT fingerprint FROM trade_outcomes WHERE horizon=?) OR
+            fingerprint IN (SELECT fingerprint FROM outcome_failures WHERE horizon=?)
+        )""", (cutoff, OUTCOME_COMPLETE_HORIZON, OUTCOME_COMPLETE_HORIZON))
     return {"imported": imported, "updated": updated, "cloud_synced": cloud_synced, "errors": errors}
 
 
@@ -471,7 +479,8 @@ def persist_trade_signal(signal: dict[str, Any], source: str = "trade") -> str |
     market_price = _market_price_at_signal(signal)
     planned_entry = _entry_from_signal(signal)
     if market_price is None:
-        logger.warning("Learning signal saved without outcome baseline because actual market price is unavailable: %s", signal.get("symbol"))
+        logger.warning("Learning signal rejected: actual market baseline unavailable: %s", signal.get("symbol"))
+        return None
     payload = {
         "symbol": signal.get("symbol"),
         "timeframe": signal.get("timeframe") or signal.get("interval") or "unknown",

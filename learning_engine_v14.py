@@ -518,7 +518,7 @@ def specialist_weights(model: Dict[str, Any], regime: str, direction: str) -> Di
     return _apply_operator_weight_policy(dict(selected), dict(defaults))
 
 
-def calibrated_probability(score: float, regime: str, model: Dict[str, Any]) -> Tuple[float, float]:
+def calibrated_probability(score: float, regime: str, model: Dict[str, Any], direction: str = "") -> Tuple[float, float]:
     try:
         from model_control import calibration_valid as _calibration_valid
         if not _calibration_valid():
@@ -526,7 +526,8 @@ def calibrated_probability(score: float, regime: str, model: Dict[str, Any]) -> 
     except Exception:
         pass
     calibration = (model.get("config") or {}).get("calibration") or {}
-    bins = calibration.get(regime) or calibration.get("all") or []
+    direction = _normalize_direction(direction)
+    bins = calibration.get(f"{regime}:{direction}") or calibration.get(regime) or calibration.get("all") or []
     for item in bins:
         if float(item["score_min"]) <= score <= float(item["score_max"]):
             samples = max(1, int(item["samples"]))
@@ -678,9 +679,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
         milestone = max(10, int(os.getenv("LEARNING_COLLECTION_SAVE_STEP", "25")))
         if len(samples) == 0 or len(samples) % milestone == 0:
             try:
-                from cloud_model_store import CloudModelStore
                 current_model = active_model(defaults)
-                CloudModelStore().save_model(current_model, "active", len(samples))
                 from learning_checkpoint_manager import save_checkpoint
                 save_checkpoint(DB_PATH, reason=f"collection-milestone-{len(samples)}")
             except Exception:
@@ -724,6 +723,11 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
         subset = [s for s in holdout if s["regime"] == regime]
         if len(subset) >= 8:
             calibration[regime] = _calibration(subset, specialists.get(regime, global_weights))
+        for direction in ("LONG", "SHORT"):
+            directional = [x for x in subset if x.get("direction") == direction]
+            key = f"{regime}:{direction}"
+            if len(directional) >= 8 and key in specialists:
+                calibration[key] = _calibration(directional, specialists[key])
 
     config = {"global_weights": global_weights, "specialists": specialists,
               "calibration": calibration, "rules": rules, "drift": drift,
@@ -765,7 +769,9 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     try:
         from cloud_model_store import CloudModelStore
         store = CloudModelStore()
-        model_saved = store.save_model({"version": version, "config": config, "metrics": metrics}, model_status, len(samples))
+        model_saved = store.save_model({"version": version, "config": config, "metrics": metrics}, ("challenger" if promoted else model_status), len(samples))
+        if promoted and model_saved:
+            model_saved = store.promote_version_atomic("learning-v14", version)
         run_saved = store.save_training_run(result)
         if not model_saved or not run_saved:
             result["cloud_sync"] = "degraded"

@@ -205,7 +205,7 @@ def calculate_ai_score(signal: Dict[str, Any], weights: Dict[str, float] | None 
         factors, model.get("rules") or [], regime=regime, direction=str(signal.get("direction") or "")
     )
     score = round(_clamp(pre_adjustment + learning["adjustment"]), 1)
-    probability, uncertainty = calibrated_probability(score, regime, model)
+    probability, uncertainty = calibrated_probability(score, regime, model, str(signal.get("direction") or ""))
     contributions = {
         name: round((factors[name] * selected_weights.get(name, DEFAULT_WEIGHTS[name])) / denominator, 2)
         for name in DEFAULT_WEIGHTS

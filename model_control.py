@@ -507,7 +507,10 @@ def activate_version(version: str, updated_by: str = "telegram") -> Dict[str, An
         from cloud_model_store import CloudModelStore
         cfg=json.loads(target["config_json"] or "{}")
         metrics=json.loads(target["metrics_json"] or "{}")
-        cloud_sync=CloudModelStore().save_model({"version":version,"config":cfg,"metrics":metrics},"active",int(target["sample_count"] or 0))
+        store=CloudModelStore()
+        cloud_sync=store.save_model({"version":version,"config":cfg,"metrics":metrics},"challenger",int(target["sample_count"] or 0))
+        if cloud_sync:
+            cloud_sync=store.promote_version_atomic("learning-v14", version)
     except Exception:
         cloud_sync=False
     try:

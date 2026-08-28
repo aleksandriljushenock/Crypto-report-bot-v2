@@ -1,11 +1,11 @@
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-def test_version_v46(): assert Path('VERSION').read_text().strip()=='46.0.0'
+def test_version_v46(): assert Path('VERSION').read_text().strip()=='47.0.0'
 
 def test_shadow_fingerprint_is_event_specific():
     text=Path('shadow_signals.py').read_text()
-    assert "event_key=str(item.get('fingerprint')" in text
+    assert "structural_key=str(item.get('fingerprint')" in text and "SHADOW_EVENT_BUCKET_SECONDS" in text
 
 def test_shadow_never_fills_after_expiry_or_open_candle():
     text=Path('shadow_signals.py').read_text()

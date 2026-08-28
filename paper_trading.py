@@ -6,6 +6,7 @@ liquidation prices are conservative approximations, not exchange guarantees.
 from __future__ import annotations
 
 import math
+import hashlib
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -250,12 +251,13 @@ def _iter_execution_candles(rows: list[Any], *, since: datetime, interval_minute
     timestamp itself lies inside the legal window.
     """
     lower = max(since, not_before or since)
+    now = _now()
     out = []
     for item in rows or []:
         try:
             candle_start = datetime.fromtimestamp(float(item[0]) / 1000.0, tz=timezone.utc)
             candle_end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc) if len(item) > 6 and item[6] is not None else candle_start + timedelta(minutes=interval_minutes)
-            if candle_end <= lower:
+            if candle_end <= lower or candle_end > now:
                 continue
             if not_after is not None and candle_start >= not_after:
                 continue
@@ -356,6 +358,17 @@ def _fill_pending_position(position: dict[str, Any], fill_price: float, fill_sou
         log.exception("Paper pending fill failed: %s", position.get("fingerprint"))
         return {"status": "error"}
 
+
+def _paper_event_fingerprint(structural: str, signal: dict[str, Any], now: datetime) -> str:
+    """Stable for retries of one scan event, but reusable for a later identical setup."""
+    explicit = signal.get("eventFingerprint") or signal.get("event_id") or signal.get("signal_created_at") or signal.get("created_at") or signal.get("generated_at")
+    if explicit:
+        event_key = str(explicit)
+    else:
+        bucket_seconds = max(60, _int("PAPER_EVENT_BUCKET_SECONDS", 900))
+        event_key = str(int(now.timestamp()) // bucket_seconds)
+    return hashlib.sha256(f"{structural}|{event_key}".encode("utf-8")).hexdigest()
+
 def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str, Any]:
     """Register a paper order. A signal is not a fill.
 
@@ -365,7 +378,9 @@ def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str
     """
     if not _bool("PAPER_TRADING_ENABLED", True):
         return {"status": "disabled"}
-    fingerprint = str(signal.get("fingerprint") or "").strip()
+    structural_fingerprint = str(signal.get("fingerprint") or "").strip()
+    now_dt = _now()
+    fingerprint = _paper_event_fingerprint(structural_fingerprint, signal, now_dt) if structural_fingerprint else ""
     symbol = str(signal.get("symbol") or "").upper()
     target_entry = _entry(signal)
     try:
@@ -398,7 +413,6 @@ def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str
             zone_low, zone_high = sorted((float(a.strip()), float(b.strip())))
         except Exception:
             pass
-    now_dt = _now()
     now = _iso(now_dt)
     wait_hours = max(1, _int("PAPER_ENTRY_MAX_WAIT_HOURS", 12))
     row = {
@@ -410,7 +424,7 @@ def open_from_signal(signal: dict[str, Any], source: str = "signal") -> dict[str
         "probability": signal.get("calibratedProbability") or signal.get("probability"),
         "expected_value_pct": signal.get("expectedValuePct"),
         "strategy_version": signal.get("hedgeProfileVersion") or "adaptive-profit-v8",
-        "signal_payload": signal, "signal_entry_price": target_entry, "entry_zone_low": zone_low,
+        "signal_payload": {**signal, "structuralFingerprint": structural_fingerprint, "eventFingerprint": fingerprint}, "signal_entry_price": target_entry, "entry_zone_low": zone_low,
         "entry_zone_high": zone_high, "trigger_price": target_entry if setup == "BREAKOUT" else None,
         "pending_until": (now_dt + timedelta(hours=wait_hours)).isoformat(),
         "pending_reason": "WAIT_PULLBACK" if setup == "PULLBACK" else "WAIT_BREAKOUT",
@@ -576,9 +590,13 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
     # Disabling Paper Trading stops new entries but existing/pending orders must
     # continue to be reconciled. Pending orders never reserve margin until filled.
     # Heal any previous split-write before processing the next market tick.
-    repair = _repair_paper_state()
-    client = create_trade_market_client()
-    pending = _pending_positions()
+    try:
+        repair = _repair_paper_state()
+        client = create_trade_market_client()
+        pending = _pending_positions()
+    except Exception as exc:
+        log.exception("Paper tracker initialization/read failed")
+        return {"status":"error","checked":0,"closed":0,"liquidated":0,"pending_checked":0,"pending_filled":0,"pending_cancelled":0,"ledger_repaired":0,"errors":[f"{type(exc).__name__}: {exc}"]}
     pending_filled = 0
     pending_cancelled = 0
     pending_errors: list[str] = []
@@ -628,7 +646,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     continue
             if pending_until and _now() >= pending_until and covered_until >= pending_until:
                 if boundary_uncertain:
-                    paper_repo.update_position(position.get('id'), {'status':'execution_unresolved','close_reason':'ENTRY_UNRESOLVED','pending_reason':'boundary_candle_ambiguous','last_checked_at':covered_until.isoformat(),'updated_at':_iso()}, expected_status='pending_entry')
+                    paper_repo.update_position(position.get('id'), {'close_reason':'ENTRY_UNRESOLVED','pending_reason':'boundary_candle_ambiguous','updated_at':_iso()}, expected_status='pending_entry')
                     pending_errors.append(f"{position.get('symbol')}: execution-unresolved-boundary")
                     continue
                 paper_repo.update_position(position.get("id"), {
@@ -646,9 +664,12 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             pending_errors.append(text)
             log.warning("Paper pending update failed: %s", text)
 
-    positions = _open_positions()
+    try:
+        positions = _open_positions()
+    except Exception as exc:
+        return {"status":"error","checked":0,"closed":0,"liquidated":0,"pending_checked":len(pending),"pending_filled":pending_filled,"pending_cancelled":pending_cancelled,"ledger_repaired":int(repair.get("repaired") or 0),"errors":pending_errors+[f"{type(exc).__name__}: {exc}"]}
     if not positions:
-        return {"status": "ok", "checked": 0, "closed": 0, "liquidated": 0, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "ledger_repaired": int(repair.get("repaired") or 0), "errors": pending_errors + list(repair.get("errors") or [])}
+        return {"status": ("degraded" if (pending_errors or repair.get("errors")) else "ok"), "checked": 0, "closed": 0, "liquidated": 0, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "ledger_repaired": int(repair.get("repaired") or 0), "errors": pending_errors + list(repair.get("errors") or [])}
     closed: list[dict[str, Any]] = []
     errors: list[str] = []
     liquidation_count = 0
@@ -721,7 +742,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 if not legal:
                     # OHLC cannot establish a fair deadline price when the only bar
                     # intersects the boundary. Preserve the position as unresolved.
-                    paper_repo.update_position(position.get('id'), {'status':'execution_unresolved','close_reason':'TIME_EXIT_UNRESOLVED','pending_reason':'execution_unresolved_at_time_exit','last_checked_at':covered_until.isoformat(),'updated_at':_iso()}, expected_status='open')
+                    paper_repo.update_position(position.get('id'), {'close_reason':'TIME_EXIT_UNRESOLVED','pending_reason':'execution_unresolved_at_time_exit','updated_at':_iso()}, expected_status='open')
                     continue
                 exit_price = legal[-1][4]
                 reason, exit_time = "TIME_EXIT", max_hold.isoformat()
@@ -739,7 +760,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             text = f"{position.get('symbol')}: {type(exc).__name__}: {exc}"
             errors.append(text)
             log.warning("Paper position update failed: %s", text)
-    return {"status": "ok", "checked": len(positions), "closed": len(closed), "liquidated": liquidation_count, "trades": closed, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "ledger_repaired": int(repair.get("repaired") or 0), "errors": pending_errors + errors + list(repair.get("errors") or [])}
+    return {"status": ("degraded" if (pending_errors or errors or repair.get("errors")) else "ok"), "checked": len(positions), "closed": len(closed), "liquidated": liquidation_count, "trades": closed, "pending_checked": len(pending), "pending_filled": pending_filled, "pending_cancelled": pending_cancelled, "ledger_repaired": int(repair.get("repaired") or 0), "errors": pending_errors + errors + list(repair.get("errors") or [])}
 
 
 def performance() -> dict[str, Any]:
@@ -753,10 +774,7 @@ def performance() -> dict[str, Any]:
         trades = get_recent_trades(max(1000, stats_cap if stats_cap > 0 else 100000))
     positions = _open_positions()
     pending = _pending_positions()
-    try:
-        unresolved = paper_repo.positions_by_status("execution_unresolved", "updated_at")
-    except Exception:
-        unresolved = []
+    unresolved = [p for p in (positions + pending) if "unresolved" in str(p.get("pending_reason") or p.get("close_reason") or "").lower()]
     pnls = [float(t.get("net_pnl") or 0) for t in trades]
     eps = 1e-9
     wins = [x for x in pnls if x > eps]

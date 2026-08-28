@@ -110,7 +110,7 @@ def test_learning_event_fingerprint_changes_across_cooldown_buckets(monkeypatch,
             saved.append(payload); return 'id'
     import cloud_learning_store
     monkeypatch.setattr(cloud_learning_store,'CloudLearningStore',lambda:Store())
-    base={'fingerprint':'structural','symbol':'BTCUSDT','direction':'LONG_BIAS','entryPrice':100}
+    base={'fingerprint':'structural','symbol':'BTCUSDT','direction':'LONG_BIAS','entryPrice':100,'marketPriceAtSignal':101}
     a=dict(base,signal_created_at='2026-01-01T00:10:00+00:00')
     b=dict(base,signal_created_at='2026-01-01T07:10:00+00:00')
     t.persist_trade_signal(a)
