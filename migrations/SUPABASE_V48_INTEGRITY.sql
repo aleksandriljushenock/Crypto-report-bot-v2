@@ -3,7 +3,17 @@
 
 ALTER TABLE public.model_training_leases_v46 ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
 -- Normalize the historical namespace spelling before enforcing V48 single-authority semantics.
-UPDATE public.model_registry SET model_name='learning-v14' WHERE model_name='learning-engine-v14';
+DO $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext('model-registry:learning-v14'));
+  -- If the canonical namespace already has an active champion, retire the legacy
+  -- champion before renaming to avoid the partial unique-index collision.
+  IF EXISTS (SELECT 1 FROM public.model_registry WHERE model_name='learning-v14' AND is_active=true) THEN
+    UPDATE public.model_registry SET is_active=false,status=CASE WHEN status='active' THEN 'retired' ELSE status END
+      WHERE model_name='learning-engine-v14' AND is_active=true;
+  END IF;
+  UPDATE public.model_registry SET model_name='learning-v14' WHERE model_name='learning-engine-v14';
+END $$;
 CREATE OR REPLACE FUNCTION public.model_registry_promote_v48(
     p_model_name text,
     p_model_version text,

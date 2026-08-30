@@ -182,27 +182,37 @@ def update_shadow_signals():
                 if side is None:
                     c.execute("UPDATE shadow_signals SET status='invalid', updated_at=? WHERE id=?",(_iso(now),row['id']))
                     continue
-                setup=str(row['setup'] or '').upper(); fill=None; fill_dt=None
+                setup=str(row['setup'] or '').upper(); fill=None; fill_dt=None; boundary_uncertain=False; execution_precision=None
                 for candle in candles:
                     try:
                         cdt=datetime.fromtimestamp(float(candle['open_time'])/1000,tz=timezone.utc)
                         cend=candle.get('_end') or (cdt+timedelta(minutes=interval_minutes))
                     except Exception: continue
-                    # Only completed candles wholly inside the legal entry window.
-                    if cdt < created or cend > now or (expires and cend > expires): continue
+                    if cend > now:
+                        continue
                     if setup=='BREAKOUT':
                         touched = candle['high'] >= target if side=='LONG' else candle['low'] <= target
                     else:
                         touched = candle['low'] <= target <= candle['high']
+                    # V49: an OHLC candle crossing created/expires cannot prove whether a
+                    # touch happened inside the legal slice. Keep it unresolved if it could.
+                    boundary = cdt < created or bool(expires and cend > expires)
+                    if boundary:
+                        if touched:
+                            boundary_uncertain=True
+                        continue
                     if touched:
-                        fill=target; fill_dt=cdt+timedelta(minutes=5); break
+                        fill=target; fill_dt=cend; execution_precision=f'{interval_minutes}m_ohlc'; break
                 if fill:
                     c.execute("UPDATE shadow_signals SET status='filled', actual_entry=?, filled_at=?, updated_at=? WHERE id=?",(fill,_iso(fill_dt),_iso(now),row['id']))
-                    _cloud_upsert_signal({'id':row['id'],'symbol':row['symbol'],'direction':row['direction'],'setup':row['setup'],'reason':row['reason'],'source':row['source'],'created_at':row['created_at'],'expires_at':row['expires_at'],'status':'filled','target_entry':target,'actual_entry':fill,'filled_at':_iso(fill_dt),'stop':row['stop'],'tp1':row['tp1'],'tp2':row['tp2'],'tp3':row['tp3'],'score':row['score'],'probability':row['probability'],'quality':row['quality'],'ev':row['ev'],'payload':json.loads(row['payload_json'] or '{}'),'updated_at':_iso(now)})
+                    cloud_payload=json.loads(row['payload_json'] or '{}'); cloud_payload['execution_precision']=execution_precision
+                    _cloud_upsert_signal({'id':row['id'],'symbol':row['symbol'],'direction':row['direction'],'setup':row['setup'],'reason':row['reason'],'source':row['source'],'created_at':row['created_at'],'expires_at':row['expires_at'],'status':'filled','target_entry':target,'actual_entry':fill,'filled_at':_iso(fill_dt),'stop':row['stop'],'tp1':row['tp1'],'tp2':row['tp2'],'tp3':row['tp3'],'score':row['score'],'probability':row['probability'],'quality':row['quality'],'ev':row['ev'],'payload':cloud_payload,'updated_at':_iso(now)})
                     updated+=1
                     row=dict(row); row['status']='filled'; row['actual_entry']=fill; row['filled_at']=_iso(fill_dt)
-                elif expires and now>=expires and history_end and history_end >= expires:
+                elif expires and now>=expires and history_end and history_end >= expires and not boundary_uncertain:
                     c.execute("UPDATE shadow_signals SET status='expired', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'expired','updated_at':_iso(now)}); updated+=1; continue
+                elif expires and now>=expires and boundary_uncertain:
+                    c.execute("UPDATE shadow_signals SET status='entry_unresolved', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'entry_unresolved','updated_at':_iso(now)}); updated+=1; continue
                 elif expires and now>=expires and (not history_end or history_end < expires):
                     # Missing or partial history cannot prove that entry was never touched.
                     c.execute("UPDATE shadow_signals SET status='entry_unresolved', updated_at=? WHERE id=?",(_iso(now),row['id'])); _cloud_update_signal(row['id'], {'status':'entry_unresolved','updated_at':_iso(now)}); updated+=1; continue

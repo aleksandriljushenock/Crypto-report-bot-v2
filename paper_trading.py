@@ -640,6 +640,10 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                     # candle can never also generate a TP/SL after an unknown-order entry.
                     touch_time = ts + timedelta(minutes=interval_minutes)
                     break
+            if boundary_uncertain and not touched:
+                # V49: never advance beyond an OHLC boundary whose legal sub-window
+                # cannot be reconstructed. Advancing would permanently hide a real fill.
+                covered_until = since
             if touched:
                 fill = target
                 if setup == "BREAKOUT":
@@ -711,14 +715,16 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             reason = None
             exit_price = None
             exit_time = None
+            boundary_uncertain = False
 
             # Historical events are authoritative. Process them chronologically
             # before considering the current ticker, otherwise a later TP can hide
             # an earlier SL/liquidation after downtime.
             for ts, open_price, high, low, close, partial_start, partial_end in candles:
                 if partial_start or partial_end:
-                    # A boundary OHLC bar is ambiguous; do not manufacture event order.
-                    # Fresh positions are queried at 1m granularity to minimize this blind window.
+                    # V49: preserve the unresolved boundary. Never move the execution cursor
+                    # past it, because a real SL/TP/liquidation may be inside the legal slice.
+                    boundary_uncertain = True
                     continue
                 safe_open, safe_high, safe_low = open_price, high, low
                 liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=safe_open, high=safe_high, low=safe_low)
@@ -734,9 +740,11 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 if tp_hit:
                     reason, exit_price, exit_time = "TP1", tp, ts.isoformat(); break
 
+            if boundary_uncertain and reason is None:
+                covered_until = last_checked
             market = 0.0
             now_dt = _now()
-            history_fresh = covered_until >= now_dt - timedelta(minutes=max(2, interval_minutes * 2))
+            history_fresh = (not boundary_uncertain) and covered_until >= now_dt - timedelta(minutes=max(2, interval_minutes * 2))
             if reason is None and now_dt < max_hold and history_fresh:
                 try:
                     market = _current_market_price(position_client, position["symbol"])
@@ -749,7 +757,7 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
                 elif market > 0 and (market >= tp if side == "LONG" else market <= tp):
                     reason, exit_price, exit_time = "TP1", tp, _iso()
 
-            if reason is None and now_dt >= max_hold and covered_until >= max_hold:
+            if reason is None and (not boundary_uncertain) and now_dt >= max_hold and covered_until >= max_hold:
                 # TIME_EXIT is allowed only once market history covers the hold deadline.
                 # This prevents a stale API response from silently skipping unseen TP/SL events.
                 # Only a fully completed legal candle may provide the time-exit price.

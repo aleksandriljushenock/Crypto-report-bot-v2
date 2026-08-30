@@ -26,3 +26,6 @@
 ## V48
 После V47 выполните `SUPABASE_V48_INTEGRITY.sql`.
 Миграция исправляет namespace Cloud Champion, добавляет fenced lease generation, атомарный compare-and-promote V48 и terminal void/reconcile для Paper execution-data gaps.
+
+## V49 Execution Integrity
+После V48 выполнить `SUPABASE_V49_EXECUTION_INTEGRITY.sql`. Миграция повторяемая: безопасно нормализует legacy namespace и добавляет durable terminal-outcome RPC.

@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_version_v48():
-    assert Path('VERSION').read_text().strip()=='48.0.0'
+    assert Path('VERSION').read_text().strip()in {'48.0.0','49.0.0'}
 
 
 def test_cloud_active_model_is_scoped_by_model_name():
@@ -17,7 +17,7 @@ def test_v48_sql_promotion_is_model_scoped_and_target_checked_first():
     text=Path('migrations/SUPABASE_V48_INTEGRITY.sql').read_text()
     assert 'WHERE model_name=p_model_name AND model_version=p_model_version' in text
     assert "WHERE model_name=p_model_name AND is_active=true" in text
-    assert text.index('v_target_exists') < text.index('UPDATE public.model_registry SET is_active=false')
+    fn=text[text.index('CREATE OR REPLACE FUNCTION public.model_registry_promote_v48'):]; assert fn.index('v_target_exists') < fn.index('UPDATE public.model_registry SET is_active=false')
     assert 'p_lease_generation' in text and "lock_name='v14-training'" in text
 
 

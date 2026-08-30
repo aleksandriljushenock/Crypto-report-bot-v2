@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_v46_version():
-    assert Path('VERSION').read_text().strip() in {'47.0.0','48.0.0'}
+    assert Path('VERSION').read_text().strip() in {'47.0.0','48.0.0','49.0.0'}
 
 
 def test_training_coordinator_is_cross_process(tmp_path):
@@ -60,7 +60,7 @@ def test_shadow_outcomes_use_historical_candles_and_strict_side():
     text=Path('shadow_signals.py').read_text()
     assert 'historical_price_at' in text
     assert 'def _side(direction)' in text
-    assert "fill_dt=cdt+timedelta(minutes=5)" in text
+    assert "fill=target; fill_dt=cend" in text
 
 
 def test_v45_migration_has_dedupe_and_compare_promote():

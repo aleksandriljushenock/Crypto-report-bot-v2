@@ -200,6 +200,18 @@ class CloudLearningStore:
                 logger.exception("Ошибка обновления learning observation id=%s", observation_id)
                 return False
 
+    def mark_terminal_outcome(self, fingerprint: str, horizon: str, reason: str) -> bool:
+        """Atomically merge a terminal horizon marker in Supabase (V49)."""
+        try:
+            response = self.client.rpc("learning_mark_terminal_outcome_v49", {
+                "p_fingerprint": str(fingerprint), "p_horizon": str(horizon), "p_reason": str(reason),
+            }).execute()
+            data = getattr(response, "data", response)
+            return bool(data)
+        except Exception:
+            logger.warning("V49 terminal-outcome RPC unavailable; using metadata merge fallback")
+            return self.update_outcome(str(fingerprint), {"metadata": {"terminal_outcomes": {str(horizon): str(reason)}}})
+
     def update_outcome(self, fingerprint: str, data: dict[str, Any]) -> bool:
         row = self.find_by_fingerprint(fingerprint)
         if not row or not row.get("id"):
@@ -208,7 +220,10 @@ class CloudLearningStore:
         payload = dict(data)
         if isinstance(payload.get("metadata"), dict):
             merged = dict(row.get("metadata") or {})
-            merged.update(payload["metadata"])
+            incoming = dict(payload["metadata"])
+            if isinstance(merged.get("terminal_outcomes"), dict) and isinstance(incoming.get("terminal_outcomes"), dict):
+                terminal = dict(merged["terminal_outcomes"]); terminal.update(incoming["terminal_outcomes"]); incoming["terminal_outcomes"] = terminal
+            merged.update(incoming)
             payload["metadata"] = merged
         return self.update_by_id(str(row["id"]), payload)
 

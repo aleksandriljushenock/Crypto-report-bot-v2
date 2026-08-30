@@ -212,6 +212,12 @@ def sync_pending_from_cloud(limit: int = 10000) -> int:
         })
         if register_trade_signal(payload, cloud_id=str(row.get("id") or ""), preserve_created_at=True):
             imported += 1
+            terminal = metadata.get("terminal_outcomes") if isinstance(metadata.get("terminal_outcomes"), dict) else {}
+            if terminal:
+                with get_connection() as conn:
+                    for horizon, reason in terminal.items():
+                        if horizon in HORIZONS:
+                            conn.execute("INSERT OR REPLACE INTO outcome_failures VALUES (?,?,?,?)", (fingerprint, horizon, str(reason), utc_now().isoformat()))
     return imported
 
 
@@ -379,7 +385,7 @@ def update_trade_outcomes() -> dict[str, Any]:
                         conn.execute("INSERT OR REPLACE INTO outcome_failures VALUES (?,?,?,?)", (row['fingerprint'],horizon,'unrecoverable-history',now.isoformat()))
                         try:
                             from cloud_learning_store import CloudLearningStore
-                            CloudLearningStore().update_outcome(str(row['fingerprint']), {'metadata': {'terminal_outcomes': {horizon: 'unrecoverable-history'}}})
+                            CloudLearningStore().mark_terminal_outcome(str(row['fingerprint']), horizon, 'unrecoverable-history')
                         except Exception:
                             logger.warning('Could not persist terminal outcome to cloud: %s/%s', row['fingerprint'], horizon)
                         errors.append(f"fingerprint={row['fingerprint']}, horizon={horizon}: unrecoverable-history")

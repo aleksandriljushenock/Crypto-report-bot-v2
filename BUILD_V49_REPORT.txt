@@ -1,0 +1,20 @@
+Crypto Report Bot V49.0.0
+Build: Execution Integrity
+Source: user supplied V48.0.0 archive
+
+Fixes:
+- Paper unresolved boundary no longer advances execution cursor.
+- Paper live-price/time-exit overlay is disabled while boundary execution is unresolved.
+- Shadow boundary touch becomes entry_unresolved instead of false expired.
+- Shadow filled_at uses candle end; cloud payload records execution_precision.
+- V48 namespace normalization made collision-safe; V49 remediation migration added.
+- Durable terminal outcome RPC with deep per-horizon metadata merge.
+- Cloud terminal horizon markers restore into local outcome_failures after redeploy.
+
+Validation:
+- compileall PASS
+- pytest -q -W error tests: 212 passed
+- release cleanup removes .env, logs, DB/SQLite, pyc, __pycache__, pytest cache.
+
+External limitation:
+- Supabase/PostgreSQL migration was source/contract tested locally, not executed against the production Supabase instance.
