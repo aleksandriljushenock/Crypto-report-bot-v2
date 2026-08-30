@@ -1,6 +1,7 @@
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class HtxFuturesClient:
@@ -76,7 +77,7 @@ class HtxFuturesClient:
         return self._ticker_row(row)
 
     def klines(self, symbol, interval, limit):
-        period = {"5m": "5min", "15m": "15min", "1h": "60min", "4h": "4hour", "1d": "1day"}.get(interval, interval)
+        period = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "60min", "4h": "4hour", "1d": "1day"}.get(interval, interval)
         rows = self._get("/linear-swap-ex/market/history/kline", {"contract_code": self._contract(symbol), "period": period, "size": min(int(limit), 2000)}) or []
         out = []
         for r in rows:
@@ -84,7 +85,7 @@ class HtxFuturesClient:
             close = float(r.get("close") or 0)
             base = float(r.get("amount") or 0)
             quote = r.get("trade_turnover") or (base * close)
-            out.append([ts, r.get("open"), r.get("high"), r.get("low"), r.get("close"), r.get("amount") or r.get("vol") or 0, ts, quote, int(r.get("count") or 0), 0, 0, "0"])
+            out.append(normalize_candle(ts, r.get("open"), r.get("high"), r.get("low"), r.get("close"), r.get("amount") or r.get("vol") or 0, interval=interval, quote_volume=quote, trade_count=int(r.get("count") or 0)))
         out.sort(key=lambda x: int(x[0] or 0))
         return out[-int(limit):]
 

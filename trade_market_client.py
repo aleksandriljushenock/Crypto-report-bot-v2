@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from candle_contract import normalize_existing_rows
 
 from exchanges.registry import configured_names, create as create_provider, supported_names
 from exchanges.capabilities import CapabilityValue
@@ -298,6 +299,11 @@ class FallbackTradeMarketClient:
             try:
                 _rate_limit(name, method)
                 value = getattr(self.clients[name], method)(*args, **kwargs)
+                if method == "klines":
+                    interval = kwargs.get("interval")
+                    if interval is None and len(args) >= 2:
+                        interval = args[1]
+                    value = normalize_existing_rows(value, str(interval))
                 _mark_success(name, method)
                 self.last_provider = name
                 self.last_errors = errors

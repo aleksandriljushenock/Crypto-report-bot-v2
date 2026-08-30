@@ -200,6 +200,10 @@ def update_shadow_signals():
                     if boundary:
                         if touched:
                             boundary_uncertain=True
+                            # Strict chronological uncertainty: do not accept a later
+                            # definite fill while an earlier boundary may already contain
+                            # the first legal fill.
+                            break
                         continue
                     if touched:
                         fill=target; fill_dt=cend; execution_precision=f'{interval_minutes}m_ohlc'; break

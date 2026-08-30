@@ -2,6 +2,7 @@ import time
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class MexcFuturesClient:
@@ -82,8 +83,10 @@ class MexcFuturesClient:
         return self._ticker_row(row)
 
     def klines(self, symbol, interval, limit):
-        gran = {"5m": "Min5", "15m": "Min15", "1h": "Min60", "4h": "Hour4", "1d": "Day1"}.get(interval, interval)
-        seconds = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(interval, 3600)
+        gran = {"1m": "Min1", "5m": "Min5", "15m": "Min15", "1h": "Min60", "4h": "Hour4", "1d": "Day1"}.get(interval)
+        if gran is None:
+            raise ValueError(f"Unsupported MEXC Futures candle interval: {interval}")
+        seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}[interval]
         end = int(time.time())
         start = end - seconds * max(5, min(int(limit), 1000))
         data = self._get(f"/api/v1/contract/kline/{self._contract(symbol)}", {"interval": gran, "start": start, "end": end}) or {}
@@ -99,7 +102,7 @@ class MexcFuturesClient:
             low = data.get("low", [0] * len(times))[i]
             vol = data.get("vol", [0] * len(times))[i]
             amount = data.get("amount", [0] * len(times))[i]
-            out.append([ts, opn, high, low, close, vol, ts, amount, 0, 0, 0, "0"])
+            out.append(normalize_candle(ts, opn, high, low, close, vol, interval=interval, quote_volume=amount))
         return out
 
     def depth(self, symbol, limit=100):

@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_version_v47():
-    assert Path('VERSION').read_text().strip() in {'47.0.0','48.0.0','49.0.0'}
+    assert Path('VERSION').read_text().strip() in {'47.0.0','48.0.0','49.0.0','50.0.0'}
 
 
 def test_paper_event_fingerprint_reusable_later(monkeypatch):

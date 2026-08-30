@@ -2,6 +2,7 @@ import time
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class HyperliquidFuturesClient:
@@ -70,7 +71,9 @@ class HyperliquidFuturesClient:
 
     def klines(self, symbol, interval, limit):
         coin = self._coin(symbol)
-        ms = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000}.get(interval, 3600000)
+        ms = {"1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000}.get(interval)
+        if ms is None:
+            raise ValueError(f"Unsupported Hyperliquid candle interval: {interval}")
         end = int(time.time() * 1000)
         start = end - ms * max(5, min(int(limit), 5000))
         rows = self._post({"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start, "endTime": end}}) or []
@@ -79,7 +82,7 @@ class HyperliquidFuturesClient:
             ts = int(r.get("t") or 0)
             close = float(r.get("c") or 0)
             vol = float(r.get("v") or 0)
-            out.append([ts, r.get("o"), r.get("h"), r.get("l"), r.get("c"), r.get("v"), int(r.get("T") or ts), str(vol * close), int(r.get("n") or 0), 0, 0, "0"])
+            out.append(normalize_candle(ts, r.get("o"), r.get("h"), r.get("l"), r.get("c"), r.get("v"), interval=interval, quote_volume=str(vol * close), trade_count=int(r.get("n") or 0), close_time_ms=r.get("T")))
         out.sort(key=lambda x: int(x[0] or 0))
         return out[-int(limit):]
 

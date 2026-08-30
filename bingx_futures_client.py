@@ -1,6 +1,7 @@
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class BingxFuturesClient:
@@ -77,7 +78,7 @@ class BingxFuturesClient:
         return self._ticker_row(data)
 
     def klines(self, symbol, interval, limit):
-        gran = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}.get(interval, interval)
+        gran = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}.get(interval, interval)
         rows = self._get("/openApi/swap/v3/quote/klines", {"symbol": self._contract(symbol), "interval": gran, "limit": min(int(limit), 1000)}) or []
         if isinstance(rows, dict):
             rows = rows.get("klines") or rows.get("list") or []
@@ -85,7 +86,7 @@ class BingxFuturesClient:
         for r in rows:
             if isinstance(r, dict):
                 ts = int(r.get("time") or r.get("openTime") or r.get("timestamp") or 0)
-                out.append([ts, r.get("open"), r.get("high"), r.get("low"), r.get("close"), r.get("volume") or 0, ts, r.get("quoteVolume") or r.get("turnover") or 0, 0, 0, 0, "0"])
+                out.append(normalize_candle(ts, r.get("open"), r.get("high"), r.get("low"), r.get("close"), r.get("volume") or 0, interval=interval, quote_volume=r.get("quoteVolume") or r.get("turnover") or 0))
             else:
                 vals = list(r)
                 if len(vals) >= 7:

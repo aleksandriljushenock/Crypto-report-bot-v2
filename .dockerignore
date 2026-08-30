@@ -21,3 +21,8 @@ data/*
 run_*.bat
 
 backups
+cache
+.coverage
+coverage.xml
+htmlcov
+scripts/manual_checks/__pycache__

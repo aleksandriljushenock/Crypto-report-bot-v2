@@ -1,6 +1,7 @@
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class GateFuturesClient:
@@ -48,12 +49,12 @@ class GateFuturesClient:
         return self._ticker_row(rows[0])
 
     def klines(self, symbol, interval, limit):
-        gran = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}.get(interval, interval)
+        gran = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}.get(interval, interval)
         rows = self._get("/futures/usdt/candlesticks", {"contract": self._contract(symbol), "interval": gran, "limit": min(int(limit), 2000)}) or []
         out = []
         for r in rows:
             ts = int(r.get("t") or 0) * 1000
-            out.append([ts, r.get("o"), r.get("h"), r.get("l"), r.get("c"), r.get("v"), ts, r.get("sum") or 0, 0, 0, 0, "0"])
+            out.append(normalize_candle(ts, r.get("o"), r.get("h"), r.get("l"), r.get("c"), r.get("v"), interval=interval, quote_volume=r.get("sum") or 0))
         return out
 
     def depth(self, symbol, limit=100):

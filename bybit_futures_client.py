@@ -5,6 +5,7 @@ import hashlib
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class BybitFuturesClient:
@@ -120,7 +121,7 @@ class BybitFuturesClient:
         return self._ticker_row(rows[0])
 
     def klines(self, symbol, interval, limit):
-        interval_map = {"5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+        interval_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
         result = self._get("/v5/market/kline", {
             "category": "linear", "symbol": symbol,
             "interval": interval_map.get(interval, interval), "limit": min(int(limit), 1000),
@@ -129,7 +130,7 @@ class BybitFuturesClient:
         for item in reversed(result.get("list", [])):
             # Bybit: start, open, high, low, close, volume, turnover
             start, opn, high, low, close, volume, turnover = item[:7]
-            rows.append([start, opn, high, low, close, volume, start, turnover, 0, 0, 0, "0"])
+            rows.append(normalize_candle(start, opn, high, low, close, volume, interval=interval, quote_volume=turnover))
         return rows
 
     def depth(self, symbol, limit=100):

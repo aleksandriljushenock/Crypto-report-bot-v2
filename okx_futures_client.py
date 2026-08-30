@@ -1,6 +1,7 @@
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class OkxFuturesClient:
@@ -67,14 +68,14 @@ class OkxFuturesClient:
         return self._ticker_row(rows[0])
 
     def klines(self, symbol, interval, limit):
-        bars = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
+        bars = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
         rows = self._get("/api/v5/market/candles", {
             "instId": self._inst_id(symbol), "bar": bars.get(interval, interval), "limit": min(int(limit), 300)
         })
         out = []
         for item in reversed(rows):
             ts, opn, high, low, close, vol, vol_ccy, vol_quote = item[:8]
-            out.append([ts, opn, high, low, close, vol, ts, vol_quote, 0, 0, 0, "0"])
+            out.append(normalize_candle(ts, opn, high, low, close, vol, interval=interval, quote_volume=vol_quote))
         return out
 
     def depth(self, symbol, limit=100):

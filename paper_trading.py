@@ -332,6 +332,56 @@ def _liquidation_hit(side: str, liquidation: float, *, open_price: float, high: 
     return high >= liquidation, open_price >= liquidation
 
 
+
+
+def _scan_pending_entry_candles(candles, *, target: float, side: str, setup: str, interval_minutes: int):
+    """Return (touched, touch_time, boundary_uncertain).
+
+    A partial boundary only blocks chronology when its full OHLC range could
+    contain the entry. If it cannot possibly contain the entry, later candles
+    remain authoritative.
+    """
+    for ts, open_price, high, low, close, partial_start, partial_end in candles:
+        if setup == "PULLBACK":
+            touched = low <= target if side == "LONG" else high >= target
+        else:
+            touched = high >= target if side == "LONG" else low <= target
+        if partial_start or partial_end:
+            if touched:
+                return False, None, True
+            continue
+        if touched:
+            return True, ts + timedelta(minutes=interval_minutes), False
+    return False, None, False
+
+
+def _scan_open_exit_candles(candles, *, side: str, stop: float, tp: float, liquidation: float):
+    """Return (reason, exit_price, exit_time, boundary_uncertain).
+
+    The first chronologically unresolved candle is a hard barrier if its OHLC
+    range could contain any execution event. Later candles must not decide PnL
+    until that earlier interval is resolved.
+    """
+    for ts, open_price, high, low, close, partial_start, partial_end in candles:
+        liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=open_price, high=high, low=low)
+        stop_hit = low <= stop if side == "LONG" else high >= stop
+        tp_hit = high >= tp if side == "LONG" else low <= tp
+        if partial_start or partial_end:
+            if liq_hit or stop_hit or tp_hit:
+                return None, None, None, True
+            continue
+        if liq_hit:
+            reason = "LIQUIDATION_GAP" if opened_beyond_liq else "LIQUIDATION_CONSERVATIVE"
+            return reason, liquidation, ts.isoformat(), False
+        if stop_hit and tp_hit:
+            return "SL_CONSERVATIVE", stop, ts.isoformat(), False
+        if stop_hit:
+            return "SL", stop, ts.isoformat(), False
+        if tp_hit:
+            return "TP1", tp, ts.isoformat(), False
+    return None, None, None, False
+
+
 def _fill_pending_position(position: dict[str, Any], fill_price: float, fill_source: str = "trigger", execution_provider: Optional[str] = None, filled_at: Optional[datetime] = None) -> dict[str, Any]:
     if fill_price <= 0:
         return {"status": "invalid-fill"}
@@ -619,27 +669,10 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             lookback_hours = max(0.05, (_now() - since).total_seconds() / 3600.0 + 0.05)
             rows, _, interval_minutes = _execution_klines(client, position["symbol"], lookback_hours=lookback_hours)
             covered_until = _next_paper_cursor(since, rows, interval_minutes=interval_minutes, ceiling=pending_until)
-            touched = False
-            touch_time = None
-            boundary_uncertain = False
-            for ts, open_price, high, low, close, partial_start, partial_end in _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until):
-                if partial_start or partial_end:
-                    boundary_uncertain = True
-                    # A boundary OHLC bar contains prices outside the legal event-time
-                    # window. Its close can also occur after the deadline, so do not use
-                    # any part of an ambiguous bar for entry execution.
-                    continue
-                effective_low, effective_high = low, high
-                if setup == "PULLBACK":
-                    touched = effective_low <= target if side == "LONG" else effective_high >= target
-                else:
-                    touched = effective_high >= target if side == "LONG" else effective_low <= target
-                if touched:
-                    # OHLC does not reveal the intra-bar touch time. Conservatively
-                    # establish the fill at the end of the completed candle so the same
-                    # candle can never also generate a TP/SL after an unknown-order entry.
-                    touch_time = ts + timedelta(minutes=interval_minutes)
-                    break
+            candles = _iter_execution_candles(rows, since=since, interval_minutes=interval_minutes, not_before=_parse_ts(position.get("created_at")), not_after=pending_until)
+            touched, touch_time, boundary_uncertain = _scan_pending_entry_candles(
+                candles, target=target, side=side, setup=setup, interval_minutes=interval_minutes
+            )
             if boundary_uncertain and not touched:
                 # V49: never advance beyond an OHLC boundary whose legal sub-window
                 # cannot be reconstructed. Advancing would permanently hide a real fill.
@@ -712,33 +745,11 @@ def update_positions(notifier: Optional[Callable[[str], None]] = None) -> dict[s
             stop = float(position.get("stop_price") or 0)
             tp = float(position.get("tp1_price") or 0)
             liquidation = float(position.get("estimated_liquidation_price") or 0)
-            reason = None
-            exit_price = None
-            exit_time = None
-            boundary_uncertain = False
-
-            # Historical events are authoritative. Process them chronologically
-            # before considering the current ticker, otherwise a later TP can hide
-            # an earlier SL/liquidation after downtime.
-            for ts, open_price, high, low, close, partial_start, partial_end in candles:
-                if partial_start or partial_end:
-                    # V49: preserve the unresolved boundary. Never move the execution cursor
-                    # past it, because a real SL/TP/liquidation may be inside the legal slice.
-                    boundary_uncertain = True
-                    continue
-                safe_open, safe_high, safe_low = open_price, high, low
-                liq_hit, opened_beyond_liq = _liquidation_hit(side, liquidation, open_price=safe_open, high=safe_high, low=safe_low)
-                stop_hit = safe_low <= stop if side == "LONG" else safe_high >= stop
-                tp_hit = safe_high >= tp if side == "LONG" else safe_low <= tp
-                if liq_hit:
-                    reason = "LIQUIDATION_GAP" if opened_beyond_liq else "LIQUIDATION_CONSERVATIVE"
-                    exit_price, exit_time = liquidation, ts.isoformat(); break
-                if stop_hit and tp_hit:
-                    reason, exit_price, exit_time = "SL_CONSERVATIVE", stop, ts.isoformat(); break
-                if stop_hit:
-                    reason, exit_price, exit_time = "SL", stop, ts.isoformat(); break
-                if tp_hit:
-                    reason, exit_price, exit_time = "TP1", tp, ts.isoformat(); break
+            # Historical events are authoritative. Strict chronological ordering
+            # prevents a later TP from hiding an unresolved earlier SL/liquidation.
+            reason, exit_price, exit_time, boundary_uncertain = _scan_open_exit_candles(
+                candles, side=side, stop=stop, tp=tp, liquidation=liquidation
+            )
 
             if boundary_uncertain and reason is None:
                 covered_until = last_checked

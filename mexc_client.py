@@ -116,8 +116,7 @@ class MexcSpotClient:
             if cached is not None:
                 return cached
 
-                last_error = None
-
+        last_error = None
         for attempt in range(6):
             try:
                 response = self.session.get(
@@ -134,6 +133,7 @@ class MexcSpotClient:
                 )
 
                 if response.status_code == 429:
+                    last_error = RuntimeError(f"MEXC rate limited: HTTP 429 on attempt {attempt + 1}")
                     wait_seconds = 3 + attempt * 3
                     time.sleep(wait_seconds)
                     continue

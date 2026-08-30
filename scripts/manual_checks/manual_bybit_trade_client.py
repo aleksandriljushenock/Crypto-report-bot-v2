@@ -24,7 +24,7 @@ class BybitAdapterTests(unittest.TestCase):
             ["100", "1", "2", "0.5", "1.5", "8", "12"],
         ]}
         rows = self.client.klines("BTCUSDT", "1h", 2)
-        self.assertEqual(int(rows[0][0]), 100)
+        self.assertEqual(rows[0][0], "100")
         self.assertEqual(len(rows[0]), 12)
         self.assertEqual(rows[0][7], "12")
 

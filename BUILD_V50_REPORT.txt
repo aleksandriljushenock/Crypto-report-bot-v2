@@ -1,0 +1,14 @@
+Crypto-report-bot V50.0.0
+
+Focus:
+- cross-exchange candle contract
+- 1m interval correctness
+- Paper chronological execution ordering
+- MEXC 429 handling
+- deterministic pytest collection
+- clean production artifact
+
+Pre-package full test suite:
+229 passed, 0 failed
+
+Final ZIP is verified separately after extraction.

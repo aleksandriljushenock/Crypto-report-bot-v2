@@ -2,6 +2,7 @@ import time
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class KucoinFuturesClient:
@@ -83,7 +84,9 @@ class KucoinFuturesClient:
         return self._ticker_row(data)
 
     def klines(self, symbol, interval, limit):
-        gran = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(interval, 3600)
+        gran = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(interval)
+        if gran is None:
+            raise ValueError(f"Unsupported KuCoin candle interval: {interval}")
         end = int(time.time() * 1000)
         start = end - gran * 1000 * max(5, min(int(limit), 500))
         rows = self._get("/api/v1/kline/query", {"symbol": self._contract(symbol), "granularity": gran, "from": start, "to": end}) or []
@@ -92,7 +95,7 @@ class KucoinFuturesClient:
             if len(r) < 7:
                 continue
             ts, opn, high, low, close, vol, turnover = r[:7]
-            out.append([ts, opn, high, low, close, vol, ts, turnover, 0, 0, 0, "0"])
+            out.append(normalize_candle(ts, opn, high, low, close, vol, interval=interval, quote_volume=turnover))
         out.sort(key=lambda x: int(x[0] or 0))
         return out[-int(limit):]
 

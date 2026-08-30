@@ -1,6 +1,7 @@
 import requests
 
 from market_errors import UnsupportedSymbolError
+from candle_contract import normalize_candle
 
 
 class BitgetFuturesClient:
@@ -46,12 +47,12 @@ class BitgetFuturesClient:
         return self._ticker_row(rows[0])
 
     def klines(self, symbol, interval, limit):
-        gran = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}.get(interval, interval)
+        gran = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}.get(interval, interval)
         rows = self._get("/api/v2/mix/market/candles", {"symbol": symbol, "productType": "usdt-futures", "granularity": gran, "limit": min(int(limit), 1000)}) or []
         out = []
         for item in reversed(rows):
             ts, opn, high, low, close, base_vol, quote_vol = item[:7]
-            out.append([ts, opn, high, low, close, base_vol, ts, quote_vol, 0, 0, 0, "0"])
+            out.append(normalize_candle(ts, opn, high, low, close, base_vol, interval=interval, quote_volume=quote_vol))
         return out
 
     def depth(self, symbol, limit=100):
