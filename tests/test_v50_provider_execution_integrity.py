@@ -213,3 +213,41 @@ def test_shadow_source_has_chronology_barrier_for_touched_boundary():
     block = src[start:start + 500]
     assert "boundary_uncertain=True" in block
     assert "break" in block
+
+
+def test_mexc_futures_retries_transient_429_then_recovers(monkeypatch):
+    import mexc_futures_client as m
+    class Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self.headers = {}
+            self._payload = payload or {}
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import requests
+                raise requests.HTTPError(str(self.status_code))
+        def json(self): return self._payload
+    class Session:
+        def __init__(self): self.calls = 0
+        def get(self, *a, **k):
+            self.calls += 1
+            if self.calls == 1: return Resp(429)
+            return Resp(200, {"success": True, "data": {"ok": 1}})
+    c = m.MexcFuturesClient(); c.session = Session()
+    monkeypatch.setattr(m.time, "sleep", lambda *a, **k: None)
+    assert c._get("/x") == {"ok": 1}
+    assert c.session.calls == 2
+
+
+def test_mexc_futures_404_is_not_retried(monkeypatch):
+    import mexc_futures_client as m
+    from market_errors import UnsupportedSymbolError
+    class Resp:
+        status_code = 404
+        headers = {}
+    class Session:
+        def __init__(self): self.calls = 0
+        def get(self, *a, **k): self.calls += 1; return Resp()
+    c = m.MexcFuturesClient(); c.session = Session()
+    with pytest.raises(UnsupportedSymbolError): c._get("/x")
+    assert c.session.calls == 1

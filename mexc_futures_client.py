@@ -24,17 +24,41 @@ class MexcFuturesClient:
         return str(contract or "").replace("_", "").replace("-", "").upper()
 
     def _get(self, path, params=None):
-        response = self.session.get(f"{self.base_url}{path}", params=params, timeout=self.timeout)
-        if response.status_code == 404:
-            raise UnsupportedSymbolError(f"MEXC market not found: {params or path}")
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("success", False):
-            code = payload.get("code")
-            if code in {6004, 6005}:
-                raise UnsupportedSymbolError(f"MEXC symbol unavailable: {params or path}")
-            raise RuntimeError(f"MEXC error {code}: {payload.get('message') or payload.get('msg')}")
-        return payload.get("data")
+        url = f"{self.base_url}{path}"
+        last_error = None
+        for attempt in range(4):
+            try:
+                response = self.session.get(url, params=params, timeout=(5, self.timeout))
+                if response.status_code == 404:
+                    raise UnsupportedSymbolError(f"MEXC market not found: {params or path}")
+                if response.status_code in {429, 500, 502, 503, 504}:
+                    last_error = RuntimeError(f"MEXC futures transient HTTP {response.status_code}")
+                    if attempt < 3:
+                        retry_after = response.headers.get("Retry-After")
+                        try:
+                            delay = float(retry_after) if retry_after is not None else 0.5 * (2 ** attempt)
+                        except (TypeError, ValueError):
+                            delay = 0.5 * (2 ** attempt)
+                        time.sleep(min(max(delay, 0.0), 5.0))
+                        continue
+                    break
+                response.raise_for_status()
+                payload = response.json()
+                if not payload.get("success", False):
+                    code = payload.get("code")
+                    if code in {6004, 6005}:
+                        raise UnsupportedSymbolError(f"MEXC symbol unavailable: {params or path}")
+                    raise RuntimeError(f"MEXC error {code}: {payload.get('message') or payload.get('msg')}")
+                return payload.get("data")
+            except UnsupportedSymbolError:
+                raise
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(min(0.5 * (2 ** attempt), 5.0))
+                    continue
+                break
+        raise RuntimeError(f"MEXC futures request failed: {url} {params} | {last_error}") from last_error
 
     @classmethod
     def _ticker_row(cls, row):

@@ -1,0 +1,15 @@
+Crypto-report-bot V51.0.0
+
+Base: V50.0.0
+
+Fixed:
+- MEXC Futures transient HTTP 429/500/502/503/504 now uses bounded retry/backoff.
+- MEXC Futures network request failures retry before failing over.
+- MEXC Futures 404 remains fail-fast UnsupportedSymbolError.
+- Removed accidental empty production artifacts: None, int, 0.5).astype(int).
+- Updated stale version regression assertions for V51.
+- Added 2 MEXC Futures regression tests.
+
+Validation before package:
+- python -m compileall -q . : PASS
+- pytest -q : 231 passed, 0 failed

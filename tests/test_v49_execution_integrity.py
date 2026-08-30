@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 
 def test_version_v49():
-    assert Path('VERSION').read_text().strip() in {'49.0.0','50.0.0'}
+    assert Path('VERSION').read_text().strip() in {'49.0.0','50.0.0','51.0.0'}
 
 
 def test_v48_migration_normalizes_namespace_without_active_collision():
