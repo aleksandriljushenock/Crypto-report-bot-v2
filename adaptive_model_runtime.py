@@ -12,6 +12,15 @@ def _enabled() -> bool:
 
 def _load() -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if not _enabled(): return None, None
+    # V52: Paper-trained probability is shadow-only until the execution ledger
+    # is large enough to support a stable chronological validation.
+    try:
+        from repositories.paper_repository import PaperRepository
+        minimum = max(1, int(float(os.getenv("ADAPTIVE_MODEL_RUNTIME_MIN_TRADES", "150"))))
+        if len(PaperRepository().valid_closed_positions(minimum, ascending=False)) < minimum:
+            return None, None
+    except Exception:
+        return None, None
     ttl = max(30, int(float(os.getenv("ADAPTIVE_MODEL_CACHE_SECONDS", "300"))))
     now = time.time()
     if now - _CACHE["at"] < ttl:

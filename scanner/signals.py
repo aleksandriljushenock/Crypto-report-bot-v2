@@ -35,6 +35,8 @@ def row_to_signal(row):
     return {
         'fingerprint': fingerprint,
         'symbol': score.get('symbol'),
+        'timeframe': 'multi_tf',
+        'primaryTimeframe': '15m',
         'direction': score.get('direction'),
         'status': rules.get('finalStatus'),
         'setup': setup,

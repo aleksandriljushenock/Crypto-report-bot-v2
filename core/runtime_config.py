@@ -93,13 +93,25 @@ class ScannerConfig:
 
 def scanner_config() -> ScannerConfig:
     from config import MIN_QUOTE_VOLUME_USDT
+    low_memory = boolean("LOW_MEMORY_MODE", False, strategy=False)
+    # Infrastructure safety caps are environment-owned and cannot be weakened by
+    # Supabase strategy settings.  This keeps a 512 MB deployment memory-safe.
+    workers = integer("TRADE_SCAN_MAX_WORKERS", 4, minimum=1, maximum=8)
+    top_symbols = integer("TRADE_TOP_LIQUID_SYMBOLS", 150, minimum=1, maximum=500)
+    batch_size = integer("TRADE_SCAN_BATCH_SIZE", 16, minimum=2, maximum=32)
+    hedge_pool = integer("HEDGE_CANDIDATE_POOL", 40, minimum=1, maximum=250)
+    if low_memory:
+        workers = min(workers, integer("LOW_MEMORY_MAX_SCAN_WORKERS", 2, minimum=1, maximum=4, strategy=False))
+        top_symbols = min(top_symbols, integer("LOW_MEMORY_MAX_TOP_SYMBOLS", 90, minimum=20, maximum=200, strategy=False))
+        batch_size = min(batch_size, integer("LOW_MEMORY_MAX_SCAN_BATCH", 8, minimum=2, maximum=16, strategy=False))
+        hedge_pool = min(hedge_pool, integer("LOW_MEMORY_MAX_HEDGE_POOL", 20, minimum=5, maximum=60, strategy=False))
     return ScannerConfig(
         multi_exchange=boolean("MULTI_EXCHANGE_UNIVERSE_ENABLED", True),
-        top_symbols=integer("TRADE_TOP_LIQUID_SYMBOLS", 150, minimum=1, maximum=500),
+        top_symbols=top_symbols,
         fast_pool=integer("FAST_SCAN_POOL_SIZE", 500, minimum=1, maximum=2000),
-        batch_size=integer("TRADE_SCAN_BATCH_SIZE", 16, minimum=2, maximum=32),
-        workers=integer("TRADE_SCAN_MAX_WORKERS", 4, minimum=1, maximum=8),
-        hedge_pool=integer("HEDGE_CANDIDATE_POOL", 40, minimum=1, maximum=250),
+        batch_size=batch_size,
+        workers=workers,
+        hedge_pool=hedge_pool,
         min_quote_volume=number("MULTI_EXCHANGE_MIN_QUOTE_VOLUME_USDT", float(MIN_QUOTE_VOLUME_USDT), minimum=0),
         universe_timeout=integer("MULTI_EXCHANGE_UNIVERSE_TIMEOUT", 8, minimum=1, maximum=60),
         min_venues=integer("MULTI_EXCHANGE_MIN_VENUES", 1, minimum=1, maximum=len(DEFAULT_PROVIDERS)),

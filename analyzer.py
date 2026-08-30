@@ -311,17 +311,50 @@ def calculate_score(symbol_data):
     ]
 
     bearish_conditions = [
-        struct_1h == "BOS_DOWN",
+        struct_1h in ["BOS_DOWN", "SWEEP_HIGH", "RANGE"],
         trend_1h <= 1,
         ema20_1h is not None and last_price < ema20_1h,
         vwap_15m is not None and last_price < vwap_15m,
-        taker < 0.9,
+        taker <= 0.95,
     ]
 
     if sum(bullish_conditions) >= 4:
         direction = "LONG_BIAS"
     elif sum(bearish_conditions) >= 4:
         direction = "SHORT_BIAS"
+
+    # V52: the old scalar score rewarded bullish structure and penalized bearish
+    # structure before direction was known, making SHORT candidates structurally
+    # unable to reach the same gate. Re-score technical evidence symmetrically.
+    if direction != "NO_TRADE":
+        directional = 0.0
+        directional += 15 if quote_volume >= 100_000_000 else (8 if quote_volume >= 50_000_000 else 0)
+        directional += 10 if atr_1h >= 1.0 else (5 if atr_1h >= 0.5 else 0)
+        directional += 8 if rv_15m >= 1.5 else (4 if rv_15m >= 1.1 else 0)
+        directional += 8 if rv_1h >= 1.5 else (4 if rv_1h >= 1.1 else 0)
+        directional += 5 if -0.02 <= funding <= 0.02 else 0
+        directional += 3 if 0.8 <= ls_ratio <= 1.4 else 0
+        if direction == "LONG_BIAS":
+            directional += trend_15m * 2 + trend_1h * 3 + trend_4h * 4
+            directional += 10 if (ema20_1h and ema50_1h and last_price > ema20_1h > ema50_1h) else (5 if ema20_1h and last_price > ema20_1h else 0)
+            directional += 5 if ema200_1h and last_price > ema200_1h else 0
+            directional += 5 if vwap_15m and last_price > vwap_15m else 0
+            directional += 10 if struct_15m == "BOS_UP" else (8 if struct_15m == "SWEEP_LOW" else (2 if struct_15m == "RANGE" else 0))
+            directional += 15 if struct_1h == "BOS_UP" else (10 if struct_1h == "SWEEP_LOW" else (3 if struct_1h == "RANGE" else 0))
+            directional += 5 if ob_imbalance > 0.10 else 0
+            directional += 5 if taker > 1.05 else 0
+            directional += 5 if rsi_1h is not None and 45 <= rsi_1h <= 65 else 0
+        else:
+            directional += (4-trend_15m) * 2 + (4-trend_1h) * 3 + (4-trend_4h) * 4
+            directional += 10 if (ema20_1h and ema50_1h and last_price < ema20_1h < ema50_1h) else (5 if ema20_1h and last_price < ema20_1h else 0)
+            directional += 5 if ema200_1h and last_price < ema200_1h else 0
+            directional += 5 if vwap_15m and last_price < vwap_15m else 0
+            directional += 10 if struct_15m == "BOS_DOWN" else (8 if struct_15m == "SWEEP_HIGH" else (2 if struct_15m == "RANGE" else 0))
+            directional += 15 if struct_1h == "BOS_DOWN" else (10 if struct_1h == "SWEEP_HIGH" else (3 if struct_1h == "RANGE" else 0))
+            directional += 5 if ob_imbalance < -0.10 else 0
+            directional += 5 if taker < 0.95 else 0
+            directional += 5 if rsi_1h is not None and 35 <= rsi_1h <= 55 else 0
+        score = max(0, min(100, directional))
 
     if score >= 75 and direction != "NO_TRADE":
         status = "TRADE_CANDIDATE"

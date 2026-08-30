@@ -4,13 +4,14 @@ Lightweight by design: no pandas/sklearn at runtime. The bundled profile is
 precomputed from durable Supabase observations and combined with live factors.
 """
 from __future__ import annotations
-import json, math, os
+import json, math, os, time
 from core.runtime_config import boolean, integer, number, string
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 PROFILE_PATH=Path(string('PROFIT_PROFILE_PATH','data/profit_profile_v2.json', strategy=False))
 _CACHE=None
+_EXECUTION_CACHE={"at":0.0,"rows":[]}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -46,6 +47,45 @@ def _profile():
 
 def _group_stat(group,key):
     return ((_profile().get('groups') or {}).get(group) or {}).get(str(key)) or {}
+
+def _execution_calibration(signal: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a Bayesian Paper-execution win-rate prior for live calibration."""
+    global _EXECUTION_CACHE
+    ttl=max(30, _env_int('EXECUTION_CALIBRATION_CACHE_SECONDS',300))
+    now=time.time()
+    if now-float(_EXECUTION_CACHE.get('at') or 0)>ttl:
+        try:
+            from repositories.paper_repository import PaperRepository
+            rows=PaperRepository().all_valid_closed_positions(_env_int('EXECUTION_CALIBRATION_MAX_TRADES',1000), ascending=True)
+            _EXECUTION_CACHE={'at':now,'rows':rows}
+        except Exception:
+            _EXECUTION_CACHE={'at':now,'rows':[]}
+    rows=list(_EXECUTION_CACHE.get('rows') or [])
+    minimum=max(10,_env_int('EXECUTION_CALIBRATION_MIN_TRADES',20))
+    if len(rows)<minimum:
+        return {'available':False,'samples':len(rows)}
+    direction=str(signal.get('direction') or '').upper().replace('_BIAS','')
+    setup=str(signal.get('setup') or '').upper()
+    matched=[]
+    for row in rows:
+        payload=row.get('signal_payload') or {}
+        if isinstance(payload,str):
+            try: payload=json.loads(payload)
+            except Exception: payload={}
+        row_dir=str(row.get('side') or payload.get('direction') or '').upper().replace('_BIAS','')
+        row_setup=str(payload.get('setup') or '').upper()
+        if row_dir==direction and (not setup or not row_setup or row_setup==setup):
+            matched.append(row)
+    selected=matched if len(matched)>=max(8,minimum//2) else rows
+    wins=sum(1 for r in selected if float(r.get('net_pnl') or 0)>1e-9)
+    losses=sum(1 for r in selected if float(r.get('net_pnl') or 0)<-1e-9)
+    n=wins+losses
+    if n<minimum:
+        return {'available':False,'samples':n}
+    # Conservative Beta prior around 50%; execution evidence dominates gradually.
+    rate=(wins+3.0)/(n+6.0)*100.0
+    return {'available':True,'samples':n,'wins':wins,'losses':losses,'probability':round(rate,2),
+            'scope':'direction_setup' if selected is matched else 'global'}
 
 def _bayes_rate(prior_pct, wins_pct, n, strength=24.0):
     if not n:return prior_pct
@@ -204,6 +244,12 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     hits=_rule_hits(signal); adjustment=sum(h['adjustment'] for h in hits)
     cap=number('HEDGE_MAX_RULE_ADJUSTMENT',24.0); adjustment=max(-cap,min(cap,adjustment))
     calibrated=_clamp(calibrated+adjustment*0.45,2,92)
+    execution_calibration=_execution_calibration(signal)
+    if execution_calibration.get('available'):
+        n=max(1,int(execution_calibration.get('samples') or 0))
+        max_weight=max(0.0,min(0.75,_env_float('EXECUTION_CALIBRATION_MAX_WEIGHT',0.25)))
+        weight=min(max_weight, n/(n+40.0))
+        calibrated=(1.0-weight)*calibrated+weight*float(execution_calibration.get('probability') or calibrated)
     rr=max(0.01,float(signal.get('rr') or 0))
     # Prefer actual TP/SL geometry when available, fallback to RR-normalized payoffs.
     entry=float(signal.get('entryPrice') or 0); stop=float(signal.get('stop') or 0); tp=float(signal.get('tp1') or 0)
@@ -254,4 +300,5 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
       'adaptiveModelAvailable':bool(adaptive.get('available')),
       'adaptiveModelVersion':adaptive.get('version'),
       'adaptiveModelProbability':adaptive.get('probability'),
+      'executionCalibration':execution_calibration,
     }

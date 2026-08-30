@@ -1,0 +1,21 @@
+Crypto-report-bot v52.0.0
+Release: Learning Correctness
+
+Primary changes:
+- execution-first learning target from canonical Paper outcomes
+- legacy target model fencing
+- cloud-authoritative champion + post-promotion verification
+- dataset health watchdog
+- LONG/SHORT directional scoring parity
+- final post-model execution gate
+- Paper execution Bayesian probability calibration
+- Adaptive runtime minimum sample fence
+- Chronos shadow-only blend by default
+- walk-forward embargo + minimum 4 folds
+- correlated symbol/day sample weighting
+- constant feature exclusion
+- timeframe metadata fix
+- low-memory runtime caps
+
+Regression suite: 235 passed
+Compileall: PASS

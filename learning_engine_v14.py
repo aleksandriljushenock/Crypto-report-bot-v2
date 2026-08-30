@@ -162,13 +162,149 @@ def _normalize_direction(value: Any) -> str:
     return value
 
 
+def _execution_samples() -> Dict[str, Dict[str, Any]]:
+    """Load canonical filled+closed Paper outcomes keyed by signal fingerprint.
+
+    V52 treats execution outcome as the primary learning target.  A 24h mark-to-market
+    move is only a fallback for signals that were never executed.
+    """
+    if os.getenv("LEARNING_EXECUTION_TARGET_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+        return {}
+    try:
+        from repositories.paper_repository import PaperRepository
+        rows = PaperRepository().all_valid_closed_positions(None, ascending=True)
+    except Exception:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        fp = str(row.get("fingerprint") or "")
+        if not fp:
+            continue
+        try:
+            margin = float(row.get("margin_usd") or 0.0)
+            pnl = float(row.get("net_pnl") or 0.0)
+            return_pct = (pnl / margin * 100.0) if margin > 0 else 0.0
+            entry = float(row.get("entry_price") or 0.0)
+            stop = float(row.get("stop_price") or 0.0)
+            risk_pct = abs(entry - stop) / entry * 100.0 if entry > 0 and stop > 0 else 0.0
+            r_multiple = (return_pct / risk_pct) if risk_pct > 1e-9 else 0.0
+        except Exception:
+            continue
+        out[fp] = {
+            "return": max(-100.0, min(100.0, return_pct)),
+            "net_pnl": pnl,
+            "r_multiple": max(-20.0, min(20.0, r_multiple)),
+            "win": 1.0 if pnl > 1e-9 else (0.0 if pnl < -1e-9 else 0.5),
+            "close_reason": str(row.get("close_reason") or "UNKNOWN"),
+            "opened_at": row.get("opened_at"),
+            "closed_at": row.get("closed_at"),
+            "source": "paper_execution",
+        }
+    return out
+
+
+def _paper_learning_samples() -> List[Dict[str, Any]]:
+    """Build complete learning rows directly from canonical closed Paper positions.
+
+    This also covers executed signals that were never present in tracked_signals or
+    learning_observations because a process restarted between persistence steps.
+    """
+    try:
+        from repositories.paper_repository import PaperRepository
+        rows = PaperRepository().all_valid_closed_positions(None, ascending=True)
+    except Exception:
+        return []
+    result=[]
+    for row in rows:
+        payload=_json(row.get("signal_payload"), {}) or {}
+        factors=payload.get("aiFactors") or {}
+        fp=str(row.get("fingerprint") or payload.get("fingerprint") or "")
+        if not fp or not all(k in factors for k in FEATURES):
+            continue
+        try:
+            margin=float(row.get("margin_usd") or 0.0); pnl=float(row.get("net_pnl") or 0.0)
+            ret=(pnl/margin*100.0) if margin>0 else 0.0
+            entry=float(row.get("entry_price") or 0.0); stop=float(row.get("stop_price") or 0.0)
+            risk=abs(entry-stop)/entry*100.0 if entry>0 and stop>0 else 0.0
+            rmult=ret/risk if risk>1e-9 else 0.0
+        except Exception:
+            continue
+        result.append({
+            "fingerprint":fp,"symbol":row.get("symbol"),
+            "timeframe":payload.get("timeframe") or payload.get("primaryTimeframe") or "multi_tf",
+            "direction":_normalize_direction(row.get("side") or payload.get("direction")),
+            "created_at":row.get("opened_at") or payload.get("signal_created_at") or row.get("closed_at") or now_iso(),
+            "old_score":float(payload.get("aiScore") or payload.get("score") or 0),
+            "factors":{k:float(factors.get(k,50)) for k in FEATURES},
+            "returns":{}, "return":max(-100.0,min(100.0,ret)),
+            "win":1.0 if pnl>1e-9 else (0.0 if pnl<-1e-9 else 0.5),
+            "r_multiple":max(-20.0,min(20.0,rmult)), "net_pnl":pnl,
+            "close_reason":str(row.get("close_reason") or "UNKNOWN"),
+            "target_horizon":"execution","target_source":"paper_execution",
+        })
+    return result
+
+
+def _feature_quality(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Detect constant/near-constant features before optimization."""
+    inactive, details = [], {}
+    min_std = max(0.0, float(_runtime_env("LEARNING_FEATURE_MIN_STD", "0.75")))
+    for key in FEATURES:
+        vals = [float((s.get("factors") or {}).get(key, 50.0)) for s in samples]
+        if not vals:
+            inactive.append(key); details[key] = {"std": 0.0, "range": 0.0}; continue
+        avg = sum(vals) / len(vals)
+        var = sum((v-avg)**2 for v in vals) / max(1, len(vals)-1)
+        std = math.sqrt(var); span = max(vals)-min(vals)
+        details[key] = {"std": round(std, 4), "range": round(span, 4)}
+        if std < min_std or span < min_std * 2:
+            inactive.append(key)
+    return {"inactive": inactive, "details": details}
+
+
+def _dataset_health(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fail-closed promotion watchdog for stale, one-sided or low-quality datasets."""
+    now = datetime.now(timezone.utc)
+    dirs = {"LONG": 0, "SHORT": 0, "OTHER": 0}
+    newest = None
+    by_symbol_day: Dict[str, int] = {}
+    for sample in samples:
+        d = _normalize_direction(sample.get("direction"))
+        dirs[d if d in dirs else "OTHER"] += 1
+        try:
+            dt = datetime.fromisoformat(str(sample.get("created_at") or "").replace("Z", "+00:00"))
+            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+            newest = dt if newest is None or dt > newest else newest
+            key = f"{str(sample.get('symbol') or '').upper()}|{dt.date().isoformat()}"
+            by_symbol_day[key] = by_symbol_day.get(key, 0) + 1
+        except Exception:
+            pass
+    age_hours = (now-newest).total_seconds()/3600 if newest else 1e9
+    min_direction = max(0, int(_runtime_env("LEARNING_MIN_DIRECTION_SAMPLES", "40")))
+    max_stale = max(1.0, float(_runtime_env("LEARNING_MAX_DATA_AGE_HOURS", "72")))
+    execution_count = sum(1 for s in samples if s.get("target_source") == "paper_execution")
+    min_execution = max(0, int(_runtime_env("LEARNING_MIN_EXECUTION_SAMPLES_FOR_PROMOTION", "30")))
+    reasons=[]
+    if age_hours > max_stale: reasons.append("stale_dataset")
+    if dirs["LONG"] and dirs["SHORT"] < min_direction: reasons.append("short_underrepresented")
+    if dirs["SHORT"] and dirs["LONG"] < min_direction: reasons.append("long_underrepresented")
+    if execution_count < min_execution: reasons.append("insufficient_execution_targets")
+    concentration = max(by_symbol_day.values()) / max(1, len(samples)) if by_symbol_day else 0.0
+    if concentration > float(_runtime_env("LEARNING_MAX_SYMBOL_DAY_CONCENTRATION", "0.12")):
+        reasons.append("symbol_day_concentration")
+    fq=_feature_quality(samples)
+    return {"healthy": not reasons, "reasons": reasons, "newest_age_hours": round(age_hours,2),
+            "directions": dirs, "execution_targets": execution_count, "concentration": round(concentration,4),
+            "feature_quality": fq}
+
+
 def _cloud_samples() -> List[Dict[str, Any]]:
     """Rebuild learning samples from persistent Supabase observations."""
     if os.getenv("LEARNING_CLOUD_RESTORE_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
         return []
     try:
         from cloud_learning_store import CloudLearningStore
-        rows = CloudLearningStore().resolved_rows(limit=int(os.getenv("LEARNING_CLOUD_MAX_ROWS", "3000")))
+        rows = CloudLearningStore().resolved_rows(limit=int(_runtime_env("LEARNING_CLOUD_MAX_ROWS", "5000")))
     except Exception:
         return []
     result = []
@@ -269,28 +405,60 @@ def load_samples() -> List[Dict[str, Any]]:
             existing["returns"].update(item.get("returns") or {})
         else:
             grouped[fp] = item
+    paper_direct = {str(x.get("fingerprint")): x for x in _paper_learning_samples() if x.get("fingerprint")}
+    # Keep the richer market-history sample when available; execution target is
+    # attached below. Add direct Paper samples only when the observation is absent.
+    for fp, item in paper_direct.items():
+        grouped.setdefault(fp, item)
     grouped_samples = _dedupe_samples(list(grouped.values()))
+    execution = _execution_samples()
     result = []
-    target_horizon = str(os.getenv("LEARNING_TARGET_HORIZON", "24h")).lower()
+    target_horizon = str(_runtime_env("LEARNING_TARGET_HORIZON", "24h")).lower()
     if target_horizon not in HORIZONS:
         target_horizon = "24h"
     for item in grouped_samples:
         # Train and validate on exactly the same matured horizon. Mixing 1h-only
         # fresh samples with 72h mature samples changes the target definition over time.
-        if target_horizon not in item["returns"]:
-            continue
-        target_return = max(-30.0, min(30.0, float(item["returns"][target_horizon])))
-        item["return"] = target_return
-        item["win"] = 1.0 if target_return > 1e-9 else (0.0 if target_return < -1e-9 else 0.5)
-        item["target_horizon"] = target_horizon
+        exec_target = execution.get(str(item.get("fingerprint") or ""))
+        if exec_target:
+            item["return"] = float(exec_target["return"])
+            item["win"] = float(exec_target["win"])
+            item["r_multiple"] = float(exec_target.get("r_multiple") or 0.0)
+            item["net_pnl"] = float(exec_target.get("net_pnl") or 0.0)
+            item["close_reason"] = exec_target.get("close_reason")
+            item["target_horizon"] = "execution"
+            item["target_source"] = "paper_execution"
+        else:
+            if target_horizon not in item["returns"]:
+                continue
+            target_return = max(-30.0, min(30.0, float(item["returns"][target_horizon])))
+            item["return"] = target_return
+            item["win"] = 1.0 if target_return > 1e-9 else (0.0 if target_return < -1e-9 else 0.5)
+            item["r_multiple"] = target_return / 3.0
+            item["target_horizon"] = target_horizon
+            item["target_source"] = "mark_to_market_fallback"
         item["regime"] = classify_regime(item["factors"])
         result.append(item)
+    # Correlated bursts from one symbol/day are not independent observations.
+    cluster_counts: Dict[str, int] = {}
+    for item in result:
+        try:
+            dt=datetime.fromisoformat(str(item.get("created_at") or "").replace("Z","+00:00"))
+            if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+            ck=f"{str(item.get('symbol') or '').upper()}|{dt.date().isoformat()}"
+        except Exception:
+            ck=str(item.get("fingerprint") or "")
+        item["cluster_key"]=ck; cluster_counts[ck]=cluster_counts.get(ck,0)+1
+    for item in result:
+        item["cluster_size"]=cluster_counts.get(str(item.get("cluster_key") or ""),1)
     return sorted(result, key=lambda x: str(x["created_at"]))
 
 
 def _score(factors: Dict[str, float], weights: Dict[str, float]) -> float:
-    denom = sum(max(0.01, float(weights.get(k, 0.01))) for k in FEATURES)
-    return max(0.0, min(100.0, sum(float(factors[k]) * float(weights.get(k, 0.01)) for k in FEATURES) / denom))
+    denom = sum(max(0.0, float(weights.get(k, 0.0))) for k in FEATURES)
+    if denom <= 1e-12:
+        return 50.0
+    return max(0.0, min(100.0, sum(float(factors[k]) * max(0.0, float(weights.get(k, 0.0))) for k in FEATURES) / denom))
 
 
 def _days_old(created_at: str) -> float:
@@ -305,7 +473,10 @@ def _days_old(created_at: str) -> float:
 
 def _sample_weight(sample: Dict[str, Any]) -> float:
     half_life = max(2.0, float(_runtime_env("LEARNING_RECENCY_HALF_LIFE_DAYS", "30")))
-    return 0.5 ** (_days_old(sample.get("created_at", "")) / half_life)
+    recency = 0.5 ** (_days_old(sample.get("created_at", "")) / half_life)
+    cluster = max(1.0, float(sample.get("cluster_size") or 1.0))
+    execution_boost = max(1.0, float(_runtime_env("LEARNING_EXECUTION_SAMPLE_WEIGHT", "4.0"))) if sample.get("target_source") == "paper_execution" else 1.0
+    return recency * execution_boost / math.sqrt(cluster)
 
 
 def _weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
@@ -404,21 +575,26 @@ def walk_forward_folds(samples: Sequence[Dict[str, Any]], folds: int = 4) -> Lis
     if remaining < folds:
         return []
     step = max(1, remaining // folds)
+    embargo = max(0, int(_runtime_env("LEARNING_WALK_FORWARD_EMBARGO_SAMPLES", "5")))
     result = []
     for i in range(folds):
         train_end = min_train + i * step
+        val_start = min(n, train_end + embargo)
         val_end = n if i == folds - 1 else min(n, train_end + step)
-        if val_end > train_end:
-            result.append((list(samples[:train_end]), list(samples[train_end:val_end])))
+        if val_end > val_start:
+            result.append((list(samples[:train_end]), list(samples[val_start:val_end])))
     return result
 
 
 def _bounded(weights: Dict[str, float], defaults: Dict[str, float]) -> Dict[str, float]:
     max_change = float(_runtime_env("LEARNING_MAX_WEIGHT_CHANGE", "0.35"))
-    bounded = {
-        k: round(max(float(defaults[k]) * (1 - max_change), min(float(defaults[k]) * (1 + max_change), float(weights[k]))), 5)
-        for k in FEATURES
-    }
+    bounded = {}
+    for k in FEATURES:
+        base = float(defaults.get(k, 0.0))
+        if base <= 0:
+            bounded[k] = 0.0
+        else:
+            bounded[k] = round(max(base * (1 - max_change), min(base * (1 + max_change), float(weights.get(k, base)))), 5)
     return _apply_operator_weight_policy(bounded, defaults)
 
 
@@ -427,7 +603,7 @@ def optimize_weights(samples: Sequence[Dict[str, Any]], defaults: Dict[str, floa
     if len(samples) < 20:
         return dict(defaults)
     rng = random.Random(seed)
-    folds = walk_forward_folds(samples, int(_runtime_env("LEARNING_WALK_FORWARD_FOLDS", "4")))
+    folds = walk_forward_folds(samples, max(4, int(_runtime_env("LEARNING_WALK_FORWARD_FOLDS", "4"))))
     if not folds:
         return dict(defaults)
     iterations = max(40, min(800, int(_runtime_env("LEARNING_SEARCH_ITERATIONS", "240"))))
@@ -443,6 +619,9 @@ def optimize_weights(samples: Sequence[Dict[str, Any]], defaults: Dict[str, floa
         center = best if i > iterations // 4 else defaults
         trial = {}
         for k in FEATURES:
+            if float(defaults.get(k, 0.0)) <= 0:
+                trial[k] = 0.0
+                continue
             perturb = rng.gauss(0, scale)
             trial[k] = float(center[k]) * (1 + perturb)
         trial = _bounded(trial, defaults)
@@ -460,6 +639,36 @@ def _model_config(defaults: Dict[str, float]) -> Dict[str, Any]:
 
 def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
     initialize()
+    # V52: Supabase is authoritative whenever cloud runtime is configured.  This
+    # prevents an ephemeral/local SQLite champion from silently overriding or
+    # surviving a different cloud champion after a restart.
+    if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY"):
+        try:
+            from cloud_model_store import CloudModelStore
+            cloud = CloudModelStore().load_active_model("learning-v14")
+            if cloud and cloud.get("version"):
+                cfg = dict(cloud.get("config") or _model_config(cloud.get("weights") or defaults))
+                require_v52 = str(_runtime_env("LEARNING_REQUIRE_V52_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}
+                if require_v52 and cfg.get("target_schema") != "execution_v52":
+                    safe_cfg = _model_config(defaults)
+                    safe_cfg.update({"target_schema":"execution_v52","calibration":{},"rules":[],"migration_reason":"legacy-target-model-blocked"})
+                    effective = _apply_operator_weight_policy(dict(defaults), defaults)
+                    return {"version":"52.0-safe-base","weights":effective,"learned_weights":dict(defaults),
+                            "config":safe_cfg,"metrics":{"migration_blocked_version":cloud.get("version")},"rules":[],
+                            "source":"v52-safe-base"}
+                learned = dict(cfg.get("learned_global_weights") or cfg.get("global_weights") or cloud.get("weights") or defaults)
+                effective = _apply_operator_weight_policy(learned, defaults)
+                cfg["learned_global_weights"] = learned; cfg["global_weights"] = effective
+                return {"version": cloud["version"], "weights": effective, "learned_weights": learned,
+                        "config": cfg, "metrics": cloud.get("metrics") or {}, "rules": cloud.get("rules") or [],
+                        "source": "cloud-authoritative"}
+            if str(_runtime_env("LEARNING_REQUIRE_V52_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}:
+                safe_cfg=_model_config(defaults); safe_cfg["target_schema"]="execution_v52"
+                effective=_apply_operator_weight_policy(dict(defaults),defaults)
+                return {"version":"52.0-safe-base","weights":effective,"learned_weights":dict(defaults),
+                        "config":safe_cfg,"metrics":{},"rules":[],"source":"v52-safe-base"}
+        except Exception:
+            pass
     with connect() as conn:
         row = conn.execute("SELECT * FROM model_versions WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
         rules = conn.execute("SELECT * FROM learning_rules WHERE active=1 AND model_version=? ORDER BY ABS(adjustment) DESC", (row["version"],)).fetchall() if row else []
@@ -686,6 +895,10 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
                 pass
         return result
 
+    health = _dataset_health(samples)
+    feature_quality = health.get("feature_quality") or {}
+    inactive_features = set(feature_quality.get("inactive") or [])
+    training_defaults = {k: (0.0 if k in inactive_features else float(defaults[k])) for k in FEATURES}
     current = active_model(defaults)
     # Split BEFORE any optimization.  The final chronological holdout must remain
     # completely unseen by global and specialist optimizers.
@@ -698,7 +911,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     holdout = samples[split:]
     seed_source = train_samples[-1]["fingerprint"] if train_samples else samples[0]["fingerprint"]
     seed = int(hashlib.sha256((str(len(train_samples)) + seed_source).encode()).hexdigest()[:8], 16)
-    global_weights = optimize_weights(train_samples, defaults, seed)
+    global_weights = optimize_weights(train_samples, training_defaults, seed)
     specialists: Dict[str, Dict[str, float]] = {}
     specialist_min = max(50, int(_runtime_env("LEARNING_SPECIALIST_MIN_SAMPLES", "80")))
     for regime in sorted({s["regime"] for s in train_samples}):
@@ -716,7 +929,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
     base_metrics = evaluate_routed_model(holdout, current_global, current_specialists)
     candidate_metrics = evaluate_routed_model(holdout, global_weights, specialists)
     drift = _drift(samples)
-    promoted = _candidate_better(base_metrics, candidate_metrics, drift)
+    promoted = _candidate_better(base_metrics, candidate_metrics, drift) and bool(health.get("healthy"))
     rules = _derive_rules(train_samples)
     calibration = {"all": _calibration(holdout, global_weights)}
     for regime in sorted({s["regime"] for s in holdout}):
@@ -729,13 +942,15 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
             if len(directional) >= 8 and key in specialists:
                 calibration[key] = _calibration(directional, specialists[key])
 
-    config = {"global_weights": global_weights, "specialists": specialists,
+    config = {"target_schema": "execution_v52", "global_weights": global_weights, "specialists": specialists,
               "calibration": calibration, "rules": rules, "drift": drift,
-              "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed}}
+              "data_health": health, "inactive_features": sorted(inactive_features),
+              "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed,
+                           "execution_targets": int(health.get("execution_targets") or 0)}}
     version = "14." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-    candidate_better = _candidate_better(base_metrics, candidate_metrics, drift)
+    candidate_better = _candidate_better(base_metrics, candidate_metrics, drift) and bool(health.get("healthy"))
     metrics = {"baseline": base_metrics, "candidate": candidate_metrics, "candidate_better": candidate_better,
-               "promoted": False, "drift": drift, "specialists": len(specialists)}
+               "promoted": False, "drift": drift, "specialists": len(specialists), "data_health": health}
 
     # Persist locally as challenger first. Local activation happens only after the
     # authoritative cloud compare-and-promote commits (when cloud is configured).
@@ -795,7 +1010,13 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
                         cloud_sync = "promotion-rejected"
                         cloud_error = "cloud champion changed or target promotion failed"
                     else:
-                        cloud_sync = "ok"
+                        verified = store.load_active_model("learning-v14")
+                        if not verified or str(verified.get("version")) != version:
+                            promotion_committed = False
+                            cloud_sync = "promotion-verification-failed"
+                            cloud_error = "cloud registry did not expose the promoted version as the sole active champion"
+                        else:
+                            cloud_sync = "ok"
                 except Exception as exc:
                     cloud_sync = "degraded"; cloud_error = f"{type(exc).__name__}: {exc}"
         else:
@@ -821,7 +1042,9 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
               "version": version, "promoted": promotion_committed, "candidate_better": candidate_better,
               "metrics": metrics, "specialists": len(specialists), "rules": len(rules),
               "feature_names": list(FEATURES),
-              "target_horizon": str(os.getenv("LEARNING_TARGET_HORIZON", "24h")).lower(),
+              "target_horizon": "execution-first",
+              "target_name": "paper_net_pnl_and_r_multiple",
+              "data_health": health,
               "active": version if promotion_committed else current["version"],
               "cloud_sync": cloud_sync}
     if cloud_error:

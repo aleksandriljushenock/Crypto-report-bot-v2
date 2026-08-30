@@ -252,8 +252,12 @@ def blend_signal(signal: dict[str, Any], forecast: dict[str, Any] | None) -> dic
     max_weight = max(0.0, min(0.35, number('CHRONOS_MAX_WEIGHT', 0.18, minimum=0.0, maximum=0.35)))
     reliability = max(0.10, min(1.0, 2.0 / max(uncertainty, 0.25)))
     weight = max_weight * reliability
+    # V52 keeps Chronos in shadow mode by default until an operator explicitly
+    # enables probability blending after out-of-sample uplift is demonstrated.
+    blend_enabled = _bool('CHRONOS_PROBABILITY_BLEND_ENABLED', False)
+    effective_weight = weight if blend_enabled else 0.0
     old_probability = _safe_float(signal.get('probability'), 50.0)
-    blended = old_probability * (1.0 - weight) + chronos_probability * weight
+    blended = old_probability * (1.0 - effective_weight) + chronos_probability * effective_weight
     agreement = aligned_return > 0
     old_confidence = _safe_float(signal.get('confidence'), 50.0)
     confidence_delta = (5.0 * reliability) if agreement else (-7.0 * reliability)
@@ -261,11 +265,11 @@ def blend_signal(signal: dict[str, Any], forecast: dict[str, Any] | None) -> dic
     signal['probability'] = round(max(5.0, min(95.0, blended)), 2)
     signal['confidence'] = round(max(5.0, min(95.0, old_confidence + confidence_delta)), 2)
     signal['chronosStatus'] = 'applied'
-    signal['chronos'] = {**forecast, 'weight': round(weight, 4), 'directionAgreement': agreement}
+    signal['chronos'] = {**forecast, 'weight': round(effective_weight, 4), 'shadowWeight': round(weight, 4), 'shadowOnly': (not blend_enabled), 'directionAgreement': agreement}
     profile = signal.get('tradeProfile')
     if isinstance(profile, dict):
         profile['chronos'] = round(chronos_probability, 2)
-        profile['chronosWeight'] = round(weight, 4)
+        profile['chronosWeight'] = round(effective_weight, 4)
         profile['probability'] = signal['probability']
         profile['confidence'] = signal['confidence']
     return signal
