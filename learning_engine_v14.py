@@ -285,12 +285,15 @@ def _dataset_health(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     age_hours = (now-newest).total_seconds()/3600 if newest else 1e9
     min_direction = max(0, int(_runtime_env("LEARNING_MIN_DIRECTION_SAMPLES", "40")))
     max_stale = max(1.0, float(_runtime_env("LEARNING_MAX_DATA_AGE_HOURS", "72")))
-    execution_count = sum(1 for s in samples if s.get("target_source") == "paper_execution")
+    execution_count = sum(1 for s in samples if s.get('target_source') in {'paper_execution','shadow_execution_v54'})
     min_execution = max(0, int(_runtime_env("LEARNING_MIN_EXECUTION_SAMPLES_FOR_PROMOTION", "30")))
     reasons=[]
     if age_hours > max_stale: reasons.append("stale_dataset")
-    if dirs["LONG"] and dirs["SHORT"] < min_direction: reasons.append("short_underrepresented")
-    if dirs["SHORT"] and dirs["LONG"] < min_direction: reasons.append("long_underrepresented")
+    # V54 trains direction specialists independently. One immature side must not
+    # freeze a healthy champion for the other side; imbalance remains diagnostic.
+    direction_warnings=[]
+    if dirs['LONG'] and dirs['SHORT'] < min_direction: direction_warnings.append('short_underrepresented')
+    if dirs['SHORT'] and dirs['LONG'] < min_direction: direction_warnings.append('long_underrepresented')
     if execution_count < min_execution: reasons.append("insufficient_execution_targets")
     concentration = max(by_symbol_day.values()) / max(1, len(samples)) if by_symbol_day else 0.0
     if concentration > float(_runtime_env("LEARNING_MAX_SYMBOL_DAY_CONCENTRATION", "0.12")):
@@ -298,7 +301,7 @@ def _dataset_health(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     fq=_feature_quality(samples)
     return {"healthy": not reasons, "reasons": reasons, "newest_age_hours": round(age_hours,2),
             "directions": dirs, "execution_targets": execution_count, "concentration": round(concentration,4),
-            "feature_quality": fq}
+            "feature_quality": fq, "warnings": direction_warnings}
 
 
 def _cloud_samples() -> List[Dict[str, Any]]:
@@ -344,6 +347,29 @@ def _cloud_samples() -> List[Dict[str, Any]]:
         })
     return result
 
+
+def _execution_v54_cloud_samples() -> List[Dict[str, Any]]:
+    """Load first-hit shadow execution labels produced by V54 replay."""
+    if os.getenv("EXECUTION_V54_LEARNING_ENABLED", "true").lower() not in {"1","true","yes","on"}:
+        return []
+    try:
+        from cloud_client import get_supabase_client
+        client=get_supabase_client(); out=[]; offset=0; cap=int(_runtime_env("EXECUTION_V54_LEARNING_MAX_ROWS","10000")); page=1000
+        while len(out)<cap:
+            rows=(client.table("execution_training_dataset_v54").select("*").eq("entry_status","filled").order("signal_created_at",desc=False).range(offset,min(offset+page-1,cap-1)).execute().data or [])
+            if not rows: break
+            for row in rows:
+                outcome=str(row.get("outcome") or "").upper()
+                if outcome in {"","UNRESOLVED","OPEN","NO_FILL"} or row.get("net_return_pct") is None: continue
+                payload=_json(row.get("feature_payload"),{}) or {}; factors=payload.get("aiFactors") or payload.get("features") or {}
+                if not all(k in factors for k in FEATURES): continue
+                ret=max(-30.0,min(30.0,float(row.get("net_return_pct") or 0)))
+                out.append({"fingerprint":str(row.get("fingerprint") or row.get("shadow_id")),"symbol":row.get("symbol"),"timeframe":payload.get("timeframe") or payload.get("interval") or "multi","direction":_normalize_direction(row.get("direction")),"setup":str(row.get("setup") or payload.get("setup") or "NONE").upper(),"created_at":row.get("signal_created_at"),"old_score":float(payload.get("aiScore") or payload.get("score") or 0),"factors":{k:float(factors.get(k,50)) for k in FEATURES},"returns":{},"return":ret,"win":1.0 if ret>1e-9 else 0.0,"r_multiple":float(row.get("r_multiple") or 0),"target_horizon":"execution","target_source":"shadow_execution_v54","close_reason":outcome})
+            if len(rows)<page: break
+            offset+=len(rows)
+        return out
+    except Exception:
+        return []
 
 def _dedupe_samples(samples: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Remove near-duplicate signals to prevent one market burst dominating training."""
@@ -416,6 +442,11 @@ def load_samples() -> List[Dict[str, Any]]:
     for fp, item in paper_direct.items():
         grouped.setdefault(fp, item)
     grouped_samples = _dedupe_samples(list(grouped.values()))
+    # V54 replayed shadow executions are independent execution-labelled samples.
+    # They are merged by fingerprint and override proxy labels.
+    v54_exec={str(x.get("fingerprint")):x for x in _execution_v54_cloud_samples() if x.get("fingerprint")}
+    for fp,item in v54_exec.items(): grouped[fp]=item
+    grouped_samples = _dedupe_samples(list(grouped.values()))
     execution = _execution_samples()
     result = []
     target_horizon = str(_runtime_env("LEARNING_TARGET_HORIZON", "24h")).lower()
@@ -425,7 +456,9 @@ def load_samples() -> List[Dict[str, Any]]:
         # Train and validate on exactly the same matured horizon. Mixing 1h-only
         # fresh samples with 72h mature samples changes the target definition over time.
         exec_target = execution.get(str(item.get("fingerprint") or ""))
-        if exec_target:
+        if item.get("target_source") == "shadow_execution_v54" and item.get("return") is not None:
+            pass
+        elif exec_target:
             item["return"] = float(exec_target["return"])
             item["win"] = float(exec_target["win"])
             item["r_multiple"] = float(exec_target.get("r_multiple") or 0.0)
@@ -480,7 +513,7 @@ def _sample_weight(sample: Dict[str, Any]) -> float:
     half_life = max(2.0, float(_runtime_env("LEARNING_RECENCY_HALF_LIFE_DAYS", "30")))
     recency = 0.5 ** (_days_old(sample.get("created_at", "")) / half_life)
     cluster = max(1.0, float(sample.get("cluster_size") or 1.0))
-    execution_boost = max(1.0, float(_runtime_env("LEARNING_EXECUTION_SAMPLE_WEIGHT", "4.0"))) if sample.get("target_source") == "paper_execution" else 1.0
+    execution_boost = max(1.0, float(_runtime_env("LEARNING_EXECUTION_SAMPLE_WEIGHT", "4.0"))) if sample.get("target_source") in {"paper_execution","shadow_execution_v54"} else 1.0
     return recency * execution_boost / math.sqrt(cluster)
 
 
@@ -656,9 +689,9 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
             if cloud and cloud.get("version"):
                 cfg = dict(cloud.get("config") or _model_config(cloud.get("weights") or defaults))
                 require_v52 = str(_runtime_env("LEARNING_REQUIRE_V53_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}
-                if require_v52 and cfg.get("target_schema") != "execution_v53":
+                if require_v52 and cfg.get("target_schema") != "execution_v54":
                     safe_cfg = _model_config(defaults)
-                    safe_cfg.update({"target_schema":"execution_v53","calibration":{},"rules":[],"migration_reason":"legacy-target-model-blocked"})
+                    safe_cfg.update({"target_schema":"execution_v54","calibration":{},"rules":[],"migration_reason":"legacy-target-model-blocked"})
                     effective = _apply_operator_weight_policy(dict(defaults), defaults)
                     return {"version":"53.0-safe-base","weights":effective,"learned_weights":dict(defaults),
                             "config":safe_cfg,"metrics":{"migration_blocked_version":cloud.get("version")},"rules":[],
@@ -670,7 +703,7 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
                         "config": cfg, "metrics": cloud.get("metrics") or {}, "rules": cloud.get("rules") or [],
                         "source": "cloud-authoritative"}
             if str(_runtime_env("LEARNING_REQUIRE_V53_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}:
-                safe_cfg=_model_config(defaults); safe_cfg["target_schema"]="execution_v53"
+                safe_cfg=_model_config(defaults); safe_cfg["target_schema"]="execution_v54"
                 effective=_apply_operator_weight_policy(dict(defaults),defaults)
                 return {"version":"53.0-safe-base","weights":effective,"learned_weights":dict(defaults),
                         "config":safe_cfg,"metrics":{},"rules":[],"source":"v53-safe-base"}
@@ -979,7 +1012,7 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
             if len(drows)>=12 and key in specialists:
                 calibration[key]=_calibration(drows,specialists[key])
 
-    config = {"target_schema": "execution_v53", "global_weights": global_weights, "specialists": specialists,
+    config = {"target_schema": "execution_v54", "global_weights": global_weights, "specialists": specialists,
               "calibration": calibration, "rules": rules, "drift": drift,
               "data_health": health, "inactive_features": sorted(inactive_features),
               "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed,

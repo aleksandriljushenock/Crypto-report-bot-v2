@@ -1,8 +1,8 @@
 {
-  "schema_version": 53,
-  "version": "profit-profile-v53-20260830202808",
-  "generated_at": "2026-08-30T20:28:08.043335+00:00",
-  "target_type": "execution_first_v53",
+  "schema_version": 54,
+  "version": "profit-profile-v53-20260830204641",
+  "generated_at": "2026-08-30T20:46:41.539321+00:00",
+  "target_type": "execution_first_v54",
   "target_horizon": "24h",
   "target_source_counts": {
     "mark_to_market": 1573,

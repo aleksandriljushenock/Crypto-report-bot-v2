@@ -20,6 +20,7 @@ from ai_optimizer import run_optimizer
 from adaptive_model_manager import train_candidate
 from strategies.scheduler import run_scheduled_cycle as run_strategy_lab_scheduled_cycle
 from build_profit_profile import rebuild_from_supabase
+from execution_model_v54 import train as train_execution_model_v54
 
 
 from core.scheduler import PeriodicWorker
@@ -99,6 +100,8 @@ class AutomationSupervisor:
         optimizer_minutes = self._minutes('AI_OPTIMIZER_INTERVAL_MINUTES', 1440)
         strategy_lab_minutes = self._minutes('STRATEGY_LAB_AUTO_INTERVAL_MINUTES', 30)
         profile_rebuild_minutes = self._minutes('PROFIT_PROFILE_REBUILD_INTERVAL_MINUTES', 1440)
+        execution_model_minutes = self._minutes('EXECUTION_ML_TRAIN_INTERVAL_MINUTES', 360)
+        execution_backfill_minutes = self._minutes('EXECUTION_BACKFILL_INTERVAL_MINUTES', 1440)
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
@@ -174,6 +177,16 @@ class AutomationSupervisor:
                 'profit-profile-rebuild', profile_rebuild_minutes * 60,
                 self._guarded('profit-profile-rebuild', self._run_profit_profile_rebuild), self.logger,
                 enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=30,
+            ),
+            PeriodicWorker(
+                'execution-v54-model-trainer', execution_model_minutes * 60,
+                self._guarded('execution-v54-model-trainer', self._run_execution_model_v54), self.logger,
+                enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=720,
+            ),
+            PeriodicWorker(
+                'execution-v54-backfill', execution_backfill_minutes * 60,
+                self._guarded('execution-v54-backfill', self._run_execution_backfill_v54), self.logger,
+                enabled=self._bool_env('EXECUTION_BACKFILL_ENABLED', False), first_delay=900,
             ),
         ]
 
@@ -342,6 +355,25 @@ class AutomationSupervisor:
         )
         return result
 
+    def _run_execution_model_v54(self):
+        try:
+            result=train_execution_model_v54(trigger='scheduled')
+            self.logger(f"Execution ML v54: status={result.get('status')} rows={result.get('rows')} best_auc={result.get('best_auc')}")
+            return result
+        except Exception as exc:
+            self.logger(f"Execution ML v54 error: {type(exc).__name__}: {exc}")
+            return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
+
+    def _run_execution_backfill_v54(self):
+        try:
+            from backfill_execution_dataset_v54 import backfill
+            result=backfill(limit=integer('EXECUTION_BACKFILL_BATCH_ROWS',500,minimum=1,maximum=10000),dry_run=False)
+            self.logger(f"Execution backfill v54: written={result.get('written')} unresolved={result.get('unresolved')} errors={result.get('errors')}")
+            return result
+        except Exception as exc:
+            self.logger(f"Execution backfill v54 error: {type(exc).__name__}: {exc}")
+            return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
+
     def _run_optimizer_models(self):
         optimizer = run_optimizer(trigger='scheduled')
         try:
@@ -378,6 +410,8 @@ def build_automation_status(supervisor):
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
         'profit-profile-rebuild': 'Profit Profile Rebuild',
+        'execution-v54-model-trainer': 'Execution ML v54',
+        'execution-v54-backfill': 'Execution Backfill v54',
     }
     for name, runtime in status['runtime'].items():
         saved = status['stored'].get(name, {})

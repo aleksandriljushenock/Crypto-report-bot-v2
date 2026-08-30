@@ -4,7 +4,7 @@ import ai_hedge_fund_engine as hedge
 def _healthy_profile():
     stat={'samples':300,'win_rate':62.0,'robust_avg_return':2.0,'robust_profit_factor':1.6,'execution_samples':60,'execution_win_rate':58.0,'execution_robust_avg_return':1.0,'execution_robust_profit_factor':1.3}
     return {
-      'schema_version':53,'version':'profit-profile-v53-test','target_type':'execution_first_v53','valid':True,'validation_reasons':[],
+      'schema_version':54,'version':'profit-profile-v53-test','target_type':'execution_first_v54','valid':True,'validation_reasons':[],
       'overall':dict(stat),'groups':{
         'setup_direction':{'PULLBACK|LONG':dict(stat),'BREAKOUT|LONG':{**stat,'robust_avg_return':-2,'robust_profit_factor':0.6,'execution_robust_avg_return':-1,'execution_robust_profit_factor':0.5}},
         'regime_direction':{'bull_trend|LONG':dict(stat)},'structure1h_direction':{'BOS_UP|LONG':dict(stat)},'tf4h_direction':{'UP|LONG':dict(stat)},

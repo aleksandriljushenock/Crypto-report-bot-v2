@@ -19,8 +19,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-PROFILE_SCHEMA_VERSION = 53
-TARGET_TYPE = "execution_first_v53"
+PROFILE_SCHEMA_VERSION = 54
+TARGET_TYPE = "execution_first_v54"
 BASE_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 DIRECTION_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 GROUPS = BASE_GROUPS + tuple(f"{x}_direction" for x in DIRECTION_GROUPS)

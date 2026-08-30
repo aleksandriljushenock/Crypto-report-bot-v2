@@ -1,0 +1,22 @@
+Crypto-report-bot v54.0.0
+Release: Execution Intelligence
+
+Primary goal:
+- maximize signal quality using real first-hit execution outcomes rather than future mark-to-market proxies.
+
+Added:
+- execution_training_dataset_v54 migration
+- first-hit 5m historical execution backfill
+- P(fill) model
+- P(profit | fill) model
+- Expected Return regressor
+- rolling 250/500/1000 HistGradientBoosting ensemble
+- chronological calibration/test separation
+- OOS baseline comparison
+- specialist LONG/SHORT + PULLBACK/BREAKOUT routing
+- severe fail-closed execution health
+- generic setup execution guard
+- execution-prior correctness
+- cloud model artifact persistence
+
+Verification is recorded at build time in the release process.

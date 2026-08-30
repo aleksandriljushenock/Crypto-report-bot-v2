@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_version_v48():
-    assert Path('VERSION').read_text().strip()in {'48.0.0','49.0.0','50.0.0','51.0.0','52.0.0','53.0.0'}
+    assert Path('VERSION').read_text().strip()in {'48.0.0','49.0.0','50.0.0','51.0.0','52.0.0','53.0.0','54.0.0'}
 
 
 def test_cloud_active_model_is_scoped_by_model_name():
