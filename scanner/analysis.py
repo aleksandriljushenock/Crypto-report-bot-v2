@@ -48,7 +48,7 @@ def analyze_snapshot(snapshot):
             continue
         try:
             score = calculate_score(symbol_data)
-            levels = build_trade_levels(symbol_data)
+            levels = build_trade_levels(symbol_data, score.get('direction'))
             symbol_data['parsedKlines'] = {
                 '15m': parse_klines(symbol_data.get('klines', {}).get('15m', [])),
                 '1h': parse_klines(symbol_data.get('klines', {}).get('1h', [])),
@@ -114,12 +114,17 @@ def build_trade_profile(score, rules, rr, timeframe):
     momentum = min(100, max(0, float(score.get('score') or 0)))
     volume = min(100, 45 + min(35, float(score.get('relativeVolume15m') or 0) * 20) + min(20, float(score.get('relativeVolume1h') or 0) * 10))
     funding = 90 if abs(float(score.get('fundingPercent') or 0)) <= 0.02 else max(20, 80 - abs(float(score.get('fundingPercent') or 0)) * 500)
-    oi = 70
     oi_analysis = score.get('oiAnalysis') or {}
-    if oi_analysis.get('signal') in ('BULLISH', 'BEARISH'):
-        oi = 85
-    elif oi_analysis.get('signal') == 'WEAK':
-        oi = 45
+    oi_label = str(oi_analysis.get('label') or 'NO_DATA')
+    oi_change_4h = oi_analysis.get('oiChange4h')
+    # Neutral 50 means "no evidence". Growth is informative only as activity;
+    # direction is learned jointly with price/funding instead of hard-coding bullishness.
+    oi = 50
+    if oi_change_4h is not None:
+        change = max(-10.0, min(10.0, float(oi_change_4h)))
+        oi = round(max(20, min(80, 50 + abs(change) * 3)))
+    if oi_label == 'OI_DROPPING_FAST':
+        oi = min(oi, 40)
     risk = max(0, min(100, 45 + min(float(rr or 0), 4) * 12 + (10 if rules.get('finalStatus') == 'TRADE_CANDIDATE' else 0)))
     probability = round(max(5, min(95, 0.30 * momentum + 0.25 * trend + 0.15 * volume + 0.10 * funding + 0.10 * oi + 0.10 * risk)))
     confidence = round(max(5, min(95, 0.45 * trend + 0.30 * momentum + 0.25 * risk)))

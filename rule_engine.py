@@ -63,13 +63,14 @@ def evaluate_rules(score, levels):
     if structure_1h == "BOS_UP" and direction == "SHORT_BIAS":
         reasons_to_skip.append("1H структура бычья против SHORT")
 
-    if funding > 0.05:
-        reasons_to_skip.append("текущий funding перегрет")
+    if funding > 0.05 and direction == "LONG_BIAS":
+        reasons_to_skip.append("текущий funding перегрет для LONG")
 
-    if funding_label == "FUNDING_OVERHEATED_LONG":
-        reasons_to_skip.append(
-            "funding history показывает перегрев лонгов"
-        )
+    if funding_label == "FUNDING_OVERHEATED_LONG" and direction == "LONG_BIAS":
+        reasons_to_skip.append("funding history показывает перегрев лонгов")
+
+    if funding_label == "FUNDING_NEGATIVE" and direction == "SHORT_BIAS":
+        reasons_to_watch.append("отрицательный funding повышает риск squeeze против SHORT")
 
     if rsi is not None and rsi > 75 and direction == "LONG_BIAS":
         reasons_to_skip.append("RSI 1H перегрет для LONG")
@@ -77,8 +78,10 @@ def evaluate_rules(score, levels):
     if rsi is not None and rsi < 25 and direction == "SHORT_BIAS":
         reasons_to_skip.append("RSI 1H перепродан для SHORT")
 
-    if rs_label == "WEAK" and symbol != "BTCUSDT":
-        reasons_to_skip.append("монета слабее BTC")
+    if rs_label == "WEAK" and direction == "LONG_BIAS" and symbol != "BTCUSDT":
+        reasons_to_skip.append("монета слабее BTC для LONG")
+    if rs_label == "STRONG" and direction == "SHORT_BIAS" and symbol != "BTCUSDT":
+        reasons_to_watch.append("монета сильнее BTC против SHORT")
 
     # Старший SMC против направления
     if smc_4h.get("available"):
@@ -194,104 +197,60 @@ def evaluate_rules(score, levels):
             )
 
     # --------------------------------------------------
-    # 4. ПОДТВЕРЖДЕНИЯ
+    # 4. DIRECTION-AWARE ПОДТВЕРЖДЕНИЯ
     # --------------------------------------------------
-
-    if ema20 and ema50 and ema20 > ema50:
-        confirmations.append("EMA20 выше EMA50")
-
-    if ema200 and ema20 and ema20 > ema200:
-        confirmations.append("структура выше EMA200")
-
-    if vwap:
-        confirmations.append("VWAP рассчитан")
-
-    if structure_15m in ["BOS_UP", "SWEEP_LOW"]:
-        confirmations.append(
-            f"15M структура: {structure_15m}"
-        )
-
-    if rs_label == "STRONG":
-        confirmations.append("монета сильнее BTC")
-
-    if oi_label in ["OI_GROWING_FAST", "OI_GROWING"]:
-        confirmations.append(
-            oi.get("comment", "OI растет")
-        )
-
-    if funding_label == "FUNDING_NEUTRAL":
-        confirmations.append("Funding нейтральный")
-
-    if smc_1h.get("event") == "BOS":
-        confirmations.append(
-            f"1H BOS {smc_1h.get('eventDirection')}"
-        )
-
-    if smc_1h.get("event") == "CHOCH":
-        confirmations.append(
-            f"1H CHOCH {smc_1h.get('eventDirection')}"
-        )
-
-    if smc_15m.get("liquiditySweep", {}).get("found"):
-        sweep_type = smc_15m["liquiditySweep"].get("type")
-        confirmations.append(
-            f"15M liquidity sweep: {sweep_type}"
-        )
-
-    # Подтверждения Order Block / FVG
+    # V53 counts only evidence that actually supports the selected direction.
+    # Neutral facts ("VWAP calculated", neutral funding, OI growth without price
+    # direction) are diagnostics, not confirmations.
     if direction == "LONG_BIAS":
+        if ema20 and ema50 and ema20 > ema50:
+            confirmations.append("EMA20 выше EMA50")
+        if ema200 and ema20 and ema20 > ema200:
+            confirmations.append("EMA20 выше EMA200")
+        if structure_15m in ["BOS_UP", "SWEEP_LOW"]:
+            confirmations.append(f"15M структура поддерживает LONG: {structure_15m}")
+        if rs_label == "STRONG":
+            confirmations.append("монета сильнее BTC")
+        if taker > 1:
+            confirmations.append("taker flow подтверждает покупателя")
+        if smc_1h.get("event") in {"BOS", "CHOCH"} and smc_1h.get("eventDirection") == "UP":
+            confirmations.append(f"1H {smc_1h.get('event')} UP")
+        sweep = smc_15m.get("liquiditySweep", {})
+        if sweep.get("found") and sweep.get("type") == "SWEEP_LOW":
+            confirmations.append("15M sweep low + reclaim context")
         if ob_15m.get("context") == "IN_BULLISH_OB":
-            confirmations.append(
-                "цена внутри bullish Order Block 15M"
-            )
-
-        if ob_1h.get("context") in [
-            "IN_BULLISH_OB",
-            "BULLISH_OB_NEAREST",
-        ]:
-            confirmations.append(
-                "bullish Order Block поддерживает LONG"
-            )
-
+            confirmations.append("цена внутри bullish Order Block 15M")
+        if ob_1h.get("context") in ["IN_BULLISH_OB", "BULLISH_OB_NEAREST"]:
+            confirmations.append("bullish Order Block поддерживает LONG")
         if fvg_15m.get("context") == "IN_BULLISH_FVG":
-            confirmations.append(
-                "цена внутри bullish FVG 15M"
-            )
+            confirmations.append("цена внутри bullish FVG 15M")
+        if fvg_1h.get("context") in ["IN_BULLISH_FVG", "BULLISH_FVG_NEAREST"]:
+            confirmations.append("bullish FVG поддерживает LONG")
 
-        if fvg_1h.get("context") in [
-            "IN_BULLISH_FVG",
-            "BULLISH_FVG_NEAREST",
-        ]:
-            confirmations.append(
-                "bullish FVG поддерживает LONG"
-            )
-
-    if direction == "SHORT_BIAS":
+    elif direction == "SHORT_BIAS":
+        if ema20 and ema50 and ema20 < ema50:
+            confirmations.append("EMA20 ниже EMA50")
+        if ema200 and ema20 and ema20 < ema200:
+            confirmations.append("EMA20 ниже EMA200")
+        if structure_15m in ["BOS_DOWN", "SWEEP_HIGH"]:
+            confirmations.append(f"15M структура поддерживает SHORT: {structure_15m}")
+        if rs_label == "WEAK":
+            confirmations.append("монета слабее BTC")
+        if taker < 1:
+            confirmations.append("taker flow подтверждает продавца")
+        if smc_1h.get("event") in {"BOS", "CHOCH"} and smc_1h.get("eventDirection") == "DOWN":
+            confirmations.append(f"1H {smc_1h.get('event')} DOWN")
+        sweep = smc_15m.get("liquiditySweep", {})
+        if sweep.get("found") and sweep.get("type") == "SWEEP_HIGH":
+            confirmations.append("15M sweep high + rejection context")
         if ob_15m.get("context") == "IN_BEARISH_OB":
-            confirmations.append(
-                "цена внутри bearish Order Block 15M"
-            )
-
-        if ob_1h.get("context") in [
-            "IN_BEARISH_OB",
-            "BEARISH_OB_NEAREST",
-        ]:
-            confirmations.append(
-                "bearish Order Block поддерживает SHORT"
-            )
-
+            confirmations.append("цена внутри bearish Order Block 15M")
+        if ob_1h.get("context") in ["IN_BEARISH_OB", "BEARISH_OB_NEAREST"]:
+            confirmations.append("bearish Order Block поддерживает SHORT")
         if fvg_15m.get("context") == "IN_BEARISH_FVG":
-            confirmations.append(
-                "цена внутри bearish FVG 15M"
-            )
-
-        if fvg_1h.get("context") in [
-            "IN_BEARISH_FVG",
-            "BEARISH_FVG_NEAREST",
-        ]:
-            confirmations.append(
-                "bearish FVG поддерживает SHORT"
-            )
+            confirmations.append("цена внутри bearish FVG 15M")
+        if fvg_1h.get("context") in ["IN_BEARISH_FVG", "BEARISH_FVG_NEAREST"]:
+            confirmations.append("bearish FVG поддерживает SHORT")
 
     # --------------------------------------------------
     # 5. R/R И ВЫБОР ЛУЧШЕГО СЕТАПА

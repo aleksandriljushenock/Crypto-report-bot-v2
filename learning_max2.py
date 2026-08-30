@@ -151,7 +151,7 @@ def select_features(features: Mapping[str, Any], min_importance: float = 3.0) ->
     return selected or dict(features)
 
 
-def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
+def predict(features: Mapping[str, Any], direction: str = "", setup: str = "") -> Dict[str, Any]:
     selected = select_features(features)
     scores = specialist_scores(selected)
     values = list(scores.values())
@@ -163,7 +163,10 @@ def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
     # but their output is blended with the actual weighted v14 factor score so
     # Telegram weight controls affect the final probability too.
     model = active_model(DEFAULT_WEIGHTS)
-    weights = specialist_weights(model, regime, direction) or model.get("weights") or DEFAULT_WEIGHTS
+    try:
+        weights = specialist_weights(model, regime, direction, setup) or model.get("weights") or DEFAULT_WEIGHTS
+    except TypeError:  # compatibility with injected/legacy runtimes
+        weights = specialist_weights(model, regime, direction) or model.get("weights") or DEFAULT_WEIGHTS
     denom = sum(max(0.01, float(weights.get(k, DEFAULT_WEIGHTS[k]))) for k in DEFAULT_WEIGHTS)
     weighted_score = (
         sum(float(features.get(k, 50)) * float(weights.get(k, DEFAULT_WEIGHTS[k])) for k in DEFAULT_WEIGHTS) / denom
@@ -175,9 +178,12 @@ def predict(features: Mapping[str, Any], direction: str = "") -> Dict[str, Any]:
         # V14 calibration bins were fitted on the V14 weighted score. Never feed
         # the differently-distributed Learning MAX ensemble into those bins.
         try:
-            probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model, direction)
+            probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model, direction, setup)
         except TypeError:  # compatibility with older injected runtimes/tests
-            probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model)
+            try:
+                probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model, direction)
+            except TypeError:
+                probability01, calibration_uncertainty = calibrated_probability(weighted_score, regime, model)
         calibrated_v14_probability = float(probability01) * 100.0
         probability = _clamp(0.55 * specialist_ensemble + 0.45 * calibrated_v14_probability)
     except Exception:

@@ -181,9 +181,11 @@ def _execution_samples() -> Dict[str, Dict[str, Any]]:
         if not fp:
             continue
         try:
-            margin = float(row.get("margin_usd") or 0.0)
+            notional = float(row.get("notional_usd") or 0.0)
             pnl = float(row.get("net_pnl") or 0.0)
-            return_pct = (pnl / margin * 100.0) if margin > 0 else 0.0
+            # Leverage-independent execution return. Using return-on-margin here
+            # would make the learning target depend on chosen leverage rather than signal quality.
+            return_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
             entry = float(row.get("entry_price") or 0.0)
             stop = float(row.get("stop_price") or 0.0)
             risk_pct = abs(entry - stop) / entry * 100.0 if entry > 0 and stop > 0 else 0.0
@@ -222,8 +224,8 @@ def _paper_learning_samples() -> List[Dict[str, Any]]:
         if not fp or not all(k in factors for k in FEATURES):
             continue
         try:
-            margin=float(row.get("margin_usd") or 0.0); pnl=float(row.get("net_pnl") or 0.0)
-            ret=(pnl/margin*100.0) if margin>0 else 0.0
+            notional=float(row.get("notional_usd") or 0.0); pnl=float(row.get("net_pnl") or 0.0)
+            ret=(pnl/notional*100.0) if notional>0 else 0.0
             entry=float(row.get("entry_price") or 0.0); stop=float(row.get("stop_price") or 0.0)
             risk=abs(entry-stop)/entry*100.0 if entry>0 and stop>0 else 0.0
             rmult=ret/risk if risk>1e-9 else 0.0
@@ -233,6 +235,7 @@ def _paper_learning_samples() -> List[Dict[str, Any]]:
             "fingerprint":fp,"symbol":row.get("symbol"),
             "timeframe":payload.get("timeframe") or payload.get("primaryTimeframe") or "multi_tf",
             "direction":_normalize_direction(row.get("side") or payload.get("direction")),
+            "setup":str(payload.get("setup") or "NONE").upper(),
             "created_at":row.get("opened_at") or payload.get("signal_created_at") or row.get("closed_at") or now_iso(),
             "old_score":float(payload.get("aiScore") or payload.get("score") or 0),
             "factors":{k:float(factors.get(k,50)) for k in FEATURES},
@@ -304,7 +307,7 @@ def _cloud_samples() -> List[Dict[str, Any]]:
         return []
     try:
         from cloud_learning_store import CloudLearningStore
-        rows = CloudLearningStore().resolved_rows(limit=int(_runtime_env("LEARNING_CLOUD_MAX_ROWS", "5000")))
+        rows = CloudLearningStore().resolved_rows(limit=int(_runtime_env("LEARNING_CLOUD_MAX_ROWS", "10000")))
     except Exception:
         return []
     result = []
@@ -333,6 +336,7 @@ def _cloud_samples() -> List[Dict[str, Any]]:
             "symbol": row.get("symbol"),
             "timeframe": row.get("timeframe") or features.get("timeframe") or "unknown",
             "direction": _normalize_direction(row.get("signal_direction") or features.get("direction")),
+            "setup": str(features.get("setup") or "NONE").upper(),
             "created_at": row.get("signal_created_at") or row.get("created_at") or now_iso(),
             "old_score": float(row.get("signal_score") or features.get("aiScore") or features.get("score") or 0),
             "factors": {k: float(factors.get(k, 50)) for k in FEATURES},
@@ -390,6 +394,7 @@ def load_samples() -> List[Dict[str, Any]]:
             "symbol": row["symbol"],
             "timeframe": payload.get("timeframe") or payload.get("interval") or "unknown",
             "direction": _normalize_direction(row["direction"]),
+            "setup": str(payload.get("setup") or "NONE").upper(),
             "created_at": row["created_at"],
             "old_score": float(row["ai_score"] or payload.get("aiScore") or 0),
             "factors": {k: float(factors.get(k, 50)) for k in FEATURES},
@@ -551,7 +556,9 @@ def evaluate_routed_model(samples: Sequence[Dict[str, Any]], global_weights: Dic
     for sample in samples:
         regime=str(sample.get("regime") or "unknown")
         direction=_normalize_direction(sample.get("direction"))
-        weights=specialists.get(f"{regime}:{direction}") or specialists.get(regime) or global_weights
+        setup=str(sample.get("setup") or "NONE").upper()
+        weights=(specialists.get(f"setup:{setup}:{direction}") or specialists.get(f"{regime}:{direction}")
+                 or specialists.get(f"setup:{setup}") or specialists.get(regime) or global_weights)
         scores.append(_score(sample["factors"], weights)); wins.append(float(sample["win"])); returns.append(float(sample["return"])); ws.append(_sample_weight(sample))
     probs=[max(0.02,min(0.98,x/100.0)) for x in scores]
     brier=_weighted_mean([(p-w)**2 for p,w in zip(probs,wins)],ws)
@@ -569,7 +576,7 @@ def evaluate_routed_model(samples: Sequence[Dict[str, Any]], global_weights: Dic
 
 def walk_forward_folds(samples: Sequence[Dict[str, Any]], folds: int = 4) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
     n = len(samples)
-    folds = max(2, min(folds, 6))
+    folds = max(2, min(folds, 8))
     min_train = max(20, int(n * 0.40))
     remaining = n - min_train
     if remaining < folds:
@@ -603,10 +610,10 @@ def optimize_weights(samples: Sequence[Dict[str, Any]], defaults: Dict[str, floa
     if len(samples) < 20:
         return dict(defaults)
     rng = random.Random(seed)
-    folds = walk_forward_folds(samples, max(4, int(_runtime_env("LEARNING_WALK_FORWARD_FOLDS", "4"))))
+    folds = walk_forward_folds(samples, max(5, int(_runtime_env("LEARNING_WALK_FORWARD_FOLDS", "5"))))
     if not folds:
         return dict(defaults)
-    iterations = max(40, min(800, int(_runtime_env("LEARNING_SEARCH_ITERATIONS", "240"))))
+    iterations = max(80, min(2500, int(_runtime_env("LEARNING_SEARCH_ITERATIONS", "800"))))
     best = dict(defaults)
 
     def objective(candidate: Dict[str, float]) -> float:
@@ -648,25 +655,25 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
             cloud = CloudModelStore().load_active_model("learning-v14")
             if cloud and cloud.get("version"):
                 cfg = dict(cloud.get("config") or _model_config(cloud.get("weights") or defaults))
-                require_v52 = str(_runtime_env("LEARNING_REQUIRE_V52_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}
-                if require_v52 and cfg.get("target_schema") != "execution_v52":
+                require_v52 = str(_runtime_env("LEARNING_REQUIRE_V53_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}
+                if require_v52 and cfg.get("target_schema") != "execution_v53":
                     safe_cfg = _model_config(defaults)
-                    safe_cfg.update({"target_schema":"execution_v52","calibration":{},"rules":[],"migration_reason":"legacy-target-model-blocked"})
+                    safe_cfg.update({"target_schema":"execution_v53","calibration":{},"rules":[],"migration_reason":"legacy-target-model-blocked"})
                     effective = _apply_operator_weight_policy(dict(defaults), defaults)
-                    return {"version":"52.0-safe-base","weights":effective,"learned_weights":dict(defaults),
+                    return {"version":"53.0-safe-base","weights":effective,"learned_weights":dict(defaults),
                             "config":safe_cfg,"metrics":{"migration_blocked_version":cloud.get("version")},"rules":[],
-                            "source":"v52-safe-base"}
+                            "source":"v53-safe-base"}
                 learned = dict(cfg.get("learned_global_weights") or cfg.get("global_weights") or cloud.get("weights") or defaults)
                 effective = _apply_operator_weight_policy(learned, defaults)
                 cfg["learned_global_weights"] = learned; cfg["global_weights"] = effective
                 return {"version": cloud["version"], "weights": effective, "learned_weights": learned,
                         "config": cfg, "metrics": cloud.get("metrics") or {}, "rules": cloud.get("rules") or [],
                         "source": "cloud-authoritative"}
-            if str(_runtime_env("LEARNING_REQUIRE_V52_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}:
-                safe_cfg=_model_config(defaults); safe_cfg["target_schema"]="execution_v52"
+            if str(_runtime_env("LEARNING_REQUIRE_V53_TARGET_SCHEMA", "true")).lower() in {"1","true","yes","on"}:
+                safe_cfg=_model_config(defaults); safe_cfg["target_schema"]="execution_v53"
                 effective=_apply_operator_weight_policy(dict(defaults),defaults)
-                return {"version":"52.0-safe-base","weights":effective,"learned_weights":dict(defaults),
-                        "config":safe_cfg,"metrics":{},"rules":[],"source":"v52-safe-base"}
+                return {"version":"53.0-safe-base","weights":effective,"learned_weights":dict(defaults),
+                        "config":safe_cfg,"metrics":{},"rules":[],"source":"v53-safe-base"}
         except Exception:
             pass
     with connect() as conn:
@@ -718,16 +725,20 @@ def active_model(defaults: Dict[str, float]) -> Dict[str, Any]:
             "metrics": _json(row["metrics_json"], {}), "rules": parsed_rules}
 
 
-def specialist_weights(model: Dict[str, Any], regime: str, direction: str) -> Dict[str, float]:
+def specialist_weights(model: Dict[str, Any], regime: str, direction: str, setup: str = "") -> Dict[str, float]:
     cfg = model.get("config") or {}
     specialists = cfg.get("specialists") or {}
     direction = _normalize_direction(direction)
-    selected = specialists.get(f"{regime}:{direction}") or specialists.get(regime) or cfg.get("global_weights") or model.get("weights") or {}
+    setup = str(setup or "").upper()
+    selected = ((specialists.get(f"setup:{setup}:{direction}") if setup else None)
+                or specialists.get(f"{regime}:{direction}")
+                or (specialists.get(f"setup:{setup}") if setup else None)
+                or specialists.get(regime) or cfg.get("global_weights") or model.get("weights") or {})
     defaults = model.get("learned_weights") or cfg.get("learned_global_weights") or selected
     return _apply_operator_weight_policy(dict(selected), dict(defaults))
 
 
-def calibrated_probability(score: float, regime: str, model: Dict[str, Any], direction: str = "") -> Tuple[float, float]:
+def calibrated_probability(score: float, regime: str, model: Dict[str, Any], direction: str = "", setup: str = "") -> Tuple[float, float]:
     try:
         from model_control import calibration_valid as _calibration_valid
         if not _calibration_valid():
@@ -736,7 +747,11 @@ def calibrated_probability(score: float, regime: str, model: Dict[str, Any], dir
         pass
     calibration = (model.get("config") or {}).get("calibration") or {}
     direction = _normalize_direction(direction)
-    bins = calibration.get(f"{regime}:{direction}") or calibration.get(regime) or calibration.get("all") or []
+    setup = str(setup or "").upper()
+    bins = ((calibration.get(f"setup:{setup}:{direction}") if setup else None)
+            or calibration.get(f"{regime}:{direction}")
+            or (calibration.get(f"setup:{setup}") if setup else None)
+            or calibration.get(regime) or calibration.get("all") or [])
     for item in bins:
         if float(item["score_min"]) <= score <= float(item["score_max"]):
             samples = max(1, int(item["samples"]))
@@ -923,6 +938,17 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
             if len(directional) >= specialist_min:
                 specialists[f"{regime}:{direction}"] = optimize_weights(directional, specialists.get(regime, global_weights), seed + len(specialists) + 11)
 
+    # V53 setup specialists: PULLBACK and BREAKOUT have materially different
+    # historical expectancy and must not share one weight vector.
+    for setup_name in sorted({str(x.get("setup") or "NONE").upper() for x in train_samples}):
+        setup_rows=[x for x in train_samples if str(x.get("setup") or "NONE").upper()==setup_name]
+        if len(setup_rows)>=specialist_min:
+            specialists[f"setup:{setup_name}"]=optimize_weights(setup_rows, global_weights, seed+len(specialists)+101)
+        for direction in ("LONG","SHORT"):
+            directional=[x for x in setup_rows if x.get("direction")==direction]
+            if len(directional)>=specialist_min:
+                specialists[f"setup:{setup_name}:{direction}"]=optimize_weights(directional, specialists.get(f"setup:{setup_name}",global_weights), seed+len(specialists)+151)
+
     current_config = current.get("config") or {}
     current_global = current.get("weights") or current_config.get("global_weights") or defaults
     current_specialists = current_config.get("specialists") or {}
@@ -942,7 +968,18 @@ def train(defaults: Dict[str, float]) -> Dict[str, Any]:
             if len(directional) >= 8 and key in specialists:
                 calibration[key] = _calibration(directional, specialists[key])
 
-    config = {"target_schema": "execution_v52", "global_weights": global_weights, "specialists": specialists,
+    for setup_name in sorted({str(x.get("setup") or "NONE").upper() for x in holdout}):
+        subset=[x for x in holdout if str(x.get("setup") or "NONE").upper()==setup_name]
+        skey=f"setup:{setup_name}"
+        if len(subset)>=12 and skey in specialists:
+            calibration[skey]=_calibration(subset,specialists[skey])
+        for direction in ("LONG","SHORT"):
+            drows=[x for x in subset if x.get("direction")==direction]
+            key=f"setup:{setup_name}:{direction}"
+            if len(drows)>=12 and key in specialists:
+                calibration[key]=_calibration(drows,specialists[key])
+
+    config = {"target_schema": "execution_v53", "global_weights": global_weights, "specialists": specialists,
               "calibration": calibration, "rules": rules, "drift": drift,
               "data_health": health, "inactive_features": sorted(inactive_features),
               "training": {"samples": len(samples), "train": len(train_samples), "holdout": len(holdout), "seed": seed,

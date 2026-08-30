@@ -195,7 +195,7 @@ def calculate_ai_score(signal: Dict[str, Any], weights: Dict[str, float] | None 
     model = get_model_config()
     factors = extract_factors(signal)
     regime = classify_regime(factors)
-    selected_weights = weights or specialist_weights(model, regime, str(signal.get("direction") or ""))
+    selected_weights = weights or specialist_weights(model, regime, str(signal.get("direction") or ""), str(signal.get("setup") or ""))
     selected_weights = dict(selected_weights or DEFAULT_WEIGHTS)
     numerator = sum(factors[name] * selected_weights.get(name, DEFAULT_WEIGHTS[name]) for name in DEFAULT_WEIGHTS)
     denominator = sum(selected_weights.get(name, DEFAULT_WEIGHTS[name]) for name in DEFAULT_WEIGHTS)
@@ -205,7 +205,7 @@ def calculate_ai_score(signal: Dict[str, Any], weights: Dict[str, float] | None 
         factors, model.get("rules") or [], regime=regime, direction=str(signal.get("direction") or "")
     )
     score = round(_clamp(pre_adjustment + learning["adjustment"]), 1)
-    probability, uncertainty = calibrated_probability(score, regime, model, str(signal.get("direction") or ""))
+    probability, uncertainty = calibrated_probability(score, regime, model, str(signal.get("direction") or ""), str(signal.get("setup") or ""))
     contributions = {
         name: round((factors[name] * selected_weights.get(name, DEFAULT_WEIGHTS[name])) / denominator, 2)
         for name in DEFAULT_WEIGHTS
@@ -235,7 +235,7 @@ def enrich_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
     # Learning MAX 2.0 augments, but never replaces, the validated v14 score.
     try:
         from learning_max2 import predict, explain
-        lm = predict(enriched.get("aiFactors") or {}, str(enriched.get("direction") or ""))
+        lm = predict(enriched.get("aiFactors") or {}, str(enriched.get("direction") or ""), str(enriched.get("setup") or ""))
         xai = explain(enriched.get("aiFactors") or {}, lm)
         enriched.update({
             "learningMax2": lm,

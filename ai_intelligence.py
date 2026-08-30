@@ -79,17 +79,24 @@ def rank_signals(signals):
         # V52 final execution gate runs after Hedge/Adaptive/Chronos have all
         # changed probability.  No earlier scanner probability may authorize a
         # trade whose final calibrated probability fell below the operator floor.
-        min_probability = float(os.getenv("TRADE_MIN_PROBABILITY", "70"))
+        effective = item.get("effectiveThresholds") or {}
+        min_probability = max(float(os.getenv("TRADE_MIN_PROBABILITY", "70")), float(effective.get("probability") or 0))
+        min_quality = max(min_quality, float(effective.get("quality") or 0))
+        min_ev = max(min_ev, float(effective.get("ev") or 0))
         raw_final_probability = item.get("calibratedProbability") if item.get("calibratedProbability") is not None else item.get("probability")
         final_probability = float(raw_final_probability if raw_final_probability is not None else min_probability)
-        min_rr = float(os.getenv("TRADE_MIN_RR", "2.0"))
+        min_rr = max(float(os.getenv("TRADE_MIN_RR", "2.0")), float(effective.get("rr") or 0))
         rr = float(item.get("rr") if item.get("rr") is not None else min_rr)
-        profile_passed = (quality >= min_quality and ev >= min_ev and final_probability >= min_probability
-                          and rr >= min_rr and not hard_blocked)
+        reliability = float((item.get("reliability") or {}).get("score") or 0)
+        min_reliability = float(effective.get("reliability") or 0)
+        engine_passed = bool(item.get("qualityPassed", True))
+        profile_passed = (engine_passed and quality >= min_quality and ev >= min_ev and final_probability >= min_probability
+                          and rr >= min_rr and reliability >= min_reliability and not hard_blocked)
         item["finalExecutionGate"] = {"passed": bool(profile_passed), "probability": final_probability,
                                       "minProbability": min_probability, "quality": quality,
                                       "minQuality": min_quality, "ev": ev, "minEv": min_ev,
-                                      "rr": rr, "minRr": min_rr}
+                                      "rr": rr, "minRr": min_rr, "reliability": reliability,
+                                      "minReliability": min_reliability, "enginePassed": engine_passed}
         if quality >= min_quality:
             quality_count += 1
         if quality >= min_quality and ev >= min_ev:
@@ -108,6 +115,10 @@ def rank_signals(signals):
                 reasons.append("Probability")
             if rr < min_rr:
                 reasons.append("RR")
+            if reliability < min_reliability:
+                reasons.append("Reliability")
+            if not engine_passed:
+                reasons.append("V53 engine gate")
             if hard_blocked:
                 reasons.append("anti-profile")
             rejected.append({

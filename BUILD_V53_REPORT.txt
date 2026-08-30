@@ -1,0 +1,46 @@
+Crypto Report Bot v53.0.0 — Signal Quality Architecture
+
+BASE: v52.0.0
+FINAL VERSION: 53.0.0
+
+Core fixes:
+1. Profit Profile schema v53, execution-first and fail-closed for legacy profiles.
+2. Canonical Paper execution outcomes override mark-to-market targets by fingerprint.
+3. Execution learning target is leverage-independent (net PnL / notional); R multiple is based on actual risk.
+4. Setup+direction specialists for PULLBACK/BREAKOUT and LONG/SHORT.
+5. Historical win probability separated from historical expectancy/utility.
+6. Robust/winsorized returns and robust profit factor reduce pump/outlier domination.
+7. Execution-specific win rate/PF/return/AUC/Brier tracked separately in profile groups and health.
+8. Dynamic empirical rules decay to zero when recent expectancy contradicts the rule.
+9. Setup no longer gets counted twice through profile + manual rule bonus.
+10. BREAKOUT automatically goes shadow/no-trade when specialist expectancy is negative.
+11. Reliability Score penalizes missing/fallback data and low exchange coverage.
+12. 95% probability interval exposes weak statistical confidence.
+13. Profile degradation guard raises thresholds; severe degradation can force shadow-only.
+14. Quality formula no longer feeds EV (which already contains Probability) back into Quality.
+15. Final execution gate respects V53 enginePassed, reliability and degraded thresholds after Chronos/Adaptive.
+16. SHORT breakout/pullback entry, SL and TP geometry fully mirrored from LONG.
+17. Direction-aware confirmations: bullish facts cannot confirm SHORT and vice versa.
+18. Relative-strength/funding checks made direction-aware.
+19. OI signal/label mismatch fixed; no-data OI is neutral/fallback rather than fake predictive evidence.
+20. Learning model schema execution_v53; old target models blocked.
+21. Added setup specialists and setup-specific calibration bins to Learning v14.
+22. Walk-forward default >=5 folds, random-search capacity up to 2500 iterations, cloud history default 10k.
+23. Adaptive Paper model expanded with direction/setup/regime/reliability/uncertainty/OI features.
+24. Optional .env.v53.high_capacity.example for larger servers.
+25. Bundled V53 profit profile rebuilt from supplied history.
+
+Bundled data-profile summary at build time:
+- total observations: 1608
+- matched paper executions: 35
+- execution win rate: 8.57%
+- execution robust avg return: -5.5034%
+- execution probability AUC: 0.375 overall
+- recent 21d execution probability Brier: 0.4123
+These metrics intentionally trigger conservative/degraded behavior; they are diagnostics, not promised future performance.
+
+Validation:
+- pytest: 239 passed, 0 failed
+- python compileall: PASS
+- V53 profile rebuild using supplied CSVs: PASS
+- historical payload evaluation smoke test: 79 evaluated, 0 runtime errors

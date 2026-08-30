@@ -388,7 +388,8 @@ def calculate_score(symbol_data):
     }
 
 
-def build_trade_levels(symbol_data):
+def build_trade_levels(symbol_data, direction="LONG_BIAS"):
+    direction = str(direction or "LONG_BIAS").upper()
     klines = symbol_data.get("klines", {})
     c15 = parse_klines(klines.get("15m", []))
     c1h = parse_klines(klines.get("1h", []))
@@ -409,31 +410,39 @@ def build_trade_levels(symbol_data):
 
     buffer = max(atr_15m_value * 0.25, last_price * 0.001)
 
-    breakout_entry = resistance_15m + buffer
-    breakout_stop = resistance_15m - atr_15m_value * 1.2
+    if direction in {"SHORT", "SHORT_BIAS", "SELL"}:
+        # Mirror the geometry for SHORT: break support, stop above, targets below;
+        # pullbacks are sold from resistance instead of bought from support.
+        breakout_entry = support_15m - buffer
+        breakout_stop = support_15m + atr_15m_value * 1.2
+        pullback_entry_low = resistance_15m - atr_15m_value * 0.8
+        pullback_entry_high = resistance_15m - buffer
+        pullback_stop = resistance_15m + atr_15m_value * 1.2
+        tp1 = breakout_entry - atr_1h_value * 1.0
+        tp2 = breakout_entry - atr_1h_value * 2.0
+        tp3 = breakout_entry - atr_1h_value * 3.0
+        risk_breakout = breakout_stop - breakout_entry
+        reward_breakout = breakout_entry - tp2
+        pullback_entry_mid = (pullback_entry_low + pullback_entry_high) / 2
+        risk_pullback = pullback_stop - pullback_entry_mid
+        reward_pullback = pullback_entry_mid - support_1h
+    else:
+        breakout_entry = resistance_15m + buffer
+        breakout_stop = resistance_15m - atr_15m_value * 1.2
+        pullback_entry_low = support_15m + buffer
+        pullback_entry_high = support_15m + atr_15m_value * 0.8
+        pullback_stop = support_15m - atr_15m_value * 1.2
+        tp1 = breakout_entry + atr_1h_value * 1.0
+        tp2 = breakout_entry + atr_1h_value * 2.0
+        tp3 = breakout_entry + atr_1h_value * 3.0
+        risk_breakout = breakout_entry - breakout_stop
+        reward_breakout = tp2 - breakout_entry
+        pullback_entry_mid = (pullback_entry_low + pullback_entry_high) / 2
+        risk_pullback = pullback_entry_mid - pullback_stop
+        reward_pullback = resistance_1h - pullback_entry_mid
 
-    pullback_entry_low = support_15m + buffer
-    pullback_entry_high = support_15m + atr_15m_value * 0.8
-    pullback_stop = support_15m - atr_15m_value * 1.2
-
-    tp1 = breakout_entry + atr_1h_value * 1.0
-    tp2 = breakout_entry + atr_1h_value * 2.0
-    tp3 = breakout_entry + atr_1h_value * 3.0
-
-    rr_breakout = None
-    risk_breakout = breakout_entry - breakout_stop
-    reward_breakout = tp2 - breakout_entry
-
-    if risk_breakout > 0:
-        rr_breakout = round(reward_breakout / risk_breakout, 2)
-
-    rr_pullback = None
-    pullback_entry_mid = (pullback_entry_low + pullback_entry_high) / 2
-    risk_pullback = pullback_entry_mid - pullback_stop
-    reward_pullback = resistance_1h - pullback_entry_mid
-
-    if risk_pullback > 0:
-        rr_pullback = round(reward_pullback / risk_pullback, 2)
+    rr_breakout = round(reward_breakout / risk_breakout, 2) if risk_breakout > 0 and reward_breakout > 0 else None
+    rr_pullback = round(reward_pullback / risk_pullback, 2) if risk_pullback > 0 and reward_pullback > 0 else None
 
     return {
         "lastPrice": round(last_price, 6),
@@ -483,7 +492,7 @@ def make_report(snapshot):
             continue
 
         score = calculate_score(symbol_data)
-        levels = build_trade_levels(symbol_data)
+        levels = build_trade_levels(symbol_data, score.get("direction"))
 
         symbol_data["parsedKlines"] = {
             "15m": parse_klines(

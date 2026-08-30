@@ -18,8 +18,9 @@ from repositories.paper_repository import load_valid_closed_positions
 
 log = get_logger("adaptive_model_manager")
 FEATURES = (
-    "quality", "probability", "ev", "score", "rr", "coverage",
-    "trend", "volume", "momentum", "alignment", "capital_flow", "smart_money",
+    "quality", "probability", "ev", "score", "rr", "coverage", "uncertainty", "reliability",
+    "trend", "volume", "momentum", "alignment", "capital_flow", "smart_money", "open_interest",
+    "is_short", "is_breakout", "is_pullback", "regime_bull", "regime_bear", "regime_range",
 )
 
 
@@ -60,15 +61,18 @@ def _extract(row: Dict[str, Any]) -> Tuple[List[float], int]:
         coverage = float(len(venues))
     else:
         coverage = _num(p.get("exchangeCoverageCount"), 1.0)
+    direction=str(row.get("side") or p.get("direction") or "").upper(); setup=str(p.get("setup") or "").upper(); regime=str(p.get("marketRegime") or p.get("aiRegime") or "").lower()
+    reliability=p.get("reliability") or {}; reliability_score=_num(reliability.get("score") if isinstance(reliability,dict) else reliability, 70)
     x = [
         _num(row.get("quality_score") or p.get("qualityScore"), 50),
         _num(row.get("probability") or p.get("calibratedProbability") or p.get("probability"), 50),
         _num(row.get("expected_value_pct") or p.get("expectedValuePct"), 0),
-        _num(p.get("aiScore") or p.get("score"), 50),
-        _num(p.get("rr"), 1), coverage,
-        _num(factors.get("trend"), 50), _num(factors.get("volume"), 50),
-        _num(factors.get("momentum"), 50), _num(factors.get("alignment"), 50),
-        _num(factors.get("capital_flow"), 50), _num(factors.get("smart_money"), 50),
+        _num(p.get("aiScore") or p.get("score"), 50), _num(p.get("rr"), 1), coverage,
+        _num(p.get("uncertainty") or p.get("aiUncertainty"), 50), reliability_score,
+        _num(factors.get("trend"), 50), _num(factors.get("volume"), 50), _num(factors.get("momentum"), 50),
+        _num(factors.get("alignment"), 50), _num(factors.get("capital_flow"), 50), _num(factors.get("smart_money"), 50), _num(factors.get("open_interest"),50),
+        1.0 if "SHORT" in direction else 0.0, 1.0 if setup=="BREAKOUT" else 0.0, 1.0 if setup=="PULLBACK" else 0.0,
+        1.0 if "bull" in regime else 0.0, 1.0 if "bear" in regime else 0.0, 1.0 if "range" in regime else 0.0,
     ]
     pnl = _num(row.get("net_pnl"))
     y = 1 if pnl > 1e-9 else (0 if pnl < -1e-9 else -1)
@@ -84,7 +88,7 @@ def _load_rows(limit: int) -> List[Dict[str, Any]]:
         return []
 
 def _standardize(xs: List[List[float]]) -> Tuple[List[List[float]], List[float], List[float]]:
-    n = len(xs); d = len(FEATURES)
+    n = len(xs); d = len(xs[0]) if xs else len(FEATURES)
     means = [sum(row[j] for row in xs) / n for j in range(d)]
     stds = []
     for j in range(d):
@@ -95,7 +99,7 @@ def _standardize(xs: List[List[float]]) -> Tuple[List[List[float]], List[float],
 
 
 def _train(xs: List[List[float]], ys: List[int]) -> Tuple[List[float], float]:
-    d = len(FEATURES); w = [0.0] * d
+    d = len(xs[0]) if xs else len(FEATURES); w = [0.0] * d
     prior = min(0.98, max(0.02, sum(ys) / max(1, len(ys))))
     b = math.log(prior / (1.0 - prior))
     lr = _float("ADAPTIVE_MODEL_LEARNING_RATE", 0.04)
@@ -196,7 +200,7 @@ def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
     promote = metrics["samples"] >= min_validation and improvement >= min_improvement
     version = datetime.now(timezone.utc).strftime("paper-logit-%Y%m%d-%H%M%S-%f")
     row = {
-        "version": version, "status": "champion" if promote else "candidate", "algorithm": "pure_python_logistic_v1",
+        "version": version, "status": "champion" if promote else "candidate", "algorithm": "pure_python_logistic_v53",
         "samples_train": len(train_rows), "samples_validation": len(val_rows), "metrics": metrics,
         "model_json": model, "trigger": trigger, "created_at": _now(), "activated_at": _now() if promote else None,
     }
