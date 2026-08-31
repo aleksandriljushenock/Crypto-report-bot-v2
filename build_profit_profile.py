@@ -19,8 +19,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-PROFILE_SCHEMA_VERSION = 54
-TARGET_TYPE = "execution_first_v54"
+PROFILE_SCHEMA_VERSION = 55
+TARGET_TYPE = "execution_first_v55"
 BASE_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 DIRECTION_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 GROUPS = BASE_GROUPS + tuple(f"{x}_direction" for x in DIRECTION_GROUPS)
@@ -151,6 +151,30 @@ def _normalize_execution(source: Dict[str, Any]) -> Dict[str, Any] | None:
     return item
 
 
+def _normalize_replay_execution(source: Dict[str, Any]) -> Dict[str, Any] | None:
+    if str(source.get('entry_status') or '').lower() != 'filled': return None
+    if source.get('net_return_pct') is None: return None
+    if str(source.get('outcome') or '').upper() in {'','UNRESOLVED','AMBIGUOUS','OPEN'}: return None
+    payload = _json(source.get('feature_payload'))
+    factors = payload.get('aiFactors') or payload.get('tradeProfile') or {}
+    ret = _num(source.get('net_return_pct'))
+    created = source.get('signal_created_at') or source.get('filled_at')
+    sample_type = str(source.get('sample_type') or '').upper()
+    target_source = 'paper_execution' if sample_type.startswith('PAPER') else 'shadow_execution'
+    item={
+      'fingerprint':str(source.get('fingerprint') or payload.get('fingerprint') or ''),'created_at':created,'_dt':_dt(created),
+      'symbol':source.get('symbol') or payload.get('symbol') or 'UNKNOWN','direction':_direction(source.get('direction') or payload.get('direction')),
+      'return':ret,'win':1 if ret>0 else 0,'target_source':target_source,'net_pnl':None,'r_multiple':source.get('r_multiple'),
+      'close_reason':str(source.get('exit_reason') or source.get('outcome') or ''),'setup':str(source.get('setup') or payload.get('setup') or 'NONE').upper(),
+      'regime':payload.get('marketRegime') or payload.get('aiRegime') or 'unknown','structure1h':payload.get('structure1h','N/A'),'structure15m':payload.get('structure15m','N/A'),
+      'score':_num(payload.get('aiScore') or payload.get('score')),'probability':_num((payload.get('decisionSnapshot') or {}).get('finalProbability') or payload.get('finalProbability') or payload.get('calibratedProbability') or payload.get('probability')),
+      'confidence':_num(payload.get('confidence')),'uncertainty':_num(payload.get('uncertainty'),100),'quoteVolume':_num(payload.get('quoteVolume')),'rr':_num(payload.get('rr'))}
+    tfs=payload.get('timeframes') or {}
+    for tf in ('1d','4h','1h','15m','5m'): item['tf'+tf]=tfs.get(tf,'N/A')
+    for key in FACTORS:item[key]=_num(factors.get(key),50.0)
+    _add_direction_keys(item); return item
+
+
 def _add_direction_keys(item: Dict[str, Any]) -> None:
     d = item.get('direction') or 'UNKNOWN'
     for key in DIRECTION_GROUPS:
@@ -208,7 +232,7 @@ def _stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     rgp=sum(max(0,x) for x in robust); rgl=sum(abs(min(0,x)) for x in robust)
     target_counts=defaultdict(int)
     for r in rows: target_counts[str(r.get('target_source') or 'unknown')]+=1
-    execution=[r for r in rows if r.get('target_source')=='paper_execution']
+    execution=[r for r in rows if str(r.get('target_source') or '').endswith('_execution')]
     ex_returns=[_num(r.get('return')) for r in execution]; ex_robust=_winsorized(ex_returns) if execution else []
     ex_wins=sum(int(r.get('win',0)) for r in execution); ex_gp=sum(max(0,x) for x in ex_robust); ex_gl=sum(abs(min(0,x)) for x in ex_robust)
     return {
@@ -259,7 +283,7 @@ def _diagnostics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     ys=[int(r.get('win',0)) for r in rows if _num(r.get('probability'))>0]
     brier=sum((p-y)**2 for p,y in zip(probs,ys))/len(probs) if probs else None
     auc=_auc(rows,'probability')
-    ex=[r for r in rows if r.get('target_source')=='paper_execution']; ex_auc=_auc(ex,'probability') if ex else None
+    ex=[r for r in rows if str(r.get('target_source') or '').endswith('_execution')]; ex_auc=_auc(ex,'probability') if ex else None
     ex_probs=[max(0.001,min(0.999,_num(r.get('probability'))/100.0)) for r in ex if _num(r.get('probability'))>0]; ex_ys=[int(r.get('win',0)) for r in ex if _num(r.get('probability'))>0]
     ex_brier=sum((p-y)**2 for p,y in zip(ex_probs,ex_ys))/len(ex_probs) if ex_probs else None
     st.update({'probability_auc':round(auc,4) if auc is not None else None,'probability_brier':round(brier,4) if brier is not None else None,
@@ -313,6 +337,21 @@ def _load_paper_supabase(limit: int) -> List[Dict[str, Any]]:
         return []
 
 
+def _load_execution_v55_supabase(limit: int) -> List[Dict[str, Any]]:
+    try:
+        client = __import__('cloud_client').get_supabase_client()
+        out=[]; start=0; page=1000
+        while len(out)<limit:
+            chunk=(client.table('execution_training_dataset_v55').select('*').eq('entry_status','filled').order('signal_created_at',desc=False).range(start,min(start+page-1,limit-1)).execute().data or [])
+            if not chunk: break
+            out.extend(chunk)
+            if len(chunk)<page: break
+            start += len(chunk)
+        return out[:limit]
+    except Exception:
+        return []
+
+
 def _dataset_hash(rows: List[Dict[str, Any]]) -> str:
     h=hashlib.sha256()
     for r in rows:
@@ -320,8 +359,20 @@ def _dataset_hash(rows: List[Dict[str, Any]]) -> str:
     return h.hexdigest()
 
 
-def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int]=DEFAULT_WINDOWS, execution_rows: Iterable[Dict[str, Any]] | None=None) -> Dict[str, Any]:
+def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int]=DEFAULT_WINDOWS, execution_rows: Iterable[Dict[str, Any]] | None=None, replay_rows: Iterable[Dict[str, Any]] | None=None) -> Dict[str, Any]:
     rows=_merge_rows(list(rows_raw), list(execution_rows or []))
+    replay=[x for raw in list(replay_rows or []) if (x:=_normalize_replay_execution(raw)) is not None]
+    if replay:
+        # Execution replay supersedes proxy observations with matching fingerprints, otherwise augments them.
+        by_fp={r.get('fingerprint'):r for r in replay if r.get('fingerprint')}
+        upgraded=[]; seen=set()
+        for item in rows:
+            fp=item.get('fingerprint'); ex=by_fp.get(fp) if fp else None
+            if ex:
+                merged=dict(item); merged.update({k:v for k,v in ex.items() if v not in (None,'')}); _add_direction_keys(merged); upgraded.append(merged); seen.add(fp)
+            else: upgraded.append(item)
+        upgraded.extend(r for r in replay if not r.get('fingerprint') or r.get('fingerprint') not in seen)
+        rows=sorted(upgraded,key=lambda r:r.get('_dt') or datetime.min.replace(tzinfo=timezone.utc))
     if not rows: raise RuntimeError('no usable resolved observations found')
     now=datetime.now(timezone.utc); windows=sorted({max(1,int(x)) for x in windows})
     recent_windows={}; recent_overall={}; recent_rules={}
@@ -334,7 +385,7 @@ def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int]=DEFAULT_WIN
     for r in rows: source_counts[str(r.get('target_source') or 'unknown')]+=1
     latest=max((r['_dt'] for r in rows if r.get('_dt')),default=None)
     profile={
-      'schema_version':PROFILE_SCHEMA_VERSION,'version':'profit-profile-v53-'+now.strftime('%Y%m%d%H%M%S'),
+      'schema_version':PROFILE_SCHEMA_VERSION,'version':'profit-profile-v55-'+now.strftime('%Y%m%d%H%M%S'),
       'generated_at':now.isoformat(),'target_type':TARGET_TYPE,'target_horizon':str(os.getenv('LEARNING_TARGET_HORIZON','24h')).lower(),
       'target_source_counts':dict(source_counts),'dataset_hash':_dataset_hash(rows),'latest_observation_at':latest.isoformat() if latest else None,
       'overall':_diagnostics(rows),'groups':_groups(rows),'recent_windows':recent_windows,'recent_overall':recent_overall,
@@ -364,13 +415,13 @@ def _atomic_write_json(path: Path,payload:Dict[str,Any])->None:
 
 def rebuild_from_supabase(output: str|Path|None=None, limit: int|None=None, windows: Iterable[int]=DEFAULT_WINDOWS)->Dict[str,Any]:
     max_rows=int(limit or os.getenv('PROFILE_REBUILD_MAX_ROWS','10000'))
-    obs=_load_supabase(max(100,max_rows)); paper=_load_paper_supabase(max(100,max_rows))
-    profile=build(obs,windows,execution_rows=paper)
+    obs=_load_supabase(max(100,max_rows)); paper=_load_paper_supabase(max(100,max_rows)); replay=_load_execution_v55_supabase(max(100,max_rows))
+    profile=build(obs,windows,execution_rows=paper,replay_rows=replay)
     out=Path(output or os.getenv('PROFIT_PROFILE_PATH','data/profit_profile_v2.json')); _atomic_write_json(out,profile)
     try:
         import ai_hedge_fund_engine; ai_hedge_fund_engine.invalidate_profile_cache()
     except Exception: pass
-    return {'status':'ok','path':str(out),'samples':profile['overall']['samples'],'execution_samples':profile['target_source_counts'].get('paper_execution',0),'windows':profile['recent_window_options'],'version':profile['version']}
+    return {'status':'ok','path':str(out),'samples':profile['overall']['samples'],'execution_samples':sum(v for k,v in profile['target_source_counts'].items() if str(k).endswith('_execution')),'windows':profile['recent_window_options'],'version':profile['version']}
 
 
 def main()->None:

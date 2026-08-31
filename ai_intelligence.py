@@ -121,19 +121,37 @@ def rank_signals(signals):
                 reasons.append("V53 engine gate")
             if hard_blocked:
                 reasons.append("anti-profile")
-            rejected.append({
-                "symbol": item.get("symbol"), "score": item.get("score"),
-                "rr": item.get("rr"), "probability": item.get("probability"),
+            # V55: preserve the complete signal-time feature/decision snapshot for shadow learning.
+            # Older releases rebuilt a tiny dict here, which silently discarded most aiFactors,
+            # timeframes, regime, reliability, exchange coverage and intermediate model outputs.
+            shadow_item = dict(item)
+            shadow_item.update({
                 "qualityScore": quality, "expectedValuePct": ev,
                 "profileQualityThreshold": min_quality, "profileEvThreshold": min_ev,
                 "finalProbabilityThreshold": min_probability, "finalProbability": final_probability,
                 "hardBlocked": hard_blocked,
                 "reason": ", ".join(reasons) or "AI gate",
-                "direction": item.get("direction"), "setup": item.get("setup"),
-                "entryPrice": item.get("entryPrice"), "entryText": item.get("entryText"),
-                "stop": item.get("stop"), "tp1": item.get("tp1"), "tp2": item.get("tp2"), "tp3": item.get("tp3"),
-                "signalProfile": item.get("signalProfile"), "fingerprint": item.get("fingerprint"),
+                "decisionAtSignal": "REJECTED",
+                "decisionSnapshot": {
+                    "rawProbability": item.get("probability"),
+                    "learningProbability": (item.get("learningMax2") or {}).get("probability") if isinstance(item.get("learningMax2"), dict) else None,
+                    "hedgeProbability": item.get("calibratedProbability"),
+                    "adaptiveProbability": item.get("adaptiveModelProbability"),
+                    "chronosProbability": (item.get("chronos") or {}).get("probabilityUp") if isinstance(item.get("chronos"), dict) else None,
+                    "probabilityBeforeChronos": item.get("probabilityBeforeChronos"),
+                    "finalProbability": final_probability,
+                    "finalQuality": quality,
+                    "finalEv": ev,
+                    "minProbability": min_probability,
+                    "minQuality": min_quality,
+                    "minEv": min_ev,
+                    "minRr": min_rr,
+                    "minReliability": min_reliability,
+                    "enginePassed": engine_passed,
+                    "hardBlocked": hard_blocked,
+                },
             })
+            rejected.append(shadow_item)
     quality_bands = {"85+": 0, "80-85": 0, "75-80": 0, "70-75": 0, "<70": 0}
     probability_bands = {"80+": 0, "75-80": 0, "70-75": 0, "<70": 0}
     ev_bands = {"5+": 0, "3-5": 0, "2-3": 0, "<2": 0}

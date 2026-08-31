@@ -20,7 +20,7 @@ from ai_optimizer import run_optimizer
 from adaptive_model_manager import train_candidate
 from strategies.scheduler import run_scheduled_cycle as run_strategy_lab_scheduled_cycle
 from build_profit_profile import rebuild_from_supabase
-from execution_model_v54 import train as train_execution_model_v54
+from execution_model_v55 import train as train_execution_model_v55
 
 
 from core.scheduler import PeriodicWorker
@@ -179,13 +179,13 @@ class AutomationSupervisor:
                 enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=30,
             ),
             PeriodicWorker(
-                'execution-v54-model-trainer', execution_model_minutes * 60,
-                self._guarded('execution-v54-model-trainer', self._run_execution_model_v54), self.logger,
+                'execution-v55-model-trainer', execution_model_minutes * 60,
+                self._guarded('execution-v55-model-trainer', self._run_execution_model_v55), self.logger,
                 enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=720,
             ),
             PeriodicWorker(
-                'execution-v54-backfill', execution_backfill_minutes * 60,
-                self._guarded('execution-v54-backfill', self._run_execution_backfill_v54), self.logger,
+                'execution-v55-backfill', execution_backfill_minutes * 60,
+                self._guarded('execution-v55-backfill', self._run_execution_backfill_v55), self.logger,
                 enabled=self._bool_env('EXECUTION_BACKFILL_ENABLED', False), first_delay=900,
             ),
         ]
@@ -355,23 +355,23 @@ class AutomationSupervisor:
         )
         return result
 
-    def _run_execution_model_v54(self):
+    def _run_execution_model_v55(self):
         try:
-            result=train_execution_model_v54(trigger='scheduled')
-            self.logger(f"Execution ML v54: status={result.get('status')} rows={result.get('rows')} best_auc={result.get('best_auc')}")
+            result=train_execution_model_v55(trigger='scheduled')
+            self.logger(f"Execution ML v55: status={result.get('status')} rows={result.get('rows')} best_auc={result.get('best_auc')}")
             return result
         except Exception as exc:
-            self.logger(f"Execution ML v54 error: {type(exc).__name__}: {exc}")
+            self.logger(f"Execution ML v55 error: {type(exc).__name__}: {exc}")
             return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
 
-    def _run_execution_backfill_v54(self):
+    def _run_execution_backfill_v55(self):
         try:
-            from backfill_execution_dataset_v54 import backfill
+            from backfill_execution_dataset_v55 import backfill
             result=backfill(limit=integer('EXECUTION_BACKFILL_BATCH_ROWS',500,minimum=1,maximum=10000),dry_run=False)
-            self.logger(f"Execution backfill v54: written={result.get('written')} unresolved={result.get('unresolved')} errors={result.get('errors')}")
+            self.logger(f"Execution backfill v55: shadow={result.get('shadow_written')} paper={result.get('paper_written')} unresolved={result.get('unresolved')} ambiguous={result.get('ambiguous')} errors={result.get('errors')}")
             return result
         except Exception as exc:
-            self.logger(f"Execution backfill v54 error: {type(exc).__name__}: {exc}")
+            self.logger(f"Execution backfill v55 error: {type(exc).__name__}: {exc}")
             return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
 
     def _run_optimizer_models(self):
@@ -410,8 +410,8 @@ def build_automation_status(supervisor):
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
         'profit-profile-rebuild': 'Profit Profile Rebuild',
-        'execution-v54-model-trainer': 'Execution ML v54',
-        'execution-v54-backfill': 'Execution Backfill v54',
+        'execution-v55-model-trainer': 'Execution ML v54',
+        'execution-v55-backfill': 'Execution Backfill v54',
     }
     for name, runtime in status['runtime'].items():
         saved = status['stored'].get(name, {})

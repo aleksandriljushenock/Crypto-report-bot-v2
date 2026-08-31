@@ -33,7 +33,7 @@ def invalidate_profile_cache():
     global _CACHE; _CACHE=None
 
 def _fallback_profile(reason='missing'):
-    return {'schema_version':54,'version':'v54-safe-fallback','target_type':'execution_first_v54','valid':False,'validation_reasons':[reason],
+    return {'schema_version':55,'version':'v55-safe-fallback','target_type':'execution_first_v55','valid':False,'validation_reasons':[reason],
             'overall':{'win_rate':50.0,'robust_avg_return':0.0,'robust_profit_factor':1.0},'groups':{},'recent_windows':{},'recent_overall':{},'rule_diagnostics':[]}
 
 def _profile():
@@ -280,7 +280,7 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         n=int(execution.get('samples') or 0); maxw=max(0,min(0.55,_env_float('EXECUTION_CALIBRATION_MAX_WEIGHT',0.30))); w=min(maxw,n/(n+120.0)); calibrated=(1-w)*calibrated+w*float(execution.get('probability') or calibrated)
     execution_ml={'available':False}
     try:
-        from execution_model_v54 import predict as execution_ml_predict
+        from execution_model_v55 import predict as execution_ml_predict
         execution_ml=execution_ml_predict(signal)
         if execution_ml.get('available'):
             mlp=_clamp(execution_ml.get('profitProbability'),2,92); n_models=max(1,int(execution_ml.get('modelCount') or 1)); mean_auc=float(execution_ml.get('meanAuc') or 0.5)
@@ -325,7 +325,18 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     ml_fill_ok=(not execution_ml.get('available')) or float(execution_ml.get('fillProbability') or 0)>=min_fill
     ml_return_ok=(not execution_ml.get('available')) or execution_ml.get('expectedReturnPct') is None or float(execution_ml.get('expectedReturnPct'))>=_env_float('EXECUTION_ML_MIN_EXPECTED_RETURN_PCT',0.0)
     passed=(not hard) and (not setup_guard.get('blocked')) and ml_fill_ok and ml_return_ok and quality>=min_quality and ev>=min_ev and reliability['score']>=min_rel and calibrated>=min_prob and rr>=min_rr
-    if health.get('severe') and _env_bool('PROFILE_SEVERE_DEGRADATION_SHADOW_ONLY',True):passed=False
+    if health.get('severe') and _env_bool('PROFILE_SEVERE_DEGRADATION_SHADOW_ONLY',True):
+        # V55 recovery protocol: remain fail-closed by default, but a validated execution
+        # champion may admit a deterministic tiny Paper canary to prove recovery live.
+        canary=False
+        if _env_bool('EXECUTION_CANARY_RECOVERY_ENABLED',True) and execution_ml.get('available'):
+            auc=float(execution_ml.get('meanAuc') or 0); exret=execution_ml.get('expectedReturnPct'); fill=float(execution_ml.get('fillProbability') or 0)
+            if auc>=_env_float('EXECUTION_CANARY_MIN_AUC',0.58) and (exret is None or float(exret)>=_env_float('EXECUTION_CANARY_MIN_RETURN_PCT',0.10)) and fill>=_env_float('EXECUTION_CANARY_MIN_FILL',55):
+                import hashlib
+                fp=str(signal.get('fingerprint') or signal.get('symbol') or '')
+                bucket=int(hashlib.sha256(fp.encode()).hexdigest()[:8],16)%10000/100.0
+                canary=bucket < _env_float('EXECUTION_CANARY_PERCENT',5.0)
+        passed=bool(passed and canary)
     decision='HIGH_QUALITY' if passed and quality>=82 else ('TRADE_CANDIDATE' if passed else 'NO_TRADE'); positive=[h['name'] for h in hits if h['adjustment']>0]
     return {'hedgeProfileVersion':p.get('version','fallback'),'profileValid':profile_valid,'profileValidationReasons':p.get('validation_reasons') or [],
       'historicalProbability':round(hist_prob,2),'historicalUtilityScore':round(historical_utility,2),'calibratedProbability':round(calibrated,2),'probabilityInterval95':interval,
@@ -333,5 +344,5 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
       'qualityAdjustment':round(adjustment,2),'qualityRules':hits,'historicalEvidence':evidence[:6],'antiProfileHits':[h['name'] for h in hits if h['adjustment']<0],
       'positiveProfileHits':positive,'suggestedPositionSizeUsd':round(_position_size(quality,positive,passed),2),'recencyEnabled':_env_bool('PROFILE_RECENCY_ENABLED',True),
       'adaptiveModelAvailable':bool(adaptive.get('available')),'adaptiveModelVersion':adaptive.get('version'),'adaptiveModelProbability':adaptive.get('probability'),
-      'executionCalibration':execution,'executionModelV54':execution_ml,'reliability':reliability,'profileHealth':health,'setupGuard':setup_guard,'breakoutGuard':breakout,
+      'executionCalibration':execution,'executionModelV55':execution_ml,'reliability':reliability,'profileHealth':health,'setupGuard':setup_guard,'breakoutGuard':breakout,
       'effectiveThresholds':{'quality':round(min_quality,2),'probability':round(min_prob,2),'ev':round(min_ev,3),'rr':round(min_rr,2),'reliability':round(min_rel,2),'fill_probability':round(min_fill,2)}}

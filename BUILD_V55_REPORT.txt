@@ -1,0 +1,24 @@
+Crypto-report-bot v55.0.0 - Execution Quality
+
+Base: v54.0.0 Execution Intelligence
+
+Key corrections:
+- full Shadow decision/feature snapshot persistence
+- legacy Shadow feature enrichment from learning_observations by fingerprint
+- unified execution_training_dataset_v55 for Shadow + Paper
+- Paper samples receive higher training weight
+- Profit Profile consumes V55 replay execution labels
+- empirical fill prior fallback, never implicit 100%
+- validated Expected Return model (MAE/Spearman/sign gates)
+- 72h purged temporal train/calibration/test
+- provider-aware backfill with fallback venues
+- 1m refinement for same-candle TP/SL; unresolved ambiguity excluded
+- independent HGB/ExtraTrees/RandomForest ensemble
+- raw-market vs all/meta feature-set models
+- missing/fallback feature indicators and feature coverage
+- SEVERE recovery canary only for validated OOS champion
+- V55 execution labels wired into Learning MAX
+
+Validation:
+- pytest full suite: see release verification
+- compileall: see release verification
