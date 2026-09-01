@@ -271,21 +271,26 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
             evidence.append(item)
     hist_prob=sum(r*w for r,w in hist)/sum(w for _,w in hist) if hist else prior
     hist_edge=sum(e*w for e,w in edge_terms)/sum(w for _,w in edge_terms) if edge_terms else 0.0
-    health=_profile_health(); hist_weight=_env_float('HEDGE_HISTORY_BLEND_WEIGHT',0.30) if profile_valid else 0.0
+    health=_profile_health(); hist_weight=_env_float('HEDGE_HISTORY_BLEND_WEIGHT',0.20) if profile_valid else 0.0
     if health.get('degraded'):hist_weight*=0.35
     hist_weight=max(0.0,min(0.45,hist_weight)); calibrated=(1-hist_weight)*live_prob+hist_weight*hist_prob
-    hits=_rule_hits(signal) if profile_valid else []; adjustment=sum(float(h['adjustment']) for h in hits); cap=_env_float('HEDGE_MAX_RULE_ADJUSTMENT',18.0); adjustment=max(-cap,min(cap,adjustment)); calibrated=_clamp(calibrated+adjustment*0.30,2,92)
+    hits=_rule_hits(signal) if profile_valid else []; adjustment=sum(float(h['adjustment']) for h in hits); cap=_env_float('HEDGE_MAX_RULE_ADJUSTMENT',12.0); adjustment=max(-cap,min(cap,adjustment)); calibrated=_clamp(calibrated+adjustment*0.30,2,92)
     execution=_execution_calibration(signal)
     if execution.get('available'):
         n=int(execution.get('samples') or 0); maxw=max(0,min(0.55,_env_float('EXECUTION_CALIBRATION_MAX_WEIGHT',0.30))); w=min(maxw,n/(n+120.0)); calibrated=(1-w)*calibrated+w*float(execution.get('probability') or calibrated)
     execution_ml={'available':False}
     try:
-        from execution_model_v55 import predict as execution_ml_predict
+        from execution_model_v56 import predict as execution_ml_predict
         execution_ml=execution_ml_predict(signal)
         if execution_ml.get('available'):
-            mlp=_clamp(execution_ml.get('profitProbability'),2,92); n_models=max(1,int(execution_ml.get('modelCount') or 1)); mean_auc=float(execution_ml.get('meanAuc') or 0.5)
-            # Model weight grows only with validated OOS edge and ensemble support.
-            mlw=max(0.0,min(_env_float('EXECUTION_ML_MAX_BLEND_WEIGHT',0.55), (mean_auc-0.50)*3.0 + min(0.15,0.04*n_models)))
+            mlp=_clamp(execution_ml.get('profitProbability'),2,92); mean_auc=float(execution_ml.get('meanAuc') or 0.5)
+            # V56: trust grows only from untouched OOS quality, never from model count.
+            max_blend=max(0.0,min(0.50,_env_float('EXECUTION_ML_MAX_BLEND_WEIGHT',0.35)))
+            if mean_auc < 0.56: mlw=0.0
+            elif mean_auc < 0.58: mlw=min(max_blend,0.10)
+            elif mean_auc < 0.61: mlw=min(max_blend,0.20)
+            elif mean_auc < 0.65: mlw=min(max_blend,0.35)
+            else: mlw=max_blend
             calibrated=(1-mlw)*calibrated+mlw*mlp
     except Exception: execution_ml={'available':False}
     reliability=_reliability(signal); rel=float(reliability['score'])/100.0
@@ -301,9 +306,10 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     if execution_ml.get('available'): uncertainty=max(uncertainty,float(execution_ml.get('uncertainty') or 0))
     uncertainty_score=_clamp(100-uncertainty)
     historical_utility=_clamp(50+hist_edge*35)
-    # Orthogonal quality: EV is deliberately excluded because it already contains probability.
-    fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else 70.0
-    quality=_clamp(0.42*calibrated+0.12*fill_score+0.16*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.12*historical_utility+0.10*float(reliability['score'])+0.08*uncertainty_score)
+    # V56 joint execution utility: a profitable idea that is unlikely to fill is not a high-quality executable signal.
+    fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else _env_float('EXECUTION_EMPIRICAL_FILL_FALLBACK',70.0)
+    executable_probability=calibrated*(fill_score/100.0)
+    quality=_clamp(0.45*executable_probability+0.15*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.15*historical_utility+0.10*float(reliability['score'])+0.10*uncertainty_score+0.05*fill_score)
     adaptive={'available':False}
     try:
         from adaptive_model_runtime import predict as adaptive_predict
@@ -311,7 +317,7 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         if adaptive.get('available'):
             aw=max(0,min(0.25,_env_float('ADAPTIVE_MODEL_BLEND_WEIGHT',0.10))); ap=_clamp(adaptive.get('probability'),2,92); calibrated=(1-aw)*calibrated+aw*ap; pwin=calibrated/100.0; ev=pwin*win_pct-(1-pwin)*loss_pct
             fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else 70.0
-            quality=_clamp(0.42*calibrated+0.12*fill_score+0.16*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.12*historical_utility+0.10*float(reliability['score'])+0.08*uncertainty_score)
+            executable_probability=calibrated*(fill_score/100.0); quality=_clamp(0.45*executable_probability+0.15*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.15*historical_utility+0.10*float(reliability['score'])+0.10*uncertainty_score+0.05*fill_score)
     except Exception:adaptive={'available':False}
     # Approximate interval around calibrated probability; broad when evidence/reliability is weak.
     n_eff=sum(w*min(200,int(item['samples'])) for (_,w),item in zip(hist,evidence)) if hist and evidence else 20.0
@@ -319,12 +325,13 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     n_eff=max(12.0,n_eff*max(0.35,rel)); se=math.sqrt(max(1e-6,pwin*(1-pwin))/n_eff); margin=min(25.0,1.96*se*100.0+uncertainty*0.08)
     interval=[round(_clamp(calibrated-margin),2),round(_clamp(calibrated+margin),2)]
     setup_guard=_setup_guard(signal); breakout=_breakout_guard(signal); hard=[h for h in hits if h.get('hard_block')]
-    min_quality=_env_float('HEDGE_MIN_QUALITY',70); min_ev=_env_float('HEDGE_MIN_EV_PCT',2); min_rel=_env_float('HEDGE_MIN_RELIABILITY',70); min_prob=_env_float('TRADE_MIN_PROBABILITY',70); min_rr=_env_float('TRADE_MIN_RR',2.3); min_fill=_env_float('EXECUTION_ML_MIN_FILL_PROBABILITY',45)
+    min_quality=_env_float('HEDGE_MIN_QUALITY',62); min_ev=_env_float('HEDGE_MIN_EV_PCT',0.5); min_rel=_env_float('HEDGE_MIN_RELIABILITY',70); min_prob=_env_float('TRADE_MIN_PROBABILITY',60); min_rr=_env_float('TRADE_MIN_RR',2.0); min_fill=_env_float('EXECUTION_ML_MIN_FILL_PROBABILITY',50); min_joint=_env_float('EXECUTION_MIN_JOINT_PROBABILITY',35)
     if health.get('degraded'):
         min_quality+=_env_float('DEGRADED_QUALITY_BONUS',5); min_prob+=_env_float('DEGRADED_PROBABILITY_BONUS',3); min_ev+=_env_float('DEGRADED_EV_BONUS',0.5)
     ml_fill_ok=(not execution_ml.get('available')) or float(execution_ml.get('fillProbability') or 0)>=min_fill
-    ml_return_ok=(not execution_ml.get('available')) or execution_ml.get('expectedReturnPct') is None or float(execution_ml.get('expectedReturnPct'))>=_env_float('EXECUTION_ML_MIN_EXPECTED_RETURN_PCT',0.0)
-    passed=(not hard) and (not setup_guard.get('blocked')) and ml_fill_ok and ml_return_ok and quality>=min_quality and ev>=min_ev and reliability['score']>=min_rel and calibrated>=min_prob and rr>=min_rr
+    ml_return_ok=(not execution_ml.get('available')) or execution_ml.get('expectedReturnPct') is None or float(execution_ml.get('expectedReturnPct'))-float(execution_ml.get('uncertainty') or 0)*_env_float('EXECUTION_RETURN_UNCERTAINTY_PENALTY',0.01)>=_env_float('EXECUTION_ML_MIN_EXPECTED_RETURN_PCT',0.10)
+    joint_ok=(not execution_ml.get('available')) or executable_probability>=min_joint
+    passed=(not hard) and (not setup_guard.get('blocked')) and ml_fill_ok and ml_return_ok and joint_ok and quality>=min_quality and ev>=min_ev and reliability['score']>=min_rel and calibrated>=min_prob and rr>=min_rr
     if health.get('severe') and _env_bool('PROFILE_SEVERE_DEGRADATION_SHADOW_ONLY',True):
         # V55 recovery protocol: remain fail-closed by default, but a validated execution
         # champion may admit a deterministic tiny Paper canary to prove recovery live.
@@ -339,10 +346,10 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         passed=bool(passed and canary)
     decision='HIGH_QUALITY' if passed and quality>=82 else ('TRADE_CANDIDATE' if passed else 'NO_TRADE'); positive=[h['name'] for h in hits if h['adjustment']>0]
     return {'hedgeProfileVersion':p.get('version','fallback'),'profileValid':profile_valid,'profileValidationReasons':p.get('validation_reasons') or [],
-      'historicalProbability':round(hist_prob,2),'historicalUtilityScore':round(historical_utility,2),'calibratedProbability':round(calibrated,2),'probabilityInterval95':interval,
+      'historicalProbability':round(hist_prob,2),'historicalUtilityScore':round(historical_utility,2),'calibratedProbability':round(calibrated,2),'executableProbability':round(executable_probability,2),'probabilityInterval95':interval,
       'expectedValuePct':round(ev,4),'expectedWinPct':round(win_pct,4),'expectedLossPct':round(loss_pct,4),'qualityScore':round(quality,2),'qualityDecision':decision,'qualityPassed':passed,
       'qualityAdjustment':round(adjustment,2),'qualityRules':hits,'historicalEvidence':evidence[:6],'antiProfileHits':[h['name'] for h in hits if h['adjustment']<0],
       'positiveProfileHits':positive,'suggestedPositionSizeUsd':round(_position_size(quality,positive,passed),2),'recencyEnabled':_env_bool('PROFILE_RECENCY_ENABLED',True),
       'adaptiveModelAvailable':bool(adaptive.get('available')),'adaptiveModelVersion':adaptive.get('version'),'adaptiveModelProbability':adaptive.get('probability'),
       'executionCalibration':execution,'executionModelV55':execution_ml,'reliability':reliability,'profileHealth':health,'setupGuard':setup_guard,'breakoutGuard':breakout,
-      'effectiveThresholds':{'quality':round(min_quality,2),'probability':round(min_prob,2),'ev':round(min_ev,3),'rr':round(min_rr,2),'reliability':round(min_rel,2),'fill_probability':round(min_fill,2)}}
+      'effectiveThresholds':{'quality':round(min_quality,2),'probability':round(min_prob,2),'ev':round(min_ev,3),'rr':round(min_rr,2),'reliability':round(min_rel,2),'fill_probability':round(min_fill,2),'joint_probability':round(min_joint,2)}}

@@ -156,8 +156,8 @@ def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
             return {"status": "disabled-control-error", "trigger": trigger}
     emit("MODEL_TRAIN_STARTED", trigger=trigger)
     rows = _load_rows(_int("ADAPTIVE_MODEL_MAX_TRADES", 1500))
-    min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 40)
-    min_validation = _int("ADAPTIVE_MODEL_MIN_VALIDATION", 12)
+    min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 150)
+    min_validation = _int("ADAPTIVE_MODEL_MIN_VALIDATION", 30)
     if len(rows) < min_samples:
         return {"status": "insufficient_data", "samples": len(rows), "required": min_samples}
     split = max(min_samples - min_validation, int(len(rows) * 0.72))
@@ -204,21 +204,31 @@ def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
         "samples_train": len(train_rows), "samples_validation": len(val_rows), "metrics": metrics,
         "model_json": model, "trigger": trigger, "created_at": _now(), "activated_at": _now() if promote else None,
     }
-    try:
-        response = _client().rpc("adaptive_model_compare_promote_v45", {
-            "p_row": row, "p_promote": bool(promote), "p_expected_champion": champion_version
-        }).execute()
-        if response.data is None:
-            raise RuntimeError("adaptive_model_compare_promote_v45 returned no data")
-        data = response.data[0] if isinstance(response.data, list) and response.data else response.data
-        if isinstance(data, dict) and data.get("status") == "champion-changed":
-            return {"status": "champion-changed", "version": version, "metrics": metrics, "improvement": improvement}
-    except Exception as exc:
-        log.exception("Adaptive model persistence failed")
-        emit("MODEL_PERSISTENCE_FAILED", version=version, promoted=promote, error=str(exc))
+    persist_error = None
+    data = None
+    for attempt in range(max(1, _int("ADAPTIVE_MODEL_PERSIST_RETRIES", 3))):
+        try:
+            response = _client().rpc("adaptive_model_compare_promote_v45", {
+                "p_row": row, "p_promote": bool(promote), "p_expected_champion": champion_version
+            }).execute()
+            if response.data is None:
+                raise RuntimeError("adaptive_model_compare_promote_v45 returned no data")
+            data = response.data[0] if isinstance(response.data, list) and response.data else response.data
+            persist_error = None
+            break
+        except Exception as exc:
+            persist_error = exc
+            if attempt + 1 < max(1, _int("ADAPTIVE_MODEL_PERSIST_RETRIES", 3)):
+                import time as _time
+                _time.sleep(min(4.0, 0.5 * (2 ** attempt)))
+    if persist_error is not None:
+        log.exception("Adaptive model persistence failed after retries", exc_info=persist_error)
+        emit("MODEL_PERSISTENCE_FAILED", version=version, promoted=promote, error=str(persist_error))
         return {"status": "persistence-error", "version": version, "metrics": metrics,
                 "samples_train": len(train_rows), "samples_validation": len(val_rows),
-                "improvement": improvement, "error": f"{type(exc).__name__}: {exc}"}
+                "improvement": improvement, "error": f"{type(persist_error).__name__}: {persist_error}"}
+    if isinstance(data, dict) and data.get("status") == "champion-changed":
+        return {"status": "champion-changed", "version": version, "metrics": metrics, "improvement": improvement}
     try:
         from adaptive_model_runtime import invalidate_cache
         invalidate_cache()

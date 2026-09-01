@@ -66,29 +66,27 @@ def _metric(rows: Iterable[Dict[str, Any]]) -> Dict[str, float]:
     breakeven = len(pnls) - wins - losses
     gross_win = sum(x for x in pnls if x > eps)
     gross_loss = abs(sum(x for x in pnls if x < -eps))
+    equity=0.0; peak=0.0; max_dd=0.0
+    for x in pnls:
+        equity += x; peak=max(peak,equity); max_dd=max(max_dd,peak-equity)
+    tail_n=max(1,int(len(pnls)*0.10)); cvar=sum(sorted(pnls)[:tail_n])/tail_n
     return {
-        "trades": len(items),
-        "wins": wins,
-        "losses": losses,
-        "breakeven": breakeven,
+        "trades": len(items), "wins": wins, "losses": losses, "breakeven": breakeven,
         "win_rate": wins / (wins + losses) * 100.0 if (wins + losses) else 0.0,
         "pnl": sum(pnls),
         "profit_factor": gross_win / gross_loss if gross_loss > 1e-12 else (999.0 if gross_win > 0 else 0.0),
-        "avg_pnl": sum(pnls) / len(items),
+        "avg_pnl": sum(pnls) / len(items), "max_drawdown": max_dd, "cvar_10": cvar,
     }
 
 
 def _candidate_thresholds(key: str, current: float) -> List[float]:
-    if key in {"TRADE_MIN_PROBABILITY", "HEDGE_MIN_QUALITY"}:
-        steps = [0, 1, 2, 3, 5, 7]
-    elif key == "HEDGE_MIN_EV_PCT":
-        steps = [0, 0.25, 0.5, 1.0, 1.5, 2.0]
-    elif key in {"TRADE_MIN_RR", "QUALITY_MIN_RR"}:
-        steps = [0, 0.1, 0.2, 0.3, 0.5, 0.75]
-    else:
-        steps = [0]
-    return sorted({round(current + s, 4) for s in steps})
-
+    """V56: search both stricter and looser thresholds offline; no one-way ratchet."""
+    if key in {"TRADE_MIN_PROBABILITY", "HEDGE_MIN_QUALITY"}: steps=[-10,-7,-5,-3,-2,-1,0,1,2,3,5,7,10]
+    elif key == "HEDGE_MIN_EV_PCT": steps=[-1.5,-1.0,-0.5,-0.25,0,0.25,0.5,1.0,1.5]
+    elif key in {"TRADE_MIN_RR", "QUALITY_MIN_RR"}: steps=[-0.5,-0.3,-0.2,-0.1,0,0.1,0.2,0.3,0.5]
+    else: steps=[0]
+    floor=0.0 if key!="HEDGE_MIN_EV_PCT" else -5.0
+    return sorted({round(max(floor,current+s),4) for s in steps})
 
 def _field_value(row: Dict[str, Any], key: str) -> float:
     payload = row.get("signal_payload") or {}
@@ -108,8 +106,10 @@ def _score_option(metrics: Dict[str, float], baseline: Dict[str, float], retenti
     pnl_gain = metrics["pnl"] - baseline["pnl"]
     pf_gain = min(metrics["profit_factor"], 8.0) - min(baseline["profit_factor"], 8.0)
     wr_gain = metrics["win_rate"] - baseline["win_rate"]
-    retention_penalty = max(0.0, 0.85 - retention) * 5.0
-    return pnl_gain * 3.0 + pf_gain * 0.8 + wr_gain * 0.04 - retention_penalty
+    retention_penalty = max(0.0, 0.80 - retention) * 6.0
+    dd_gain = baseline.get("max_drawdown",0.0)-metrics.get("max_drawdown",0.0)
+    cvar_gain = metrics.get("cvar_10",0.0)-baseline.get("cvar_10",0.0)
+    return pnl_gain*2.5 + pf_gain*0.8 + wr_gain*0.03 + dd_gain*0.8 + cvar_gain*0.6 - retention_penalty
 
 
 def _recommend_filter(rows: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
@@ -129,7 +129,7 @@ def _recommend_filter(rows: List[Dict[str, Any]], key: str) -> Optional[Dict[str
         item = {"threshold": threshold, "metrics": metrics, "retention": retention, "objective": score}
         if best is None or score > best["objective"]:
             best = item
-    if not best or best["threshold"] <= current + 1e-9:
+    if not best or abs(best["threshold"]-current) <= 1e-9:
         return None
     min_pnl_gain = _float("AI_OPTIMIZER_MIN_PNL_GAIN_USD", 0.25)
     min_wr_gain = _float("AI_OPTIMIZER_MIN_WIN_RATE_GAIN", 2.0)
@@ -147,7 +147,7 @@ def _recommend_filter(rows: List[Dict[str, Any]], key: str) -> Optional[Dict[str
         "retention_pct": round(best["retention"] * 100, 2),
         "estimated_pnl_delta": round(pnl_gain, 6),
         "estimated_win_rate_delta": round(wr_gain, 3),
-        "reason": "Более строгий порог улучшил исторический Paper результат при сохранении достаточного количества сделок.",
+        "reason": "OOS/Paper-поиск нашёл более устойчивый порог с учётом PnL, PF, drawdown, CVaR и retention.",
     }
 
 
@@ -209,7 +209,7 @@ def _universe_recommendation() -> Optional[Dict[str, Any]]:
 def run_optimizer(trigger: str = "scheduled") -> Dict[str, Any]:
     emit("OPTIMIZER_STARTED", trigger=trigger)
     rows = _rows(_int("AI_OPTIMIZER_MAX_TRADES", 1000))
-    min_samples = _int("AI_OPTIMIZER_MIN_TRADES", 20)
+    min_samples = _int("AI_OPTIMIZER_MIN_TRADES", 150)
     now = _now()
     run_row: Dict[str, Any] = {
         "status": "completed" if len(rows) >= min_samples else "insufficient_data",

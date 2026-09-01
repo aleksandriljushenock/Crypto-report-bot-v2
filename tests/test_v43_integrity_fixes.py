@@ -173,6 +173,8 @@ def test_cloud_active_model_applies_operator_policy(monkeypatch):
 
 def test_adaptive_persistence_failure_is_not_reported_as_promotion(monkeypatch):
     import adaptive_model_manager as am
+    monkeypatch.setenv('ADAPTIVE_MODEL_MIN_TRADES','40')
+    monkeypatch.setenv('ADAPTIVE_MODEL_MIN_VALIDATION','12')
     rows=[{'signal_payload':{},'net_pnl':1,'closed_at':str(i),'probability':50} for i in range(60)]
     monkeypatch.setattr(am,'_load_rows',lambda limit:rows)
     monkeypatch.setattr(am,'_extract',lambda row:([50.0]*len(am.FEATURES),1))

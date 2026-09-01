@@ -23,6 +23,7 @@ def test_near_signal_watchlist(monkeypatch,tmp_path):
     import near_signal_watchlist as n
     n.DB_PATH = tmp_path/'near.db'
     monkeypatch.setenv('NEAR_SIGNAL_RESCAN_MINUTES','1')
+    monkeypatch.setenv('HEDGE_MIN_EV_PCT','2.0')
     n.upsert_near_candidates([{'symbol':'ABCUSDT','reason':'EV','probability':72,'qualityScore':75,'expectedValuePct':1.9,'score':80}])
     rows=n.get_rows()
     assert rows and rows[0]['symbol']=='ABCUSDT'

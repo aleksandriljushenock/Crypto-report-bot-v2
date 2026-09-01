@@ -1,0 +1,24 @@
+Crypto-report-bot v56.0.0 - Quality & Validation Hardening
+
+Implemented:
+- fixed non-Binance 5m candle end timestamps
+- full chunked 72h provider replay incl. OKX 300-bar limit
+- HTTP retries/backoff and per-provider error diagnostics
+- fingerprint + fallback legacy feature enrichment
+- execution_training_dataset_v56
+- Paper canonical migration; Shadow replay required
+- 4-way purged train/calibration/selection/champion split
+- strict untouched Champion gate
+- weighted ensemble by OOS AUC/Brier; no model-count bonus
+- stricter Expected Return OOS validation
+- joint P(fill)*P(profit|fill) execution utility
+- safer unified Adaptive / Optimizer / multi-venue defaults
+- bidirectional risk-aware threshold optimizer with max-DD/CVaR
+- manual Profit Profile rebuild includes v56 replay
+- adaptive persistence retries
+
+Validation:
+- compileall PASS
+- pytest 259 passed / 0 failed
+- targeted critical-module coverage run: 60% aggregate across hedge/profile/v56 execution/backfill
+  (external Supabase/exchange network paths remain integration-tested only after deploy)

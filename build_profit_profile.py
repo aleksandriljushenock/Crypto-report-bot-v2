@@ -19,8 +19,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-PROFILE_SCHEMA_VERSION = 55
-TARGET_TYPE = "execution_first_v55"
+PROFILE_SCHEMA_VERSION = 56
+TARGET_TYPE = "execution_first_v56"
 BASE_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 DIRECTION_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 GROUPS = BASE_GROUPS + tuple(f"{x}_direction" for x in DIRECTION_GROUPS)
@@ -337,12 +337,12 @@ def _load_paper_supabase(limit: int) -> List[Dict[str, Any]]:
         return []
 
 
-def _load_execution_v55_supabase(limit: int) -> List[Dict[str, Any]]:
+def _load_execution_v56_supabase(limit: int) -> List[Dict[str, Any]]:
     try:
         client = __import__('cloud_client').get_supabase_client()
         out=[]; start=0; page=1000
         while len(out)<limit:
-            chunk=(client.table('execution_training_dataset_v55').select('*').eq('entry_status','filled').order('signal_created_at',desc=False).range(start,min(start+page-1,limit-1)).execute().data or [])
+            chunk=(client.table('execution_training_dataset_v56').select('*').eq('entry_status','filled').order('signal_created_at',desc=False).range(start,min(start+page-1,limit-1)).execute().data or [])
             if not chunk: break
             out.extend(chunk)
             if len(chunk)<page: break
@@ -385,7 +385,7 @@ def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int]=DEFAULT_WIN
     for r in rows: source_counts[str(r.get('target_source') or 'unknown')]+=1
     latest=max((r['_dt'] for r in rows if r.get('_dt')),default=None)
     profile={
-      'schema_version':PROFILE_SCHEMA_VERSION,'version':'profit-profile-v55-'+now.strftime('%Y%m%d%H%M%S'),
+      'schema_version':PROFILE_SCHEMA_VERSION,'version':'profit-profile-v56-'+now.strftime('%Y%m%d%H%M%S'),
       'generated_at':now.isoformat(),'target_type':TARGET_TYPE,'target_horizon':str(os.getenv('LEARNING_TARGET_HORIZON','24h')).lower(),
       'target_source_counts':dict(source_counts),'dataset_hash':_dataset_hash(rows),'latest_observation_at':latest.isoformat() if latest else None,
       'overall':_diagnostics(rows),'groups':_groups(rows),'recent_windows':recent_windows,'recent_overall':recent_overall,
@@ -415,7 +415,7 @@ def _atomic_write_json(path: Path,payload:Dict[str,Any])->None:
 
 def rebuild_from_supabase(output: str|Path|None=None, limit: int|None=None, windows: Iterable[int]=DEFAULT_WINDOWS)->Dict[str,Any]:
     max_rows=int(limit or os.getenv('PROFILE_REBUILD_MAX_ROWS','10000'))
-    obs=_load_supabase(max(100,max_rows)); paper=_load_paper_supabase(max(100,max_rows)); replay=_load_execution_v55_supabase(max(100,max_rows))
+    obs=_load_supabase(max(100,max_rows)); paper=_load_paper_supabase(max(100,max_rows)); replay=_load_execution_v56_supabase(max(100,max_rows))
     profile=build(obs,windows,execution_rows=paper,replay_rows=replay)
     out=Path(output or os.getenv('PROFIT_PROFILE_PATH','data/profit_profile_v2.json')); _atomic_write_json(out,profile)
     try:
@@ -428,7 +428,8 @@ def main()->None:
     p=argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--paper-input'); p.add_argument('--output',default=os.getenv('PROFIT_PROFILE_PATH','data/profit_profile_v2.json'))
     p.add_argument('--limit',type=int,default=int(os.getenv('PROFILE_REBUILD_MAX_ROWS','10000'))); p.add_argument('--windows',default=os.getenv('PROFILE_RECENT_WINDOWS_DAYS','7,14,21,30,60,90,180'))
     args=p.parse_args(); obs=_load_csv(Path(args.input)) if args.input else _load_supabase(max(100,args.limit)); paper=_load_csv(Path(args.paper_input)) if args.paper_input else ([] if args.input else _load_paper_supabase(max(100,args.limit)))
-    windows=[int(x.strip()) for x in args.windows.split(',') if x.strip()]; profile=build(obs,windows,execution_rows=paper); out=Path(args.output); _atomic_write_json(out,profile)
+    replay=[] if args.input else _load_execution_v56_supabase(max(100,args.limit))
+    windows=[int(x.strip()) for x in args.windows.split(',') if x.strip()]; profile=build(obs,windows,execution_rows=paper,replay_rows=replay); out=Path(args.output); _atomic_write_json(out,profile)
     print(f"{out} samples={profile['overall']['samples']} execution={profile['target_source_counts'].get('paper_execution',0)} windows={profile['recent_window_options']}")
 
 if __name__=='__main__': main()

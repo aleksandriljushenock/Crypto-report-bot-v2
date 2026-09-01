@@ -114,7 +114,7 @@ def scanner_config() -> ScannerConfig:
         hedge_pool=hedge_pool,
         min_quote_volume=number("MULTI_EXCHANGE_MIN_QUOTE_VOLUME_USDT", float(MIN_QUOTE_VOLUME_USDT), minimum=0),
         universe_timeout=integer("MULTI_EXCHANGE_UNIVERSE_TIMEOUT", 8, minimum=1, maximum=60),
-        min_venues=integer("MULTI_EXCHANGE_MIN_VENUES", 1, minimum=1, maximum=len(DEFAULT_PROVIDERS)),
+        min_venues=integer("MULTI_EXCHANGE_MIN_VENUES", 2, minimum=1, maximum=len(DEFAULT_PROVIDERS)),
         coverage_bonus=number("MULTI_EXCHANGE_COVERAGE_BONUS", 0.08, minimum=0, maximum=2),
     )
 
@@ -190,10 +190,10 @@ def optimizer_config() -> OptimizerConfig:
     return OptimizerConfig(
         enabled=boolean("AI_OPTIMIZER_ENABLED", True),
         interval_minutes=integer("AI_OPTIMIZER_INTERVAL_MINUTES", 1440, minimum=60),
-        min_trades=integer("AI_OPTIMIZER_MIN_TRADES", 20, minimum=10),
+        min_trades=integer("AI_OPTIMIZER_MIN_TRADES", 150, minimum=10),
         min_retention=number("AI_OPTIMIZER_MIN_RETENTION", 0.70, minimum=0.30, maximum=1.0),
         adaptive_enabled=boolean("ADAPTIVE_MODEL_ENABLED", True),
-        adaptive_min_trades=integer("ADAPTIVE_MODEL_MIN_TRADES", 40, minimum=20),
-        adaptive_min_validation=integer("ADAPTIVE_MODEL_MIN_VALIDATION", 12, minimum=8),
-        adaptive_blend_weight=number("ADAPTIVE_MODEL_BLEND_WEIGHT", 0.20, minimum=0, maximum=0.45),
+        adaptive_min_trades=integer("ADAPTIVE_MODEL_MIN_TRADES", 150, minimum=20),
+        adaptive_min_validation=integer("ADAPTIVE_MODEL_MIN_VALIDATION", 30, minimum=8),
+        adaptive_blend_weight=number("ADAPTIVE_MODEL_BLEND_WEIGHT", 0.10, minimum=0, maximum=0.45),
     )

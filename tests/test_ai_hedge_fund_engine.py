@@ -29,7 +29,7 @@ def test_strong_signal_passes(monkeypatch):
     monkeypatch.setattr(hedge,'_execution_calibration',lambda s:{'available':False,'samples':0})
     r=hedge.evaluate_signal(base())
     assert r['expectedValuePct'] > 0
-    assert r['qualityScore'] >= 70
+    assert r['qualityScore'] >= r['effectiveThresholds']['quality']
     assert r['qualityPassed']
     assert r['reliability']['score'] >= 90
 

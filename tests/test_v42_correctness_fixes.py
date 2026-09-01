@@ -85,6 +85,8 @@ def test_strategy_entry_candle_cannot_resolve_outcome(monkeypatch):
 
 def test_adaptive_candidate_cannot_replace_better_champion(monkeypatch):
     import adaptive_model_manager as am
+    monkeypatch.setenv('ADAPTIVE_MODEL_MIN_TRADES','40')
+    monkeypatch.setenv('ADAPTIVE_MODEL_MIN_VALIDATION','12')
     rows=[{'signal_payload':{},'net_pnl':1,'closed_at':str(i)} for i in range(60)]
     monkeypatch.setattr(am,'_load_rows',lambda limit:rows)
     monkeypatch.setattr(am,'_extract',lambda row:([50.0]*len(am.FEATURES),1))
