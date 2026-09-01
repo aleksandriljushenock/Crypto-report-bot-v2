@@ -89,6 +89,12 @@ class CloudLearningStore:
     def save(self, observation: dict[str, Any]) -> str | None:
         """Idempotently create or merge an observation by fingerprint."""
         payload = self._clean(dict(observation))
+        # V57 schema-safe inserts: old Supabase deployments may keep these JSONB
+        # columns NOT NULL. Missing feeds are represented explicitly as empty objects.
+        payload.setdefault("features", {})
+        payload.setdefault("smart_money_data", {})
+        payload.setdefault("news_data", {})
+        payload.setdefault("metadata", {})
         payload.setdefault("training_status", "pending")
         payload["updated_at"] = self._now()
         fingerprint = self._fingerprint(payload)

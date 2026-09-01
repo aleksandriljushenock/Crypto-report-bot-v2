@@ -285,7 +285,7 @@ def _dataset_health(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     age_hours = (now-newest).total_seconds()/3600 if newest else 1e9
     min_direction = max(0, int(_runtime_env("LEARNING_MIN_DIRECTION_SAMPLES", "40")))
     max_stale = max(1.0, float(_runtime_env("LEARNING_MAX_DATA_AGE_HOURS", "72")))
-    execution_count = sum(1 for s in samples if s.get('target_source') in {'paper_execution','shadow_execution_v56'})
+    execution_count = sum(1 for s in samples if s.get('target_source') in {'paper_execution','shadow_execution_v57'})
     min_execution = max(0, int(_runtime_env("LEARNING_MIN_EXECUTION_SAMPLES_FOR_PROMOTION", "30")))
     reasons=[]
     if age_hours > max_stale: reasons.append("stale_dataset")
@@ -348,15 +348,15 @@ def _cloud_samples() -> List[Dict[str, Any]]:
     return result
 
 
-def _execution_v56_cloud_samples() -> List[Dict[str, Any]]:
-    """Load first-hit shadow execution labels produced by V56 replay."""
-    if os.getenv("EXECUTION_V56_LEARNING_ENABLED", "true").lower() not in {"1","true","yes","on"}:
+def _execution_v57_cloud_samples() -> List[Dict[str, Any]]:
+    """Load first-hit shadow execution labels produced by V57 replay."""
+    if os.getenv("EXECUTION_V57_LEARNING_ENABLED", "true").lower() not in {"1","true","yes","on"}:
         return []
     try:
         from cloud_client import get_supabase_client
-        client=get_supabase_client(); out=[]; offset=0; cap=int(_runtime_env("EXECUTION_V56_LEARNING_MAX_ROWS","10000")); page=1000
+        client=get_supabase_client(); out=[]; offset=0; cap=int(_runtime_env("EXECUTION_V57_LEARNING_MAX_ROWS","10000")); page=1000
         while len(out)<cap:
-            rows=(client.table("execution_training_dataset_v56").select("*").eq("entry_status","filled").order("signal_created_at",desc=False).range(offset,min(offset+page-1,cap-1)).execute().data or [])
+            rows=(client.table("execution_training_dataset_v57").select("*").eq("entry_status","filled").order("signal_created_at",desc=False).range(offset,min(offset+page-1,cap-1)).execute().data or [])
             if not rows: break
             for row in rows:
                 outcome=str(row.get("outcome") or "").upper()
@@ -364,7 +364,9 @@ def _execution_v56_cloud_samples() -> List[Dict[str, Any]]:
                 payload=_json(row.get("feature_payload"),{}) or {}; factors=payload.get("aiFactors") or payload.get("features") or {}
                 if not all(k in factors for k in FEATURES): continue
                 ret=max(-30.0,min(30.0,float(row.get("net_return_pct") or 0)))
-                out.append({"fingerprint":str(row.get("fingerprint") or row.get("shadow_id")),"symbol":row.get("symbol"),"timeframe":payload.get("timeframe") or payload.get("interval") or "multi","direction":_normalize_direction(row.get("direction")),"setup":str(row.get("setup") or payload.get("setup") or "NONE").upper(),"created_at":row.get("signal_created_at"),"old_score":float(payload.get("aiScore") or payload.get("score") or 0),"factors":{k:float(factors.get(k,50)) for k in FEATURES},"returns":{},"return":ret,"win":1.0 if ret>1e-9 else 0.0,"r_multiple":float(row.get("r_multiple") or 0),"target_horizon":"execution","target_source":"shadow_execution_v56","close_reason":outcome})
+                sample_type = str(row.get("sample_type") or "").upper()
+                target_source = "paper_execution" if sample_type.startswith("PAPER_") else "shadow_execution_v57"
+                out.append({"fingerprint":str(row.get("fingerprint") or row.get("shadow_id")),"symbol":row.get("symbol"),"timeframe":payload.get("timeframe") or payload.get("interval") or "multi","direction":_normalize_direction(row.get("direction")),"setup":str(row.get("setup") or payload.get("setup") or "NONE").upper(),"created_at":row.get("signal_created_at"),"old_score":float(payload.get("aiScore") or payload.get("score") or 0),"factors":{k:float(factors.get(k,50)) for k in FEATURES},"returns":{},"return":ret,"win":1.0 if ret>1e-9 else 0.0,"r_multiple":float(row.get("r_multiple") or 0),"target_horizon":"execution","target_source":target_source,"close_reason":outcome})
             if len(rows)<page: break
             offset+=len(rows)
         return out
@@ -442,10 +444,10 @@ def load_samples() -> List[Dict[str, Any]]:
     for fp, item in paper_direct.items():
         grouped.setdefault(fp, item)
     grouped_samples = _dedupe_samples(list(grouped.values()))
-    # V56 replayed shadow executions are independent execution-labelled samples.
+    # V57 replayed shadow executions are independent execution-labelled samples.
     # They are merged by fingerprint and override proxy labels.
-    v55_exec={str(x.get("fingerprint")):x for x in _execution_v56_cloud_samples() if x.get("fingerprint")}
-    for fp,item in v55_exec.items(): grouped[fp]=item
+    v57_exec={str(x.get("fingerprint")):x for x in _execution_v57_cloud_samples() if x.get("fingerprint")}
+    for fp,item in v57_exec.items(): grouped[fp]=item
     grouped_samples = _dedupe_samples(list(grouped.values()))
     execution = _execution_samples()
     result = []
@@ -456,7 +458,7 @@ def load_samples() -> List[Dict[str, Any]]:
         # Train and validate on exactly the same matured horizon. Mixing 1h-only
         # fresh samples with 72h mature samples changes the target definition over time.
         exec_target = execution.get(str(item.get("fingerprint") or ""))
-        if item.get("target_source") == "shadow_execution_v56" and item.get("return") is not None:
+        if item.get("target_source") == "shadow_execution_v57" and item.get("return") is not None:
             pass
         elif exec_target:
             item["return"] = float(exec_target["return"])
@@ -513,7 +515,7 @@ def _sample_weight(sample: Dict[str, Any]) -> float:
     half_life = max(2.0, float(_runtime_env("LEARNING_RECENCY_HALF_LIFE_DAYS", "30")))
     recency = 0.5 ** (_days_old(sample.get("created_at", "")) / half_life)
     cluster = max(1.0, float(sample.get("cluster_size") or 1.0))
-    execution_boost = max(1.0, float(_runtime_env("LEARNING_EXECUTION_SAMPLE_WEIGHT", "4.0"))) if sample.get("target_source") in {"paper_execution","shadow_execution_v56"} else 1.0
+    execution_boost = max(1.0, float(_runtime_env("LEARNING_EXECUTION_SAMPLE_WEIGHT", "4.0"))) if sample.get("target_source") in {"paper_execution","shadow_execution_v57"} else 1.0
     return recency * execution_boost / math.sqrt(cluster)
 
 

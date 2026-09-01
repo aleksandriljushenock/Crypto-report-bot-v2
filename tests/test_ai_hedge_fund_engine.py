@@ -24,13 +24,12 @@ def base():
     }
 
 
-def test_strong_signal_passes(monkeypatch):
+def test_strong_signal_fails_closed_without_execution_champion(monkeypatch):
     monkeypatch.setattr(hedge,'_CACHE',_healthy_profile())
     monkeypatch.setattr(hedge,'_execution_calibration',lambda s:{'available':False,'samples':0})
     r=hedge.evaluate_signal(base())
     assert r['expectedValuePct'] > 0
-    assert r['qualityScore'] >= r['effectiveThresholds']['quality']
-    assert r['qualityPassed']
+    assert not r['qualityPassed']
     assert r['reliability']['score'] >= 90
 
 

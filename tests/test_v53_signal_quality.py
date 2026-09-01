@@ -23,7 +23,7 @@ def test_execution_target_overrides_mark_to_market():
          'features':{'fingerprint':'fp1','setup':'PULLBACK','direction':'LONG_BIAS','aiFactors':factors,'timeframes':{'4h':'UP'}},
          'real_result':{'returns':{'24h':10},'success':True}}
     paper={'fingerprint':'fp1','symbol':'AAAUSDT','side':'LONG','status':'closed','entry_price':100,'exit_price':98,'stop_price':98,'net_pnl':-2,'notional_usd':100,
-           'opened_at':'2026-08-01T00:10:00+00:00','closed_at':'2026-08-01T01:00:00+00:00','execution_verified':True,
+           'opened_at':'2026-08-01T00:10:00+00:00','closed_at':'2026-08-01T01:00:00+00:00','execution_verified':True,'fill_price_source':'market_cross',
            'signal_payload':{'fingerprint':'fp1','setup':'PULLBACK','direction':'LONG_BIAS','aiFactors':factors,'timeframes':{'4h':'UP'}}}
     p=build([obs],[21],execution_rows=[paper])
     assert p['target_source_counts']['paper_execution']==1

@@ -156,8 +156,8 @@ def _train_candidate_unlocked(trigger: str = "scheduled") -> Dict[str, Any]:
             return {"status": "disabled-control-error", "trigger": trigger}
     emit("MODEL_TRAIN_STARTED", trigger=trigger)
     rows = _load_rows(_int("ADAPTIVE_MODEL_MAX_TRADES", 1500))
-    min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 150)
-    min_validation = _int("ADAPTIVE_MODEL_MIN_VALIDATION", 30)
+    min_samples = _int("ADAPTIVE_MODEL_MIN_TRADES", 200)
+    min_validation = _int("ADAPTIVE_MODEL_MIN_VALIDATION", 60)
     if len(rows) < min_samples:
         return {"status": "insufficient_data", "samples": len(rows), "required": min_samples}
     split = max(min_samples - min_validation, int(len(rows) * 0.72))

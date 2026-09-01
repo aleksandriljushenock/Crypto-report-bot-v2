@@ -20,7 +20,7 @@ from ai_optimizer import run_optimizer
 from adaptive_model_manager import train_candidate
 from strategies.scheduler import run_scheduled_cycle as run_strategy_lab_scheduled_cycle
 from build_profit_profile import rebuild_from_supabase
-from execution_model_v56 import train as train_execution_model_v56
+from execution_model_v57 import train as train_execution_model_v57
 
 
 from core.scheduler import PeriodicWorker
@@ -176,17 +176,17 @@ class AutomationSupervisor:
             PeriodicWorker(
                 'profit-profile-rebuild', profile_rebuild_minutes * 60,
                 self._guarded('profit-profile-rebuild', self._run_profit_profile_rebuild), self.logger,
-                enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=30,
+                enabled=self._bool_env('PROFIT_PROFILE_REBUILD_ENABLED', True), first_delay=600,
             ),
             PeriodicWorker(
-                'execution-v56-model-trainer', execution_model_minutes * 60,
-                self._guarded('execution-v56-model-trainer', self._run_execution_model_v56), self.logger,
-                enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=720,
+                'execution-v57-model-trainer', execution_model_minutes * 60,
+                self._guarded('execution-v57-model-trainer', self._run_execution_model_v57), self.logger,
+                enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=900,
             ),
             PeriodicWorker(
-                'execution-v56-backfill', execution_backfill_minutes * 60,
-                self._guarded('execution-v56-backfill', self._run_execution_backfill_v56), self.logger,
-                enabled=self._bool_env('EXECUTION_BACKFILL_ENABLED', False), first_delay=900,
+                'execution-v57-backfill', execution_backfill_minutes * 60,
+                self._guarded('execution-v57-backfill', self._run_execution_backfill_v57), self.logger,
+                enabled=self._bool_env('EXECUTION_BACKFILL_ENABLED', True), first_delay=90,
             ),
         ]
 
@@ -355,23 +355,23 @@ class AutomationSupervisor:
         )
         return result
 
-    def _run_execution_model_v56(self):
+    def _run_execution_model_v57(self):
         try:
-            result=train_execution_model_v56(trigger='scheduled')
-            self.logger(f"Execution ML v56: status={result.get('status')} rows={result.get('rows')} best_auc={result.get('best_auc')}")
+            result=train_execution_model_v57(trigger='scheduled')
+            self.logger(f"Execution ML v57: status={result.get('status')} rows={result.get('rows')} best_auc={result.get('best_auc')}")
             return result
         except Exception as exc:
-            self.logger(f"Execution ML v56 error: {type(exc).__name__}: {exc}")
+            self.logger(f"Execution ML v57 error: {type(exc).__name__}: {exc}")
             return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
 
-    def _run_execution_backfill_v56(self):
+    def _run_execution_backfill_v57(self):
         try:
-            from backfill_execution_dataset_v56 import backfill
+            from backfill_execution_dataset_v57 import backfill
             result=backfill(limit=integer('EXECUTION_BACKFILL_BATCH_ROWS',500,minimum=1,maximum=10000),dry_run=False)
-            self.logger(f"Execution backfill v56: shadow={result.get('shadow_written')} paper={result.get('paper_written')} unresolved={result.get('unresolved')} ambiguous={result.get('ambiguous')} errors={result.get('errors')}")
+            self.logger(f"Execution backfill v57: shadow={result.get('shadow_written')} paper={result.get('paper_written')} unresolved={result.get('unresolved')} ambiguous={result.get('ambiguous')} errors={result.get('errors')}")
             return result
         except Exception as exc:
-            self.logger(f"Execution backfill v56 error: {type(exc).__name__}: {exc}")
+            self.logger(f"Execution backfill v57 error: {type(exc).__name__}: {exc}")
             return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
 
     def _run_optimizer_models(self):
@@ -410,8 +410,8 @@ def build_automation_status(supervisor):
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
         'profit-profile-rebuild': 'Profit Profile Rebuild',
-        'execution-v56-model-trainer': 'Execution ML v56',
-        'execution-v56-backfill': 'Execution Backfill v56',
+        'execution-v57-model-trainer': 'Execution ML v57',
+        'execution-v57-backfill': 'Execution Backfill v57',
     }
     for name, runtime in status['runtime'].items():
         saved = status['stored'].get(name, {})

@@ -16,7 +16,7 @@ def _load() -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     # is large enough to support a stable chronological validation.
     try:
         from repositories.paper_repository import PaperRepository
-        minimum = max(1, int(float(os.getenv("ADAPTIVE_MODEL_RUNTIME_MIN_TRADES", "150"))))
+        minimum = max(1, int(float(os.getenv("ADAPTIVE_MODEL_RUNTIME_MIN_TRADES", "200"))))
         if len(PaperRepository().valid_closed_positions(minimum, ascending=False)) < minimum:
             return None, None
     except Exception:

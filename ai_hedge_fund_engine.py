@@ -33,7 +33,7 @@ def invalidate_profile_cache():
     global _CACHE; _CACHE=None
 
 def _fallback_profile(reason='missing'):
-    return {'schema_version':55,'version':'v55-safe-fallback','target_type':'execution_first_v55','valid':False,'validation_reasons':[reason],
+    return {'schema_version':57,'version':'v57-safe-fallback','target_type':'execution_only_profitability_v57','valid':False,'validation_reasons':[reason],
             'overall':{'win_rate':50.0,'robust_avg_return':0.0,'robust_profit_factor':1.0},'groups':{},'recent_windows':{},'recent_overall':{},'rule_diagnostics':[]}
 
 def _profile():
@@ -49,7 +49,9 @@ def _profile():
             _CACHE=_fallback_profile(type(exc).__name__)
     return _CACHE
 
-def _group_stat(group,key): return ((_profile().get('groups') or {}).get(group) or {}).get(str(key)) or {}
+def _group_stat(group,key):
+    p=_profile(); groups=(p.get('execution_groups') or {}) if p.get('execution_groups') else (p.get('groups') or {})
+    return (groups.get(group) or {}).get(str(key)) or {}
 
 def _execution_calibration(signal:Dict[str,Any])->Dict[str,Any]:
     global _EXECUTION_CACHE
@@ -117,19 +119,16 @@ def _edge_from_stat(st:Dict[str,Any])->float:
 def _profile_health():
     p=_profile()
     if not p.get('valid'):return {'status':'INVALID','degraded':True,'severe':True,'reasons':p.get('validation_reasons') or ['invalid_profile']}
-    req=max(1,_env_int('PROFILE_RECENT_WINDOW_DAYS',21)); ro=p.get('recent_overall') or {}; keys=[]
+    req=max(1,_env_int('PROFILE_RECENT_WINDOW_DAYS',21)); ro=p.get('recent_execution_overall') or p.get('recent_overall') or {}; keys=[]
     for k in ro:
         try:keys.append(int(k))
         except Exception:pass
     if not keys:return {'status':'NO_RECENT_DIAGNOSTICS','degraded':True,'severe':False,'reasons':['no_recent_diagnostics']}
     chosen=min(keys,key=lambda x:abs(x-req)); st=ro.get(str(chosen)) or ro.get(chosen) or {}; reasons=[]
-    n=int(st.get('samples') or 0); ex_n=int(st.get('execution_samples') or 0); ex_min=max(20,_env_int('PROFILE_MIN_EXECUTION_HEALTH_SAMPLES',30))
-    auc=st.get('execution_probability_auc') if ex_n>=ex_min and st.get('execution_probability_auc') is not None else st.get('probability_auc')
-    brier=st.get('execution_probability_brier') if ex_n>=ex_min and st.get('execution_probability_brier') is not None else st.get('probability_brier')
-    if ex_n>=ex_min and st.get('execution_robust_avg_return') is not None:
-        pf=float(st.get('execution_robust_profit_factor') or 1); ret=float(st.get('execution_robust_avg_return') or 0)
-    else:
-        pf=float(st.get('robust_profit_factor',st.get('profit_factor',1)) or 1); ret=float(st.get('robust_avg_return',st.get('avg_return',0)) or 0)
+    n=int(st.get('samples') or 0); ex_n=int(st.get('execution_samples') or n); ex_min=max(20,_env_int('PROFILE_MIN_EXECUTION_HEALTH_SAMPLES',30))
+    auc=st.get('execution_probability_auc') if st.get('execution_probability_auc') is not None else st.get('probability_auc')
+    brier=st.get('execution_probability_brier') if st.get('execution_probability_brier') is not None else st.get('probability_brier')
+    pf=float(st.get('execution_robust_profit_factor') if st.get('execution_robust_profit_factor') is not None else st.get('robust_profit_factor',st.get('profit_factor',0)) or 0); ret=float(st.get('execution_robust_avg_return') if st.get('execution_robust_avg_return') is not None else st.get('robust_avg_return',st.get('avg_return',0)) or 0)
     if auc is not None and float(auc)<_env_float('PROFILE_MIN_RECENT_AUC',0.48):reasons.append('probability_auc_below_floor')
     if brier is not None and float(brier)>_env_float('PROFILE_MAX_RECENT_BRIER',0.30):reasons.append('probability_brier_too_high')
     if n>=max(30,_env_int('PROFILE_MIN_RECENT_SAMPLES',30)) and pf<0.90 and ret<0:reasons.append('negative_recent_expectancy')
@@ -137,7 +136,7 @@ def _profile_health():
     # remain live merely because a tiny-sample AUC happens to be above 0.5.
     severe=False
     if ex_n>=ex_min:
-        ex_wr=float(st.get('execution_win_rate')) if st.get('execution_win_rate') is not None else None
+        ex_wr=float(st.get('execution_win_rate')) if st.get('execution_win_rate') is not None else (float(st.get('win_rate')) if st.get('win_rate') is not None else None)
         if pf < _env_float('PROFILE_SEVERE_EXECUTION_PF',0.70): reasons.append('execution_profit_factor_critical')
         if ret < _env_float('PROFILE_SEVERE_EXECUTION_RETURN',0.0): reasons.append('execution_expectancy_negative')
         if brier is not None and float(brier)>_env_float('PROFILE_SEVERE_EXECUTION_BRIER',0.35): reasons.append('execution_brier_critical')
@@ -228,14 +227,27 @@ def _position_size(quality,positive_hits,passed):
     strong=max(base,_env_float('POSITION_SIZE_STRONG_USD',4.0)); mx=max(strong,_env_float('POSITION_SIZE_MAX_USD',5.0))
     return mx if quality>=86 and len(positive_hits)>=2 else (strong if quality>=78 else base)
 
+def _direction_guard(signal):
+    direction=str(signal.get('direction') or '').upper().replace('_BIAS','')
+    st=_group_stat('direction',direction)
+    n=int(st.get('samples') or 0)
+    minimum=max(20,_env_int('DIRECTION_MIN_EXECUTION_SAMPLES',60))
+    if n < minimum:
+        return {'blocked':True,'direction':direction,'samples':n,'reason':'insufficient_direction_execution'}
+    pf=float(st.get('robust_profit_factor') or 0); ret=float(st.get('robust_avg_return') or 0)
+    blocked=pf<_env_float('DIRECTION_MIN_EXECUTION_PF',1.0) or ret<=_env_float('DIRECTION_MIN_ROBUST_RETURN_PCT',0.0)
+    return {'blocked':blocked,'direction':direction,'samples':n,'profit_factor':round(pf,4),'robust_return_pct':round(ret,4),'reason':'negative_direction_execution' if blocked else 'ok'}
+
 def _setup_guard(signal):
     setup=str(signal.get('setup') or '').upper()
     d=str(signal.get('direction') or '').upper().replace('_BIAS',''); key=f'{setup}|{d}'
-    st=_group_stat('setup_direction',key) or _group_stat('setup',setup); n=int(st.get('samples') or 0); ex_n=int(st.get('execution_samples') or 0)
+    st=_group_stat('setup_direction',key) or _group_stat('setup',setup); n=int(st.get('samples') or 0); ex_n=int(st.get('execution_samples') or n)
     min_total=max(30,_env_int('SETUP_GUARD_MIN_PROFILE_SAMPLES',50)); min_ex=max(12,_env_int('SETUP_GUARD_MIN_EXECUTION_SAMPLES',20))
+    if setup=='BREAKOUT' and n<max(min_total,_env_int('BREAKOUT_MIN_EXECUTION_SAMPLES',60)):
+        return {'blocked':True,'samples':n,'execution_samples':ex_n,'reason':'breakout_insufficient_execution'}
     if n<min_total:return {'blocked':False,'samples':n,'execution_samples':ex_n,'reason':'insufficient_profile'}
-    if ex_n>=min_ex and st.get('execution_robust_avg_return') is not None:
-        ret=float(st.get('execution_robust_avg_return') or 0); pf=float(st.get('execution_robust_profit_factor') or 0)
+    if ex_n>=min_ex:
+        ret=float(st.get('execution_robust_avg_return') if st.get('execution_robust_avg_return') is not None else st.get('robust_avg_return') or 0); pf=float(st.get('execution_robust_profit_factor') if st.get('execution_robust_profit_factor') is not None else st.get('robust_profit_factor') or 0)
         blocked=_env_bool('SETUP_SHADOW_WHEN_UNPROFITABLE',True) and (ret<0 or pf<_env_float('SETUP_MIN_EXECUTION_PF',0.90))
         return {'blocked':blocked,'samples':n,'execution_samples':ex_n,'edge':round(_edge_from_stat(st),4),'stats':st,'reason':'negative_execution_specialist' if blocked else 'ok'}
     edge=_edge_from_stat(st); blocked=(setup=='BREAKOUT' and _env_bool('BREAKOUT_SHADOW_WHEN_UNPROFITABLE',True) and edge<0)
@@ -246,10 +258,10 @@ def _breakout_guard(signal):
     return _setup_guard(signal) if str(signal.get('setup') or '').upper()=='BREAKOUT' else {'blocked':False}
 
 def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
-    p=_profile(); profile_valid=bool(p.get('valid')); overall=p.get('overall') or {}; prior=float(overall.get('win_rate',50.0)) if profile_valid else 50.0
+    p=_profile(); profile_valid=bool(p.get('valid')); overall=p.get('overall') or {}; execution_overall=p.get('execution_overall') or ({'samples':overall.get('execution_samples',0),'win_rate':overall.get('execution_win_rate'),'robust_avg_return':overall.get('execution_robust_avg_return'),'robust_profit_factor':overall.get('execution_robust_profit_factor')} if overall.get('execution_samples') else {}); prior=float((p.get('research_overall') or overall).get('win_rate',50.0)) if profile_valid else 50.0
     # Execution evidence must shrink toward an execution prior, never toward the
     # mark-to-market population prior. This fixes the V53 +14pp overconfidence bug.
-    execution_prior=float(overall.get('execution_win_rate')) if profile_valid and overall.get('execution_win_rate') is not None else prior
+    execution_prior=float(execution_overall.get('win_rate')) if profile_valid and execution_overall.get('samples') else 50.0
     live_prob=float(signal.get('probability') or signal.get('aiProbability') or 50.0); direction=str(signal.get('direction') or '').upper().replace('_BIAS',''); setup=str(signal.get('setup') or 'NONE').upper(); t=signal.get('timeframes') or {}
     # Direction/setup specialists first. Generic contexts are intentionally excluded when their
     # specialist equivalent is available to avoid double-counting the same evidence.
@@ -260,11 +272,8 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         for group,key in contexts:
             st=_group_stat(group,key); n=int(st.get('samples') or 0); required=max(50,_env_int('PROFILE_SYMBOL_MIN_SAMPLES',50)) if group.startswith('symbol') else max(20,_env_int('PROFILE_DIRECTION_GROUP_MIN_SAMPLES',30))
             if n<required:continue
-            ex_n=int(st.get('execution_samples') or 0); observed_rate=float(st.get('win_rate') or prior); strength=70 if group.startswith('symbol') else 45
-            if ex_n>=max(12,_env_int('PROFILE_MIN_EXECUTION_CONTEXT_SAMPLES',20)) and st.get('execution_win_rate') is not None:
-                observed_rate=float(st.get('execution_win_rate')); strength=max(12,strength//3); rate=_bayes_rate(execution_prior,observed_rate,ex_n,strength)
-            else:
-                rate=_bayes_rate(prior,observed_rate,n,strength)
+            ex_n=int(st.get('samples') or 0); observed_rate=float(st.get('win_rate') or execution_prior); strength=20 if group.startswith('symbol') else 12
+            rate=_bayes_rate(execution_prior,observed_rate,ex_n,strength)
             rate,recent=_blend_recent_rate(rate,group,key); weight=min(1.0,math.log1p(n)/6.0)
             hist.append((rate,weight)); edge=_edge_from_stat(st); edge_terms.append((edge,weight)); item={'context':f'{group}:{key}','samples':n,'win_rate':st.get('win_rate'),'robust_avg_return':st.get('robust_avg_return',st.get('avg_return')),'robust_profit_factor':st.get('robust_profit_factor',st.get('profit_factor')),'edge':round(edge,4)}
             if recent:item['recent']=recent
@@ -280,11 +289,11 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         n=int(execution.get('samples') or 0); maxw=max(0,min(0.55,_env_float('EXECUTION_CALIBRATION_MAX_WEIGHT',0.30))); w=min(maxw,n/(n+120.0)); calibrated=(1-w)*calibrated+w*float(execution.get('probability') or calibrated)
     execution_ml={'available':False}
     try:
-        from execution_model_v56 import predict as execution_ml_predict
+        from execution_model_v57 import predict as execution_ml_predict
         execution_ml=execution_ml_predict(signal)
         if execution_ml.get('available'):
             mlp=_clamp(execution_ml.get('profitProbability'),2,92); mean_auc=float(execution_ml.get('meanAuc') or 0.5)
-            # V56: trust grows only from untouched OOS quality, never from model count.
+            # V57: trust grows only from untouched OOS quality, never from model count.
             max_blend=max(0.0,min(0.50,_env_float('EXECUTION_ML_MAX_BLEND_WEIGHT',0.35)))
             if mean_auc < 0.56: mlw=0.0
             elif mean_auc < 0.58: mlw=min(max_blend,0.10)
@@ -307,7 +316,7 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     uncertainty_score=_clamp(100-uncertainty)
     historical_utility=_clamp(50+hist_edge*35)
     # V56 joint execution utility: a profitable idea that is unlikely to fill is not a high-quality executable signal.
-    fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else _env_float('EXECUTION_EMPIRICAL_FILL_FALLBACK',70.0)
+    fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else 0.0
     executable_probability=calibrated*(fill_score/100.0)
     quality=_clamp(0.45*executable_probability+0.15*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.15*historical_utility+0.10*float(reliability['score'])+0.10*uncertainty_score+0.05*fill_score)
     adaptive={'available':False}
@@ -315,8 +324,8 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
         from adaptive_model_runtime import predict as adaptive_predict
         adaptive=adaptive_predict(signal,quality,calibrated,ev)
         if adaptive.get('available'):
-            aw=max(0,min(0.25,_env_float('ADAPTIVE_MODEL_BLEND_WEIGHT',0.10))); ap=_clamp(adaptive.get('probability'),2,92); calibrated=(1-aw)*calibrated+aw*ap; pwin=calibrated/100.0; ev=pwin*win_pct-(1-pwin)*loss_pct
-            fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else 70.0
+            aw=max(0,min(_env_float('ADAPTIVE_MODEL_MAX_RUNTIME_WEIGHT',0.05),_env_float('ADAPTIVE_MODEL_BLEND_WEIGHT',0.05))); ap=_clamp(adaptive.get('probability'),2,92); calibrated=(1-aw)*calibrated+aw*ap; pwin=calibrated/100.0; ev=pwin*win_pct-(1-pwin)*loss_pct
+            fill_score=_clamp(execution_ml.get('fillProbability'),0,100) if execution_ml.get('available') else 0.0
             executable_probability=calibrated*(fill_score/100.0); quality=_clamp(0.45*executable_probability+0.15*_clamp(float(signal.get('aiScore') or signal.get('score') or 0))+0.15*historical_utility+0.10*float(reliability['score'])+0.10*uncertainty_score+0.05*fill_score)
     except Exception:adaptive={'available':False}
     # Approximate interval around calibrated probability; broad when evidence/reliability is weak.
@@ -324,19 +333,27 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
     if execution.get('available'):n_eff+=min(300,int(execution.get('samples') or 0))
     n_eff=max(12.0,n_eff*max(0.35,rel)); se=math.sqrt(max(1e-6,pwin*(1-pwin))/n_eff); margin=min(25.0,1.96*se*100.0+uncertainty*0.08)
     interval=[round(_clamp(calibrated-margin),2),round(_clamp(calibrated+margin),2)]
-    setup_guard=_setup_guard(signal); breakout=_breakout_guard(signal); hard=[h for h in hits if h.get('hard_block')]
+    direction_guard=_direction_guard(signal); setup_guard=_setup_guard(signal); breakout=_breakout_guard(signal); hard=[h for h in hits if h.get('hard_block')]
     min_quality=_env_float('HEDGE_MIN_QUALITY',62); min_ev=_env_float('HEDGE_MIN_EV_PCT',0.5); min_rel=_env_float('HEDGE_MIN_RELIABILITY',70); min_prob=_env_float('TRADE_MIN_PROBABILITY',60); min_rr=_env_float('TRADE_MIN_RR',2.0); min_fill=_env_float('EXECUTION_ML_MIN_FILL_PROBABILITY',50); min_joint=_env_float('EXECUTION_MIN_JOINT_PROBABILITY',35)
     if health.get('degraded'):
         min_quality+=_env_float('DEGRADED_QUALITY_BONUS',5); min_prob+=_env_float('DEGRADED_PROBABILITY_BONUS',3); min_ev+=_env_float('DEGRADED_EV_BONUS',0.5)
-    ml_fill_ok=(not execution_ml.get('available')) or float(execution_ml.get('fillProbability') or 0)>=min_fill
-    ml_return_ok=(not execution_ml.get('available')) or execution_ml.get('expectedReturnPct') is None or float(execution_ml.get('expectedReturnPct'))-float(execution_ml.get('uncertainty') or 0)*_env_float('EXECUTION_RETURN_UNCERTAINTY_PENALTY',0.01)>=_env_float('EXECUTION_ML_MIN_EXPECTED_RETURN_PCT',0.10)
-    joint_ok=(not execution_ml.get('available')) or executable_probability>=min_joint
-    passed=(not hard) and (not setup_guard.get('blocked')) and ml_fill_ok and ml_return_ok and joint_ok and quality>=min_quality and ev>=min_ev and reliability['score']>=min_rel and calibrated>=min_prob and rr>=min_rr
+    ml_required=_env_bool('PROFITABILITY_REQUIRE_EXECUTION_CHAMPION',True)
+    ml_available=bool(execution_ml.get('available'))
+    ml_fill_ok=ml_available and float(execution_ml.get('fillProbability') or 0)>=min_fill
+    ml_return_ok=ml_available and execution_ml.get('expectedReturnPct') is not None and float(execution_ml.get('expectedReturnPct'))-float(execution_ml.get('uncertainty') or 0)*_env_float('EXECUTION_RETURN_UNCERTAINTY_PENALTY',0.01)>=_env_float('EXECUTION_ML_MIN_EXPECTED_RETURN_PCT',0.10)
+    joint_ok=ml_available and executable_probability>=min_joint
+    ex_samples=int(execution_overall.get('samples') or 0); ex_pf=float(execution_overall.get('robust_profit_factor') or 0); ex_ret=float(execution_overall.get('robust_avg_return') or 0)
+    paper_overall=p.get('paper_execution_overall') or {}
+    paper_samples=int(paper_overall.get('samples') or 0); paper_pf=float(paper_overall.get('robust_profit_factor') or 0); paper_ret=float(paper_overall.get('robust_avg_return') or 0)
+    profitability_ok=(ex_samples>=_env_int('PROFITABILITY_MIN_EXECUTIONS',120) and ex_pf>=_env_float('PROFITABILITY_MIN_PF',1.15) and ex_ret>_env_float('PROFITABILITY_MIN_ROBUST_RETURN_PCT',0.0))
+    paper_profitability_ok=(paper_samples>=_env_int('PROFITABILITY_MIN_PAPER_EXECUTIONS',80) and paper_pf>=_env_float('PROFITABILITY_MIN_PAPER_PF',1.05) and paper_ret>_env_float('PROFITABILITY_MIN_PAPER_ROBUST_RETURN_PCT',0.0))
+    execution_gate_ok=(not ml_required or ml_available) and profitability_ok and paper_profitability_ok
+    passed=(not hard) and (not direction_guard.get('blocked')) and (not setup_guard.get('blocked')) and execution_gate_ok and ml_fill_ok and ml_return_ok and joint_ok and quality>=min_quality and ev>=min_ev and reliability['score']>=min_rel and calibrated>=min_prob and rr>=min_rr
     if health.get('severe') and _env_bool('PROFILE_SEVERE_DEGRADATION_SHADOW_ONLY',True):
         # V55 recovery protocol: remain fail-closed by default, but a validated execution
         # champion may admit a deterministic tiny Paper canary to prove recovery live.
         canary=False
-        if _env_bool('EXECUTION_CANARY_RECOVERY_ENABLED',True) and execution_ml.get('available'):
+        if _env_bool('EXECUTION_CANARY_RECOVERY_ENABLED',False) and execution_ml.get('available') and profitability_ok:
             auc=float(execution_ml.get('meanAuc') or 0); exret=execution_ml.get('expectedReturnPct'); fill=float(execution_ml.get('fillProbability') or 0)
             if auc>=_env_float('EXECUTION_CANARY_MIN_AUC',0.58) and (exret is None or float(exret)>=_env_float('EXECUTION_CANARY_MIN_RETURN_PCT',0.10)) and fill>=_env_float('EXECUTION_CANARY_MIN_FILL',55):
                 import hashlib
@@ -351,5 +368,5 @@ def evaluate_signal(signal:Dict[str,Any])->Dict[str,Any]:
       'qualityAdjustment':round(adjustment,2),'qualityRules':hits,'historicalEvidence':evidence[:6],'antiProfileHits':[h['name'] for h in hits if h['adjustment']<0],
       'positiveProfileHits':positive,'suggestedPositionSizeUsd':round(_position_size(quality,positive,passed),2),'recencyEnabled':_env_bool('PROFILE_RECENCY_ENABLED',True),
       'adaptiveModelAvailable':bool(adaptive.get('available')),'adaptiveModelVersion':adaptive.get('version'),'adaptiveModelProbability':adaptive.get('probability'),
-      'executionCalibration':execution,'executionModelV55':execution_ml,'reliability':reliability,'profileHealth':health,'setupGuard':setup_guard,'breakoutGuard':breakout,
+      'executionCalibration':execution,'executionModelV57':execution_ml,'executionModelV55':execution_ml,'directionGuard':direction_guard,'profitabilityGate':{'passed':bool(profitability_ok and paper_profitability_ok),'executionPassed':profitability_ok,'paperPassed':paper_profitability_ok,'executionSamples':ex_samples,'executionPF':round(ex_pf,4),'executionRobustReturnPct':round(ex_ret,4),'paperExecutionSamples':paper_samples,'paperExecutionPF':round(paper_pf,4),'paperExecutionRobustReturnPct':round(paper_ret,4),'requiresChampion':ml_required},'reliability':reliability,'profileHealth':health,'setupGuard':setup_guard,'breakoutGuard':breakout,
       'effectiveThresholds':{'quality':round(min_quality,2),'probability':round(min_prob,2),'ev':round(min_ev,3),'rr':round(min_rr,2),'reliability':round(min_rel,2),'fill_probability':round(min_fill,2),'joint_probability':round(min_joint,2)}}

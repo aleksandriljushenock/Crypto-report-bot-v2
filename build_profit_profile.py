@@ -19,9 +19,9 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-PROFILE_SCHEMA_VERSION = 56
-TARGET_TYPE = "execution_first_v56"
-BASE_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
+PROFILE_SCHEMA_VERSION = 57
+TARGET_TYPE = "execution_only_profitability_v57"
+BASE_GROUPS = ('direction','setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 DIRECTION_GROUPS = ('setup','regime','structure1h','structure15m','tf1d','tf4h','tf1h','tf15m','tf5m','symbol')
 GROUPS = BASE_GROUPS + tuple(f"{x}_direction" for x in DIRECTION_GROUPS)
 FACTORS = ('trend','momentum','volume','funding','open_interest','alignment','risk_reward','capital_flow','smart_money','news','narrative')
@@ -117,6 +117,8 @@ def _normalize_execution(source: Dict[str, Any]) -> Dict[str, Any] | None:
     status = str(source.get('status') or 'closed').lower()
     if status not in {'closed','filled_closed','completed'} and source.get('closed_at') in {None,''}: return None
     if str(source.get('execution_verified', 'true')).lower() in {'false','0','no'}: return None
+    fill_source=str(source.get('fill_price_source') or '').strip().lower()
+    if not fill_source or fill_source in {'legacy_migrated_v38','phantom_midpoint','synthetic','unknown'}: return None
     entry = _num(source.get('entry_price'))
     exit_price = _num(source.get('exit_price'))
     side = _direction(source.get('side') or payload.get('direction'))
@@ -124,16 +126,18 @@ def _normalize_execution(source: Dict[str, Any]) -> Dict[str, Any] | None:
     if entry <= 0 or exit_price <= 0: return None
     directional_price_return = (exit_price-entry)/entry*100.0
     if side == 'SHORT': directional_price_return *= -1.0
+    notional=_num(source.get('notional_usd'))
+    net_return_pct=(pnl/notional*100.0) if notional>1e-9 else directional_price_return
     stop = _num(source.get('stop_price') or payload.get('stop'))
     risk_pct = abs(entry-stop)/entry*100.0 if stop > 0 else 0.0
-    # Execution return is net-PnL aware for the label; price return is used for robust
-    # cross-trade magnitude so leverage does not dominate profile statistics.
-    r_multiple = directional_price_return/risk_pct if risk_pct > 1e-9 else 0.0
+    # V57 profitability truth: return/R are based on NET PnL after fees/slippage.
+    # Directional price return is only a fallback for old rows without notional.
+    r_multiple = net_return_pct/risk_pct if risk_pct > 1e-9 else 0.0
     created = source.get('opened_at') or payload.get('signal_created_at') or source.get('created_at') or source.get('closed_at')
     item = {
         'fingerprint': str(source.get('fingerprint') or payload.get('fingerprint') or ''),
         'created_at': created, '_dt': _dt(created), 'symbol': source.get('symbol') or payload.get('symbol') or 'UNKNOWN',
-        'direction': side, 'return': directional_price_return, 'win': 1 if pnl > 1e-9 else 0,
+        'direction': side, 'return': net_return_pct, 'win': 1 if pnl > 1e-9 else 0,
         'target_source': 'paper_execution', 'net_pnl': pnl, 'r_multiple': r_multiple,
         'close_reason': str(source.get('close_reason') or ''),
         'setup': str(payload.get('setup','NONE')).upper(),
@@ -215,10 +219,18 @@ def _merge_rows(observations: Iterable[Dict[str, Any]], executions: Iterable[Dic
 
 
 def _winsorized(values: List[float], q: float = 0.05) -> List[float]:
-    if len(values) < 20: return [max(-25.0,min(25.0,x)) for x in values]
-    xs=sorted(values); lo=xs[int((len(xs)-1)*q)]; hi=xs[int((len(xs)-1)*(1-q))]
-    lo=max(-25.0,lo); hi=min(25.0,hi)
-    return [max(lo,min(hi,x)) for x in values]
+    """Sign-preserving winsorization.
+
+    V56 used global quantiles; when winners were rarer than 5%, the 95th percentile
+    could be negative and every positive return was clipped away. V57 winsorizes
+    positive and negative tails independently and always preserves the sign.
+    """
+    clipped=[max(-25.0,min(25.0,float(x))) for x in values]
+    if len(clipped) < 20: return clipped
+    pos=sorted(x for x in clipped if x>0); neg=sorted(x for x in clipped if x<0)
+    pos_hi=pos[int((len(pos)-1)*(1-q))] if len(pos)>=5 else 25.0
+    neg_lo=neg[int((len(neg)-1)*q)] if len(neg)>=5 else -25.0
+    return [min(x,pos_hi) if x>0 else max(x,neg_lo) if x<0 else 0.0 for x in clipped]
 
 
 def _stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -337,12 +349,12 @@ def _load_paper_supabase(limit: int) -> List[Dict[str, Any]]:
         return []
 
 
-def _load_execution_v56_supabase(limit: int) -> List[Dict[str, Any]]:
+def _load_execution_v57_supabase(limit: int) -> List[Dict[str, Any]]:
     try:
         client = __import__('cloud_client').get_supabase_client()
         out=[]; start=0; page=1000
         while len(out)<limit:
-            chunk=(client.table('execution_training_dataset_v56').select('*').eq('entry_status','filled').order('signal_created_at',desc=False).range(start,min(start+page-1,limit-1)).execute().data or [])
+            chunk=(client.table('execution_training_dataset_v57').select('*').eq('entry_status','filled').order('signal_created_at',desc=False).range(start,min(start+page-1,limit-1)).execute().data or [])
             if not chunk: break
             out.extend(chunk)
             if len(chunk)<page: break
@@ -375,22 +387,40 @@ def build(rows_raw: Iterable[Dict[str, Any]], windows: Iterable[int]=DEFAULT_WIN
         rows=sorted(upgraded,key=lambda r:r.get('_dt') or datetime.min.replace(tzinfo=timezone.utc))
     if not rows: raise RuntimeError('no usable resolved observations found')
     now=datetime.now(timezone.utc); windows=sorted({max(1,int(x)) for x in windows})
-    recent_windows={}; recent_overall={}; recent_rules={}
+    recent_windows={}; recent_overall={}; recent_rules={}; recent_execution_overall={}; recent_execution_windows={}; recent_research_overall={}
     for days in windows:
         cutoff=now-timedelta(days=days); recent=[r for r in rows if r.get('_dt') and r['_dt']>=cutoff]
+        recent_exec=[r for r in recent if str(r.get('target_source') or '').endswith('_execution')]
+        recent_research=[r for r in recent if not str(r.get('target_source') or '').endswith('_execution')]
         recent_windows[str(days)]=_groups(recent)
         recent_overall[str(days)]=_diagnostics(recent)
-        recent_rules[str(days)]={r['name']:r for r in _rules(recent)}
+        recent_execution_windows[str(days)]=_groups(recent_exec) if recent_exec else {}
+        recent_execution_overall[str(days)]=_diagnostics(recent_exec) if recent_exec else _stats([])
+        recent_research_overall[str(days)]=_diagnostics(recent_research) if recent_research else _stats([])
+        recent_rules[str(days)]={r['name']:r for r in _rules(recent_exec)}
     source_counts=defaultdict(int)
     for r in rows: source_counts[str(r.get('target_source') or 'unknown')]+=1
+    execution_rows_only=[r for r in rows if str(r.get('target_source') or '').endswith('_execution')]
+    paper_execution_rows=[r for r in execution_rows_only if str(r.get('target_source') or '')=='paper_execution']
+    shadow_execution_rows=[r for r in execution_rows_only if str(r.get('target_source') or '')=='shadow_execution']
+    research_rows_only=[r for r in rows if not str(r.get('target_source') or '').endswith('_execution')]
     latest=max((r['_dt'] for r in rows if r.get('_dt')),default=None)
     profile={
-      'schema_version':PROFILE_SCHEMA_VERSION,'version':'profit-profile-v56-'+now.strftime('%Y%m%d%H%M%S'),
+      'schema_version':PROFILE_SCHEMA_VERSION,'version':'profit-profile-v57-'+now.strftime('%Y%m%d%H%M%S'),
       'generated_at':now.isoformat(),'target_type':TARGET_TYPE,'target_horizon':str(os.getenv('LEARNING_TARGET_HORIZON','24h')).lower(),
       'target_source_counts':dict(source_counts),'dataset_hash':_dataset_hash(rows),'latest_observation_at':latest.isoformat() if latest else None,
-      'overall':_diagnostics(rows),'groups':_groups(rows),'recent_windows':recent_windows,'recent_overall':recent_overall,
+      'overall':_diagnostics(rows),'groups':_groups(rows),
+      'execution_overall':_diagnostics(execution_rows_only) if execution_rows_only else _stats([]),
+      'execution_groups':_groups(execution_rows_only) if execution_rows_only else {},
+      'paper_execution_overall':_diagnostics(paper_execution_rows) if paper_execution_rows else _stats([]),
+      'paper_execution_groups':_groups(paper_execution_rows) if paper_execution_rows else {},
+      'shadow_execution_overall':_diagnostics(shadow_execution_rows) if shadow_execution_rows else _stats([]),
+      'shadow_execution_groups':_groups(shadow_execution_rows) if shadow_execution_rows else {},
+      'research_overall':_diagnostics(research_rows_only) if research_rows_only else _stats([]),
+      'research_groups':_groups(research_rows_only) if research_rows_only else {},
+      'recent_windows':recent_windows,'recent_overall':recent_overall,'recent_execution_windows':recent_execution_windows,'recent_execution_overall':recent_execution_overall,'recent_research_overall':recent_research_overall,
       'recent_rule_diagnostics':recent_rules,'recent_window_options':windows,'rule_diagnostics':_rules(rows),
-      'profile_policy':{'symbol_min_samples':_group_min_samples('symbol'),'direction_group_min_samples':_group_min_samples('setup_direction'),'setup_is_specialist':True,'execution_first':True}
+      'profile_policy':{'symbol_min_samples':_group_min_samples('symbol'),'direction_group_min_samples':_group_min_samples('setup_direction'),'setup_is_specialist':True,'execution_first':True,'profitability_source':'execution_only','proxy_source':'research_only'}
     }
     return profile
 
@@ -402,6 +432,10 @@ def validate_profile(profile: Dict[str,Any]) -> tuple[bool,list[str]]:
     if not profile.get('generated_at'): reasons.append('missing_generated_at')
     if not profile.get('dataset_hash'): reasons.append('missing_dataset_hash')
     if not isinstance(profile.get('recent_windows'),dict): reasons.append('missing_recent_windows')
+    if not isinstance(profile.get('execution_overall'),dict): reasons.append('missing_execution_overall')
+    if not isinstance(profile.get('execution_groups'),dict): reasons.append('missing_execution_groups')
+    if not isinstance(profile.get('paper_execution_overall'),dict): reasons.append('missing_paper_execution_overall')
+    if not isinstance(profile.get('shadow_execution_overall'),dict): reasons.append('missing_shadow_execution_overall')
     return not reasons,reasons
 
 
@@ -415,7 +449,7 @@ def _atomic_write_json(path: Path,payload:Dict[str,Any])->None:
 
 def rebuild_from_supabase(output: str|Path|None=None, limit: int|None=None, windows: Iterable[int]=DEFAULT_WINDOWS)->Dict[str,Any]:
     max_rows=int(limit or os.getenv('PROFILE_REBUILD_MAX_ROWS','10000'))
-    obs=_load_supabase(max(100,max_rows)); paper=_load_paper_supabase(max(100,max_rows)); replay=_load_execution_v56_supabase(max(100,max_rows))
+    obs=_load_supabase(max(100,max_rows)); paper=_load_paper_supabase(max(100,max_rows)); replay=_load_execution_v57_supabase(max(100,max_rows))
     profile=build(obs,windows,execution_rows=paper,replay_rows=replay)
     out=Path(output or os.getenv('PROFIT_PROFILE_PATH','data/profit_profile_v2.json')); _atomic_write_json(out,profile)
     try:
@@ -428,7 +462,7 @@ def main()->None:
     p=argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--paper-input'); p.add_argument('--output',default=os.getenv('PROFIT_PROFILE_PATH','data/profit_profile_v2.json'))
     p.add_argument('--limit',type=int,default=int(os.getenv('PROFILE_REBUILD_MAX_ROWS','10000'))); p.add_argument('--windows',default=os.getenv('PROFILE_RECENT_WINDOWS_DAYS','7,14,21,30,60,90,180'))
     args=p.parse_args(); obs=_load_csv(Path(args.input)) if args.input else _load_supabase(max(100,args.limit)); paper=_load_csv(Path(args.paper_input)) if args.paper_input else ([] if args.input else _load_paper_supabase(max(100,args.limit)))
-    replay=[] if args.input else _load_execution_v56_supabase(max(100,args.limit))
+    replay=[] if args.input else _load_execution_v57_supabase(max(100,args.limit))
     windows=[int(x.strip()) for x in args.windows.split(',') if x.strip()]; profile=build(obs,windows,execution_rows=paper,replay_rows=replay); out=Path(args.output); _atomic_write_json(out,profile)
     print(f"{out} samples={profile['overall']['samples']} execution={profile['target_source_counts'].get('paper_execution',0)} windows={profile['recent_window_options']}")
 

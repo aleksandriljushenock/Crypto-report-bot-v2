@@ -142,7 +142,7 @@ def paper_config() -> PaperConfig:
         initial_balance=number("PAPER_INITIAL_BALANCE_USD", 100.0, minimum=1),
         max_positions=integer("PAPER_MAX_OPEN_POSITIONS", 10, minimum=1, maximum=100),
         one_per_symbol=boolean("PAPER_ONE_POSITION_PER_SYMBOL", True),
-        max_leverage=integer("PAPER_MAX_LEVERAGE", 20, minimum=1, maximum=125),
+        max_leverage=integer("PAPER_MAX_LEVERAGE", 3, minimum=1, maximum=125),
         liquidation_buffer_pct=number("PAPER_LIQUIDATION_BUFFER_PCT", 0.5, minimum=0),
         maintenance_margin_pct=number("PAPER_MAINTENANCE_MARGIN_PCT", 0.5, minimum=0),
         fee_pct_per_side=number("PAPER_FEE_PCT_PER_SIDE", 0.06, minimum=0),
@@ -190,10 +190,10 @@ def optimizer_config() -> OptimizerConfig:
     return OptimizerConfig(
         enabled=boolean("AI_OPTIMIZER_ENABLED", True),
         interval_minutes=integer("AI_OPTIMIZER_INTERVAL_MINUTES", 1440, minimum=60),
-        min_trades=integer("AI_OPTIMIZER_MIN_TRADES", 150, minimum=10),
+        min_trades=integer("AI_OPTIMIZER_MIN_TRADES", 200, minimum=10),
         min_retention=number("AI_OPTIMIZER_MIN_RETENTION", 0.70, minimum=0.30, maximum=1.0),
         adaptive_enabled=boolean("ADAPTIVE_MODEL_ENABLED", True),
-        adaptive_min_trades=integer("ADAPTIVE_MODEL_MIN_TRADES", 150, minimum=20),
-        adaptive_min_validation=integer("ADAPTIVE_MODEL_MIN_VALIDATION", 30, minimum=8),
-        adaptive_blend_weight=number("ADAPTIVE_MODEL_BLEND_WEIGHT", 0.10, minimum=0, maximum=0.45),
+        adaptive_min_trades=integer("ADAPTIVE_MODEL_MIN_TRADES", 200, minimum=20),
+        adaptive_min_validation=integer("ADAPTIVE_MODEL_MIN_VALIDATION", 60, minimum=8),
+        adaptive_blend_weight=number("ADAPTIVE_MODEL_BLEND_WEIGHT", 0.05, minimum=0, maximum=0.45),
     )

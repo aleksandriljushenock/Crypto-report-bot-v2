@@ -277,6 +277,12 @@ def _label(row: sqlite3.Row, price: float) -> str:
     return "OPEN"
 
 
+def _canonical_cloud_outcome(label: str) -> str:
+    raw=str(label or 'OPEN').upper()
+    if raw.startswith('HORIZON_'): raw=raw[len('HORIZON_'):]
+    return raw if raw in {'OPEN','SL','TP1','TP2','TP3'} else 'OPEN'
+
+
 def _cloud_result_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any] | None:
     outcomes = conn.execute(
         "SELECT * FROM trade_outcomes WHERE fingerprint=? ORDER BY observed_at",
@@ -293,7 +299,7 @@ def _cloud_result_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[st
     return {
         "market_price_after": float(latest["price"] or 0),
         "price_change_pct": float(latest["return_percent"] or 0),
-        "outcome": str(latest["result_label"] or "OPEN"),
+        "outcome": _canonical_cloud_outcome(str(latest["result_label"] or "OPEN")),
         "outcome_score": 1.0 if float(latest["return_percent"] or 0) > 0 else 0.0,
         "real_result": {
             "returns": returns,

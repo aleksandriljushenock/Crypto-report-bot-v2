@@ -73,8 +73,8 @@ def test_v56_weighted_ensemble_does_not_reward_model_count():
 def test_v56_safe_runtime_defaults_are_consistent(monkeypatch):
     import strategy_settings as ss
     by={s.key:s.default for s in ss.SPECS}
-    assert by['ADAPTIVE_MODEL_MIN_TRADES']==150
-    assert by['ADAPTIVE_MODEL_MIN_VALIDATION']==30
-    assert by['ADAPTIVE_MODEL_BLEND_WEIGHT']==0.10
-    assert by['AI_OPTIMIZER_MIN_TRADES']==150
+    assert by['ADAPTIVE_MODEL_MIN_TRADES']==200
+    assert by['ADAPTIVE_MODEL_MIN_VALIDATION']==60
+    assert by['ADAPTIVE_MODEL_BLEND_WEIGHT']==0.05
+    assert by['AI_OPTIMIZER_MIN_TRADES']==200
     assert by['MULTI_EXCHANGE_MIN_VENUES']==2

@@ -1,0 +1,71 @@
+Crypto Report Bot V57 Profitability-First Build Report
+======================================================
+Version: 57.0.0
+Base audited deployment: 56.0.0 / commit 8619fe9d5f1a081f62d0e84035e6d2d757a6ed3e
+Build purpose: execution-truth correctness, fail-closed profitability validation, signal-quality hardening.
+
+Validation completed
+--------------------
+- Full pytest suite: 270 passed.
+- Python compileall: PASS.
+- .env.example: 307 unique keys, no duplicates.
+- .env.vps.example: 307 unique keys, no duplicates.
+- Offline Profit Profile rebuild from supplied Learning + Paper data: PASS.
+
+Key observed V56 production facts reproduced from supplied data
+---------------------------------------------------------------
+- Paper positions: 89.
+- V57 truth reclassification: 45 verified fills/executions, 43 no-fill, 1 unresolved legacy row.
+- Verified closed Paper executions: 45; winners: 3; WR: 6.67%.
+- Raw average net return: -3.2647%.
+- Raw PF: 0.4140.
+- Robust average net return: -4.3324%.
+- Robust PF: 0.2146.
+- Original execution probability AUC: 0.3333.
+- Original execution probability Brier: 0.4236.
+
+Critical fixes included
+-----------------------
+1. Cancelled/expired/rejected Paper entries cannot be mislabeled as filled.
+2. New execution_training_dataset_v57; V56 labels are deliberately not copied.
+3. Execution ML rejects invalid label balance (default minima: 80 filled, 40 no-fill, 120 resolved outcomes).
+4. Profit Profile separates research, combined execution, Paper execution and Shadow execution statistics.
+5. Profitability gate requires both execution-wide positive evidence and independent positive Paper evidence.
+6. No optimistic 70% fill fallback; missing execution evidence fails closed.
+7. Execution Champion must beat original-probability and base-rate Brier/AUC baselines and pass untouched champion + return/PF checks.
+8. Direction guard and BREAKOUT execution guard added.
+9. Adaptive influence capped at 5%; minimum history 200 trades / 60 validation.
+10. AI Optimizer minimum history 200 and chronological OOS validation.
+11. Dynamic position sizing disabled by default; Paper leverage capped at 3x until edge is proven.
+12. Net execution return uses net PnL after costs; sign-preserving winsorization fixed.
+13. Learning outcome schema canonicalization and JSONB NOT NULL compatibility repair included.
+14. V57 backfill starts before profile rebuild/training.
+15. V14 learning execution source moved to V57 dataset.
+
+Profit-ready status on currently supplied historical data
+----------------------------------------------------------
+FAIL-CLOSED (expected and correct).
+The supplied production execution history is materially negative. V57 therefore must NOT call the current strategy profitable and must not admit normal Paper/Trade candidates until the configured OOS/execution/Paper profitability gates are passed.
+
+Default profit-ready gates
+--------------------------
+- Validated Execution ML Champion.
+- >=120 combined resolved execution outcomes.
+- >=80 actual Paper executions.
+- Combined robust PF >=1.15 and robust average net return >0.
+- Paper robust PF >=1.05 and Paper robust average net return >0.
+- Execution ML label-quality minima satisfied.
+- Direction/setup guards satisfied.
+- Fill/joint probability/expected-return/reliability/quality gates satisfied.
+
+Deployment
+----------
+1. Apply migrations/SUPABASE_EXECUTION_INTELLIGENCE_V57.sql in Supabase SQL Editor.
+2. Deploy V57 source and rebuild Docker image.
+3. Run: python3 bootstrap_profitability_v57.py --limit 20000
+4. Run: python3 audit_execution_v57.py
+5. Keep fail-closed/Shadow behavior until gates pass.
+
+Important
+---------
+This build removes known mechanisms that could falsely present proxy performance as executable profitability. It does not guarantee future trading profit. Profitability must be demonstrated on independent execution/OOS data after deployment.
