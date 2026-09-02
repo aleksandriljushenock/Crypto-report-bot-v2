@@ -1,0 +1,20 @@
+Crypto Report Bot v57.2.0 build report
+
+Goal
+- Make Execution ML failures observable without weakening profitability gates.
+
+Changes
+- Added explicit runtime/champion gate failure reasons to every trained execution model.
+- Added gate_failure_counts and compact per-group summaries to train() output.
+- Added diagnose_execution_v57.py for concise diagnostics without retraining.
+- Added cloud_error when model upload fails instead of swallowing all upload details.
+- Preserved v57.1 adaptive purged temporal split.
+- Preserved fail-closed behavior and all AUC/Brier/return/PF Champion thresholds.
+- VERSION=57.2.0.
+
+Validation
+- python3 -m compileall -q . : PASS
+- pytest -q : 274 passed
+- .env.example: 312/312 unique keys
+- .env.vps.example: 312/312 unique keys
+- no production .env included

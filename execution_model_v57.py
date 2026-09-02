@@ -10,6 +10,7 @@ from execution_features_v57 import FEATURE_NAMES, extract, specialist_key
 
 MODEL_PATH=Path(os.getenv('EXECUTION_MODEL_V57_PATH','data/execution_model_v57.joblib'))
 _CACHE={'mtime':None,'bundle':None}
+_LAST_CLOUD_ERROR=None
 META_ONLY={'score','raw_probability','final_probability','quality','ev'}
 RAW_INDICES=[i for i,n in enumerate(FEATURE_NAMES) if n not in META_ONLY]
 ALL_INDICES=list(range(len(FEATURE_NAMES)))
@@ -59,6 +60,59 @@ def _spearman(a,b):
         v=spearmanr(a,b).statistic
         return None if math.isnan(float(v)) else float(v)
     except Exception:return None
+
+def _gate_failures(*, auc, brier, baseline_auc, baseline_brier, base_rate_brier,
+                   champion_auc, champion_brier, champion_precision20,
+                   champion_baseline_auc, champion_baseline_brier,
+                   champion_base_rate_brier, champion_baseline_precision20,
+                   reg_metrics=None):
+    """Return explicit runtime/champion gate failures without changing thresholds."""
+    reg_metrics=reg_metrics or {}
+    auc_floor=float(os.getenv('EXECUTION_ML_MIN_AUC','0.56'))
+    auc_gain=float(os.getenv('EXECUTION_ML_MIN_AUC_GAIN','0.02'))
+    brier_max=float(os.getenv('EXECUTION_ML_MAX_BRIER','0.26'))
+    runtime=[]
+    if auc is None: runtime.append('runtime_auc_missing')
+    elif auc < auc_floor: runtime.append('runtime_auc_below_floor')
+    if auc is not None and auc < (baseline_auc or .5)+auc_gain: runtime.append('runtime_auc_gain_vs_baseline')
+    if brier is None: runtime.append('runtime_brier_missing')
+    else:
+        if brier > brier_max: runtime.append('runtime_brier_above_max')
+        if baseline_brier is not None and brier >= baseline_brier: runtime.append('runtime_brier_not_better_baseline')
+        if base_rate_brier is not None and brier >= base_rate_brier: runtime.append('runtime_brier_not_better_base_rate')
+
+    champion=[]
+    ch_auc_floor=float(os.getenv('EXECUTION_ML_CHAMPION_MIN_AUC','0.60'))
+    ch_auc_gain=float(os.getenv('EXECUTION_ML_CHAMPION_MIN_AUC_GAIN','0.025'))
+    ch_brier_max=float(os.getenv('EXECUTION_ML_CHAMPION_MAX_BRIER','0.24'))
+    ch_precision_gain=float(os.getenv('EXECUTION_ML_CHAMPION_MIN_PRECISION20_GAIN','0.05'))
+    if runtime: champion.append('runtime_gate_failed')
+    if champion_auc is None: champion.append('champion_auc_missing')
+    else:
+        if champion_auc < ch_auc_floor: champion.append('champion_auc_below_floor')
+        if champion_auc < (champion_baseline_auc or .5)+ch_auc_gain: champion.append('champion_auc_gain_vs_baseline')
+    if champion_brier is None: champion.append('champion_brier_missing')
+    else:
+        if champion_brier > ch_brier_max: champion.append('champion_brier_above_max')
+        if champion_baseline_brier is not None and champion_brier >= champion_baseline_brier: champion.append('champion_brier_not_better_baseline')
+        if champion_base_rate_brier is not None and champion_brier >= champion_base_rate_brier: champion.append('champion_brier_not_better_base_rate')
+    if champion_precision20 is None:
+        champion.append('champion_precision20_missing')
+    elif champion_precision20 < (champion_baseline_precision20 or 0)+ch_precision_gain:
+        champion.append('champion_precision20_gain')
+
+    if reg_metrics:
+        mae=reg_metrics.get('return_mae'); base_mae=reg_metrics.get('baseline_return_mae')
+        rho=reg_metrics.get('return_spearman'); sign=reg_metrics.get('return_sign_accuracy')
+        ch_rho=reg_metrics.get('champion_return_spearman'); ch_sign=reg_metrics.get('champion_return_sign_accuracy')
+        ch_pf=reg_metrics.get('champion_return_pf')
+        if mae is None or base_mae is None or mae >= base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')): champion.append('return_mae_ratio')
+        if (rho if rho is not None else -1) < float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')): champion.append('return_spearman')
+        if sign is None or sign < float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')): champion.append('return_sign_accuracy')
+        if (ch_rho if ch_rho is not None else -1) < float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')): champion.append('champion_return_spearman')
+        if ch_sign is None or ch_sign < float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')): champion.append('champion_return_sign_accuracy')
+        if ch_pf is None or ch_pf < float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')): champion.append('champion_return_pf')
+    return {'runtime':runtime,'champion':champion}
 
 def _purged_split(rows, embargo_hours=None, min_segment_samples=None, return_meta=False):
     """55/15/15/15 chronological split with adaptive embargo.
@@ -176,7 +230,8 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         return_ok=bool(mae is not None and base_mae is not None and mae<base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')) and (rho or -1)>=float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')) and sign>=float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')) and (ch_rho or -1)>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')) and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')))
         reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok}
         champion_ok=bool(champion_ok and return_ok)
-    return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,**reg_metrics}, None
+    gate_failures=_gate_failures(auc=auc,brier=brier,baseline_auc=bauc,baseline_brier=bbrier,base_rate_brier=base_rate_brier,champion_auc=champion_auc,champion_brier=champion_brier,champion_precision20=champion_precision20,champion_baseline_auc=champion_baseline_auc,champion_baseline_brier=champion_baseline_brier,champion_base_rate_brier=champion_base_rate_brier,champion_baseline_precision20=champion_baseline_precision20,reg_metrics=reg_metrics if task=='outcome' else None)
+    return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,'gate_failures':gate_failures,**reg_metrics}, None
 
 def _train_group(rows,key):
     windows=[int(x) for x in os.getenv('EXECUTION_ML_WINDOWS','500,1000,2500,5000').split(',') if x.strip()]
@@ -199,17 +254,45 @@ def _train_group(rows,key):
 
 def _cloud_path():return os.getenv('EXECUTION_MODEL_V57_CLOUD_PATH','v57/latest/execution_model_v57.joblib')
 def _upload(path):
+    global _LAST_CLOUD_ERROR
+    _LAST_CLOUD_ERROR=None
     try:
         st=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')); data=path.read_bytes(); obj=_cloud_path()
         try:st.upload(obj,data,{'content-type':'application/octet-stream','upsert':'true'})
-        except Exception:st.update(obj,data,{'content-type':'application/octet-stream'})
+        except Exception:
+            st.update(obj,data,{'content-type':'application/octet-stream'})
         return True
-    except Exception:return False
+    except Exception as exc:
+        _LAST_CLOUD_ERROR=f'{type(exc).__name__}: {exc}'
+        return False
 
 def _restore():
     try:
         data=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')).download(_cloud_path()); MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); MODEL_PATH.write_bytes(data); return True
     except Exception:return False
+
+def _compact_model_summary(models):
+    out={}
+    failure_counts={}
+    for key,g in models.items():
+        outcome=g.get('outcome') or []
+        for m in outcome:
+            for reason in (m.get('gate_failures') or {}).get('runtime',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
+            for reason in (m.get('gate_failures') or {}).get('champion',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
+        def slim(m):
+            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','return_runtime_ok','champion_ok','gate_failures')}
+        top_selection=sorted(outcome,key=lambda m:(m.get('auc') is not None,m.get('auc') or -1),reverse=True)[:3]
+        top_champion=sorted(outcome,key=lambda m:(m.get('champion_auc') is not None,m.get('champion_auc') or -1),reverse=True)[:3]
+        out[key]={'trained_fill':len(g.get('fill') or []),'trained_outcome':len(outcome),'healthy_outcome':sum(bool(m.get('runtime_ok')) for m in outcome),'champion_outcome':sum(bool(m.get('champion_ok')) for m in outcome),'top_selection':[slim(m) for m in top_selection],'top_champion':[slim(m) for m in top_champion],'pretrain_rejections':len(g.get('rejections') or [])}
+    return out,failure_counts
+
+def diagnose(path=None):
+    """Read the saved bundle and return a concise, JSON-friendly diagnostic summary."""
+    import joblib
+    p=Path(path) if path else MODEL_PATH
+    if not p.exists(): return {'status':'missing-model','path':str(p)}
+    b=joblib.load(p); summaries,failures=_compact_model_summary(b.get('models') or {})
+    return {'status':b.get('status'),'version':b.get('version'),'rows':b.get('rows'),'trained_at':b.get('trained_at'),'trigger':b.get('trigger'),'groups':summaries,'gate_failure_counts':failures}
 
 def train(trigger='manual'):
     import joblib
@@ -232,14 +315,15 @@ def train(trigger='manual'):
     champions=[m for g in models.values() for m in g['outcome'] if m.get('champion_ok')]
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','2')))
     status='champion' if len(champions)>=min_champ else 'shadow'
-    bundle={'schema':57,'version':'execution-ensemble-v57.1-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':57,'version':'execution-ensemble-v57.2-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}
     for g in models.values():
         for r in g.get('rejections') or []:
             k=r.get('reason','unknown'); rejection_counts[k]=rejection_counts.get(k,0)+1
-    return {'status':status,'version':bundle['version'],'rows':len(rows),'groups':list(models),'trained_models':trained_models,'healthy_models':len(healthy),'champion_models':len(champions),'best_auc':max((m.get('champion_auc') or 0 for m in champions),default=None),'rejection_counts':rejection_counts,'cloud_saved':cloud,'label_quality':label_quality}
+    group_summary,gate_failure_counts=_compact_model_summary(models)
+    return {'status':status,'version':bundle['version'],'rows':len(rows),'groups':list(models),'trained_models':trained_models,'healthy_models':len(healthy),'champion_models':len(champions),'best_auc':max((m.get('champion_auc') or 0 for m in champions),default=None),'rejection_counts':rejection_counts,'gate_failure_counts':gate_failure_counts,'group_summary':group_summary,'cloud_saved':cloud,'cloud_error':_LAST_CLOUD_ERROR,'label_quality':label_quality}
 
 def invalidate_cache():_CACHE.update(mtime=None,bundle=None)
 def _load_bundle():

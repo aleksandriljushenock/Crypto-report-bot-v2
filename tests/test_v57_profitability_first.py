@@ -156,3 +156,37 @@ def test_purged_split_reports_failure_instead_of_silent_none(monkeypatch):
     assert split is None
     assert meta['reason']=='segment_too_small_after_min_embargo'
     assert meta['attempts']
+
+
+
+def test_v57_2_gate_failures_explain_runtime_and_champion_rejection(monkeypatch):
+    import execution_model_v57 as em
+    monkeypatch.setenv('EXECUTION_ML_MIN_AUC','0.56')
+    monkeypatch.setenv('EXECUTION_ML_CHAMPION_MIN_AUC','0.60')
+    monkeypatch.setenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')
+    failures=em._gate_failures(
+        auc=0.70,brier=0.20,baseline_auc=0.50,baseline_brier=0.30,base_rate_brier=0.30,
+        champion_auc=0.55,champion_brier=0.21,champion_precision20=0.60,
+        champion_baseline_auc=0.50,champion_baseline_brier=0.30,
+        champion_base_rate_brier=0.30,champion_baseline_precision20=0.50,
+        reg_metrics={'return_mae':1.0,'baseline_return_mae':2.0,'return_spearman':0.2,
+                     'return_sign_accuracy':0.6,'champion_return_spearman':0.2,
+                     'champion_return_sign_accuracy':0.6,'champion_return_pf':0.8})
+    assert failures['runtime']==[]
+    assert 'champion_auc_below_floor' in failures['champion']
+    assert 'champion_return_pf' in failures['champion']
+
+
+def test_v57_2_compact_summary_keeps_top_models_and_failure_counts():
+    import execution_model_v57 as em
+    models={'GLOBAL':{'fill':[{}], 'outcome':[
+        {'auc':0.70,'champion_auc':0.55,'runtime_ok':True,'champion_ok':False,'gate_failures':{'runtime':[],'champion':['champion_auc_below_floor']}},
+        {'auc':0.60,'champion_auc':0.65,'runtime_ok':True,'champion_ok':True,'gate_failures':{'runtime':[],'champion':[]}},
+    ], 'rejections':[{'reason':'x'}]}}
+    summary,failures=em._compact_model_summary(models)
+    assert summary['GLOBAL']['trained_outcome']==2
+    assert summary['GLOBAL']['healthy_outcome']==2
+    assert summary['GLOBAL']['champion_outcome']==1
+    assert summary['GLOBAL']['top_selection'][0]['auc']==0.70
+    assert summary['GLOBAL']['top_champion'][0]['champion_auc']==0.65
+    assert failures['champion_auc_below_floor']==1
