@@ -1,0 +1,5 @@
+Crypto-report-bot v58.1.0
+Focus: improve profitable-trade prediction without weakening classifier safety gates.
+Changes: anchored walk-forward economic validation, BREAKOUT-only economic champion path, fail-closed fold requirements, richer diagnostics.
+Tests: 278 passed
+compileall: PASS
