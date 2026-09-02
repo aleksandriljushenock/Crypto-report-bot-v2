@@ -60,18 +60,46 @@ def _spearman(a,b):
         return None if math.isnan(float(v)) else float(v)
     except Exception:return None
 
-def _purged_split(rows, embargo_hours=None):
-    """55/15/15/15 chronological split: train/calibration/selection/champion with embargo."""
-    if len(rows)<120:return None
-    emb=float(embargo_hours if embargo_hours is not None else os.getenv('EXECUTION_ML_EMBARGO_HOURS','72'))
+def _purged_split(rows, embargo_hours=None, min_segment_samples=None, return_meta=False):
+    """55/15/15/15 chronological split with adaptive embargo.
+
+    V57.1 fix: the old fixed 72h embargo could erase dense calibration/selection
+    windows completely. We still purge temporal overlap, but progressively reduce
+    the embargo until every split keeps enough observations. We never silently
+    fall back to an unpurged split when timestamps are available.
+    """
+    if len(rows)<120:
+        return (None, {'reason':'rows_lt_120','rows':len(rows)}) if return_meta else None
+    min_seg=int(min_segment_samples if min_segment_samples is not None else os.getenv('EXECUTION_ML_MIN_SEGMENT_SAMPLES','20'))
+    requested=float(embargo_hours if embargo_hours is not None else os.getenv('EXECUTION_ML_EMBARGO_HOURS','72'))
+    floor=max(0.0,float(os.getenv('EXECUTION_ML_MIN_EMBARGO_HOURS','1')))
+    decay=float(os.getenv('EXECUTION_ML_EMBARGO_DECAY','0.5'))
+    if not 0 < decay < 1: decay=.5
     n=len(rows); i1=int(n*.55); i2=int(n*.70); i3=int(n*.85)
+    raw=(rows[:i1],rows[i1:i2],rows[i2:i3],rows[i3:])
     bounds=[_dt(rows[i].get('signal_created_at')) for i in (i1,i2,i3)]
-    if not all(bounds): return rows[:i1],rows[i1:i2],rows[i2:i3],rows[i3:]
-    gap=timedelta(hours=emb); b1,b2,b3=bounds
-    def before(seg,b): return [r for r in seg if (_dt(r.get('exit_at')) or _dt(r.get('signal_created_at')) or b) < b-gap]
-    def between(seg,a,b): return [r for r in seg if (_dt(r.get('signal_created_at')) or a)>a+gap and (_dt(r.get('exit_at')) or _dt(r.get('signal_created_at')) or b)<b-gap]
-    tr=before(rows[:i1],b1); ca=between(rows[i1:i2],b1,b2); se=between(rows[i2:i3],b2,b3); ch=[r for r in rows[i3:] if (_dt(r.get('signal_created_at')) or b3)>b3+gap]
-    return tr,ca,se,ch
+    if not all(bounds):
+        meta={'reason':'timestamps_missing_unpurged','requested_embargo_hours':requested,'effective_embargo_hours':0.0,'sizes':[len(x) for x in raw]}
+        return (raw,meta) if return_meta else raw
+    b1,b2,b3=bounds
+    def apply(emb):
+        gap=timedelta(hours=emb)
+        def before(seg,b): return [r for r in seg if (_dt(r.get('exit_at')) or _dt(r.get('signal_created_at')) or b) < b-gap]
+        def between(seg,a,b): return [r for r in seg if (_dt(r.get('signal_created_at')) or a)>a+gap and (_dt(r.get('exit_at')) or _dt(r.get('signal_created_at')) or b)<b-gap]
+        return (before(raw[0],b1),between(raw[1],b1,b2),between(raw[2],b2,b3),[r for r in raw[3] if (_dt(r.get('signal_created_at')) or b3)>b3+gap])
+    tried=[]
+    emb=max(requested,floor)
+    while True:
+        split=apply(emb); sizes=[len(x) for x in split]; tried.append((round(emb,6),sizes))
+        if min(sizes)>=min_seg:
+            meta={'reason':'ok','requested_embargo_hours':requested,'effective_embargo_hours':emb,'sizes':sizes,'attempts':tried}
+            return (split,meta) if return_meta else split
+        if emb<=floor+1e-9:break
+        nxt=max(floor,emb*decay)
+        if abs(nxt-emb)<1e-9:break
+        emb=nxt
+    meta={'reason':'segment_too_small_after_min_embargo','requested_embargo_hours':requested,'effective_embargo_hours':emb,'sizes':[len(x) for x in split],'attempts':tried,'min_segment_samples':min_seg}
+    return (None,meta) if return_meta else None
 
 def _weights(rows):
     return [max(.1,float(r.get('sample_weight') or 1.0)) for r in rows]
@@ -100,13 +128,21 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         usable=[r for r in rows if str(r.get('entry_status') or '').lower()=='filled' and not bool(r.get('ambiguous_same_candle')) and str(r.get('outcome') or '').upper() not in {'','UNRESOLVED','AMBIGUOUS','OPEN'} and r.get('net_return_pct') is not None]
         label=lambda r:1 if float(r.get('net_return_pct') or 0)>0 else 0
     minimum=int(os.getenv('EXECUTION_ML_MIN_SAMPLES','240'))
-    if len(usable)<minimum:return None
-    split=_purged_split(usable)
-    if not split:return None
+    if len(usable)<minimum:
+        return None, {'reason':'usable_lt_minimum','usable':len(usable),'minimum':minimum,'task':task,'window':window,'family':family,'feature_set':feature_set}
+    split,split_meta=_purged_split(usable,return_meta=True)
+    if not split:
+        return None, {'reason':'purged_split_failed','task':task,'window':window,'family':family,'feature_set':feature_set,'usable':len(usable),'split':split_meta}
     tr,ca,se,ch=split
-    if min(len(tr),len(ca),len(se),len(ch))<20:return None
+    min_seg=int(os.getenv('EXECUTION_ML_MIN_SEGMENT_SAMPLES','20'))
+    if min(len(tr),len(ca),len(se),len(ch))<min_seg:
+        return None, {'reason':'segment_lt_minimum','task':task,'window':window,'family':family,'feature_set':feature_set,'sizes':[len(tr),len(ca),len(se),len(ch)],'minimum':min_seg,'split':split_meta}
     ytr=[label(r) for r in tr]; yca=[label(r) for r in ca]; yse=[label(r) for r in se]; ych=[label(r) for r in ch]
-    if len(set(ytr))<2 or len(set(yse))<2 or len(set(ych))<2:return None
+    missing=[]
+    for name,y in (('train',ytr),('selection',yse),('champion',ych)):
+        if len(set(y))<2:missing.append(name)
+    if missing:
+        return None, {'reason':'single_class_segment','segments':missing,'task':task,'window':window,'family':family,'feature_set':feature_set,'sizes':[len(tr),len(ca),len(se),len(ch)],'split':split_meta}
     indices=RAW_INDICES if feature_set=='raw' else ALL_INDICES
     X=[[extract(r)[i] for i in indices] for r in tr]; Xc=[[extract(r)[i] for i in indices] for r in ca]; Xs=[[extract(r)[i] for i in indices] for r in se]; Xh=[[extract(r)[i] for i in indices] for r in ch]; sw=_weights(tr)
     clf=_family(family,seed)
@@ -140,24 +176,26 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         return_ok=bool(mae is not None and base_mae is not None and mae<base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')) and (rho or -1)>=float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')) and sign>=float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')) and (ch_rho or -1)>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')) and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')))
         reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok}
         champion_ok=bool(champion_ok and return_ok)
-    return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,**reg_metrics}
+    return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,**reg_metrics}, None
 
 def _train_group(rows,key):
-    windows=[int(x) for x in os.getenv('EXECUTION_ML_WINDOWS','250,500,1000').split(',') if x.strip()]
+    windows=[int(x) for x in os.getenv('EXECUTION_ML_WINDOWS','500,1000,2500,5000').split(',') if x.strip()]
     families=[x.strip() for x in os.getenv('EXECUTION_ML_FAMILIES','hgb,extra,rf').split(',') if x.strip()]
-    fill=[]; outcome=[]
+    fill=[]; outcome=[]; rejections=[]
     feature_sets=[x.strip() for x in os.getenv('EXECUTION_ML_FEATURE_SETS','raw,all').split(',') if x.strip()]
     for wi,w in enumerate(windows):
         for fi,fam in enumerate(families):
             for si,feature_set in enumerate(feature_sets):
                 seed=55+wi*17+fi*101+si*313
-                m=_fit_one(rows,'fill',w,fam,seed,feature_set)
+                m,reason=_fit_one(rows,'fill',w,fam,seed,feature_set)
                 if m:fill.append(m)
-                m=_fit_one(rows,'outcome',w,fam,seed+7,feature_set)
+                elif reason:rejections.append(reason)
+                m,reason=_fit_one(rows,'outcome',w,fam,seed+7,feature_set)
                 if m:outcome.append(m)
+                elif reason:rejections.append(reason)
     fill_labels=[1 if str(r.get('entry_status') or '').lower()=='filled' else 0 for r in rows if str(r.get('entry_status') or '').lower() in {'filled','no_fill','expired'}]
     fill_prior=(sum(fill_labels)+2)/(len(fill_labels)+4) if fill_labels else None
-    return {'fill':fill,'outcome':outcome,'samples':len(rows),'key':key,'fill_prior':fill_prior}
+    return {'fill':fill,'outcome':outcome,'rejections':rejections,'samples':len(rows),'key':key,'fill_prior':fill_prior}
 
 def _cloud_path():return os.getenv('EXECUTION_MODEL_V57_CLOUD_PATH','v57/latest/execution_model_v57.joblib')
 def _upload(path):
@@ -194,9 +232,14 @@ def train(trigger='manual'):
     champions=[m for g in models.values() for m in g['outcome'] if m.get('champion_ok')]
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','2')))
     status='champion' if len(champions)>=min_champ else 'shadow'
-    bundle={'schema':57,'version':'execution-ensemble-v57-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':57,'version':'execution-ensemble-v57.1-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
-    return {'status':status,'version':bundle['version'],'rows':len(rows),'groups':list(models),'healthy_models':len(healthy),'champion_models':len(champions),'best_auc':max((m.get('champion_auc') or 0 for m in champions),default=None),'cloud_saved':cloud,'label_quality':label_quality}
+    trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
+    rejection_counts={}
+    for g in models.values():
+        for r in g.get('rejections') or []:
+            k=r.get('reason','unknown'); rejection_counts[k]=rejection_counts.get(k,0)+1
+    return {'status':status,'version':bundle['version'],'rows':len(rows),'groups':list(models),'trained_models':trained_models,'healthy_models':len(healthy),'champion_models':len(champions),'best_auc':max((m.get('champion_auc') or 0 for m in champions),default=None),'rejection_counts':rejection_counts,'cloud_saved':cloud,'label_quality':label_quality}
 
 def invalidate_cache():_CACHE.update(mtime=None,bundle=None)
 def _load_bundle():

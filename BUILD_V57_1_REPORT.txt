@@ -1,0 +1,26 @@
+Crypto Report Bot v57.1.0 build report
+
+Primary fix:
+- P0 Execution Model bug: fixed 72h embargo erased dense validation segments before clf.fit(), producing empty fill/outcome model lists.
+
+Changes:
+- adaptive purged embargo: starts at 72h and decays to configured floor while preserving minimum segment samples;
+- temporal 55/15/15/15 split remains chronological and purged;
+- no unpurged fallback when timestamps are present;
+- explicit split metadata and rejection reasons;
+- train() now reports trained_models and rejection_counts;
+- default windows expanded to 500,1000,2500,5000;
+- new env controls for embargo floor/decay/min segment samples;
+- model version string changed to execution-ensemble-v57.1-*;
+- VERSION=57.1.0;
+- added regression tests for dense signal streams.
+
+Validation:
+- pytest: 272 passed
+- compileall: PASS
+- .env.example: 312 unique keys, 0 duplicates
+- .env.vps.example: 312 unique keys, 0 duplicates
+
+Important:
+- Profitability/AUC/Brier/Champion gates were NOT weakened.
+- Existing execution_training_dataset_v57 can be reused; no new backfill is required solely for this patch.

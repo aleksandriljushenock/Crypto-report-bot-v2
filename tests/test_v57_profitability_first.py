@@ -122,3 +122,37 @@ def test_profitability_gate_requires_paper_execution_evidence(monkeypatch):
     assert not r['qualityPassed']
     assert r['profitabilityGate']['executionPassed']
     assert not r['profitabilityGate']['paperPassed']
+
+
+def test_adaptive_purged_split_keeps_dense_validation_segments(monkeypatch):
+    import execution_model_v57 as em
+    from datetime import timedelta
+    base=datetime(2026,9,1,tzinfo=timezone.utc)
+    rows=[]
+    # 1000 dense signals over ~42h. A fixed 72h embargo erases the middle splits.
+    for i in range(1000):
+        ts=base+timedelta(minutes=2*i)
+        rows.append({'signal_created_at':ts.isoformat(),'exit_at':(ts+timedelta(minutes=20)).isoformat()})
+    monkeypatch.setenv('EXECUTION_ML_EMBARGO_HOURS','72')
+    monkeypatch.setenv('EXECUTION_ML_MIN_EMBARGO_HOURS','1')
+    split,meta=em._purged_split(rows,return_meta=True)
+    assert split is not None, meta
+    assert min(len(x) for x in split) >= 20
+    assert 1 <= meta['effective_embargo_hours'] < 72
+    assert len(meta['attempts']) > 1
+
+
+def test_purged_split_reports_failure_instead_of_silent_none(monkeypatch):
+    import execution_model_v57 as em
+    from datetime import timedelta
+    base=datetime(2026,9,1,tzinfo=timezone.utc)
+    rows=[]
+    for i in range(120):
+        ts=base+timedelta(seconds=i)
+        rows.append({'signal_created_at':ts.isoformat(),'exit_at':(ts+timedelta(seconds=1)).isoformat()})
+    monkeypatch.setenv('EXECUTION_ML_EMBARGO_HOURS','72')
+    monkeypatch.setenv('EXECUTION_ML_MIN_EMBARGO_HOURS','1')
+    split,meta=em._purged_split(rows,min_segment_samples=20,return_meta=True)
+    assert split is None
+    assert meta['reason']=='segment_too_small_after_min_embargo'
+    assert meta['attempts']
