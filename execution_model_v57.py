@@ -112,6 +112,11 @@ def _gate_failures(*, auc, brier, baseline_auc, baseline_brier, base_rate_brier,
         if (ch_rho if ch_rho is not None else -1) < float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')): champion.append('champion_return_spearman')
         if ch_sign is None or ch_sign < float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')): champion.append('champion_return_sign_accuracy')
         if ch_pf is None or ch_pf < float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')): champion.append('champion_return_pf')
+        if reg_metrics.get('utility_ok') is False:
+            if (reg_metrics.get('selection_utility_pf') or 0) < float(os.getenv('EXECUTION_RETURN_SELECTION_MIN_PF','1.05')): champion.append('selection_utility_pf')
+            if (reg_metrics.get('selection_utility_expectancy') or 0) <= float(os.getenv('EXECUTION_RETURN_MIN_EXPECTANCY','0')): champion.append('selection_utility_expectancy')
+            if int(reg_metrics.get('champion_utility_trades') or 0) < max(10,int(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_TRADES','20'))): champion.append('champion_utility_trades')
+            if (reg_metrics.get('champion_utility_expectancy') or 0) <= float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_EXPECTANCY','0')): champion.append('champion_utility_expectancy')
     return {'runtime':runtime,'champion':champion}
 
 def _purged_split(rows, embargo_hours=None, min_segment_samples=None, return_meta=False):
@@ -170,7 +175,32 @@ def _family(kind, seed):
 
 def _regressor(seed):
     from sklearn.ensemble import HistGradientBoostingRegressor
-    return HistGradientBoostingRegressor(max_iter=int(os.getenv('EXECUTION_ML_MAX_ITER','500')),learning_rate=float(os.getenv('EXECUTION_ML_LEARNING_RATE','0.045')),max_leaf_nodes=int(os.getenv('EXECUTION_ML_MAX_LEAVES','21')),l2_regularization=float(os.getenv('EXECUTION_ML_L2','1.5')),random_state=seed)
+    # V58: absolute-error loss is deliberately robust to crypto return outliers.
+    return HistGradientBoostingRegressor(loss=os.getenv('EXECUTION_RETURN_LOSS','absolute_error'),max_iter=int(os.getenv('EXECUTION_ML_MAX_ITER','500')),learning_rate=float(os.getenv('EXECUTION_ML_LEARNING_RATE','0.045')),max_leaf_nodes=int(os.getenv('EXECUTION_ML_MAX_LEAVES','21')),l2_regularization=float(os.getenv('EXECUTION_ML_L2','1.5')),random_state=seed)
+
+def _quantile(values,q):
+    vals=sorted(float(v) for v in values)
+    if not vals:return 0.0
+    pos=(len(vals)-1)*max(0.0,min(1.0,float(q))); lo=int(pos); hi=min(len(vals)-1,lo+1); f=pos-lo
+    return vals[lo]*(1-f)+vals[hi]*f
+
+def _winsor(values):
+    lo=_quantile(values,float(os.getenv('EXECUTION_RETURN_WINSOR_LOW','0.05'))); hi=_quantile(values,float(os.getenv('EXECUTION_RETURN_WINSOR_HIGH','0.95')))
+    return [max(lo,min(hi,float(v))) for v in values],lo,hi
+
+def _utility_threshold(pred,actual):
+    # Chosen on selection only. Champion/OOS is never used to tune this threshold.
+    min_trades=max(10,int(os.getenv('EXECUTION_RETURN_MIN_UTILITY_TRADES','20')))
+    candidates=sorted(set([0.0]+[_quantile(pred,q) for q in (.50,.60,.70,.80,.85,.90)]))
+    best=None
+    for t in candidates:
+        vals=[float(a) for a,p in zip(actual,pred) if float(p)>=t]
+        if len(vals)<min_trades:continue
+        pf=_profit_factor(vals); exp=sum(vals)/len(vals); downside=abs(sum(v for v in vals if v<0))/len(vals)
+        score=exp-0.15*downside+0.02*min(pf,5.0)
+        row={'threshold':float(t),'trades':len(vals),'profit_factor':pf,'expectancy':exp,'score':score}
+        if best is None or row['score']>best['score']:best=row
+    return best
 
 def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
     from sklearn.isotonic import IsotonicRegression
@@ -223,12 +253,16 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
     champion_ok=bool(runtime_ok and champion_auc is not None and champion_auc>=float(os.getenv('EXECUTION_ML_CHAMPION_MIN_AUC','0.60')) and champion_auc>=(champion_baseline_auc or .5)+float(os.getenv('EXECUTION_ML_CHAMPION_MIN_AUC_GAIN','0.025')) and champion_brier is not None and champion_brier<=float(os.getenv('EXECUTION_ML_CHAMPION_MAX_BRIER','0.24')) and (champion_baseline_brier is None or champion_brier<champion_baseline_brier) and (champion_base_rate_brier is None or champion_brier<champion_base_rate_brier) and champion_precision20 is not None and champion_precision20 >= (champion_baseline_precision20 or 0)+float(os.getenv('EXECUTION_ML_CHAMPION_MIN_PRECISION20_GAIN','0.05')))
     reg=None; reg_metrics={}; return_ok=False
     if task=='outcome':
-        target=[float(r.get('net_return_pct') or 0) for r in tr]; actual=[float(r.get('net_return_pct') or 0) for r in se]; actual_ch=[float(r.get('net_return_pct') or 0) for r in ch]
+        raw_target=[float(r.get('net_return_pct') or 0) for r in tr]; target,wlo,whi=_winsor(raw_target); actual=[float(r.get('net_return_pct') or 0) for r in se]; actual_ch=[float(r.get('net_return_pct') or 0) for r in ch]
         reg=_regressor(seed+100); reg.fit(X,target,sample_weight=sw); rp=[float(v) for v in reg.predict(Xs)]; rph=[float(v) for v in reg.predict(Xh)]
-        mae=_mae(actual,rp); baseline_value=sum(target)/len(target); base_mae=_mae(actual,[baseline_value]*len(actual)); rho=_spearman(rp,actual)
-        sign=sum((a>0)==(p>0) for a,p in zip(actual,rp))/len(actual); ch_mae=_mae(actual_ch,rph); ch_rho=_spearman(rph,actual_ch); ch_sign=sum((a>0)==(p>0) for a,p in zip(actual_ch,rph))/len(actual_ch); ch_pf=_profit_factor([a for a,p in zip(actual_ch,rph) if p>0])
-        return_ok=bool(mae is not None and base_mae is not None and mae<base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')) and (rho or -1)>=float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')) and sign>=float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')) and (ch_rho or -1)>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')) and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')))
-        reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok}
+        # MAE is evaluated on the same robust scale used for fitting, while economic gates use real net returns.
+        robust_actual=[max(wlo,min(whi,v)) for v in actual]; robust_ch=[max(wlo,min(whi,v)) for v in actual_ch]
+        mae=_mae(robust_actual,rp); baseline_value=sum(target)/len(target); base_mae=_mae(robust_actual,[baseline_value]*len(robust_actual)); rho=_spearman(rp,actual)
+        sign=sum((a>0)==(p>0) for a,p in zip(actual,rp))/len(actual); ch_mae=_mae(robust_ch,rph); ch_rho=_spearman(rph,actual_ch); ch_sign=sum((a>0)==(p>0) for a,p in zip(actual_ch,rph))/len(actual_ch)
+        utility=_utility_threshold(rp,actual); utility_threshold=(utility or {}).get('threshold',0.0); ch_selected=[a for a,p in zip(actual_ch,rph) if p>=utility_threshold]; ch_pf=_profit_factor(ch_selected); ch_exp=sum(ch_selected)/len(ch_selected) if ch_selected else None
+        utility_ok=bool(utility and utility.get('expectancy',0)>float(os.getenv('EXECUTION_RETURN_MIN_EXPECTANCY','0')) and utility.get('profit_factor',0)>=float(os.getenv('EXECUTION_RETURN_SELECTION_MIN_PF','1.05')) and len(ch_selected)>=max(10,int(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_TRADES','20'))) and (ch_exp or 0)>float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_EXPECTANCY','0')))
+        return_ok=bool(mae is not None and base_mae is not None and mae<base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')) and (rho or -1)>=float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')) and sign>=float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')) and (ch_rho or -1)>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')) and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')) and utility_ok)
+        reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok,'return_winsor_low':wlo,'return_winsor_high':whi,'utility_threshold':utility_threshold,'selection_utility_pf':(utility or {}).get('profit_factor'),'selection_utility_expectancy':(utility or {}).get('expectancy'),'selection_utility_trades':(utility or {}).get('trades',0),'champion_utility_expectancy':ch_exp,'champion_utility_trades':len(ch_selected),'utility_ok':utility_ok}
         champion_ok=bool(champion_ok and return_ok)
     gate_failures=_gate_failures(auc=auc,brier=brier,baseline_auc=bauc,baseline_brier=bbrier,base_rate_brier=base_rate_brier,champion_auc=champion_auc,champion_brier=champion_brier,champion_precision20=champion_precision20,champion_baseline_auc=champion_baseline_auc,champion_baseline_brier=champion_baseline_brier,champion_base_rate_brier=champion_base_rate_brier,champion_baseline_precision20=champion_baseline_precision20,reg_metrics=reg_metrics if task=='outcome' else None)
     return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,'gate_failures':gate_failures,**reg_metrics}, None
@@ -280,7 +314,7 @@ def _compact_model_summary(models):
             for reason in (m.get('gate_failures') or {}).get('runtime',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
             for reason in (m.get('gate_failures') or {}).get('champion',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
         def slim(m):
-            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','return_runtime_ok','champion_ok','gate_failures')}
+            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','utility_threshold','selection_utility_pf','selection_utility_expectancy','selection_utility_trades','champion_utility_expectancy','champion_utility_trades','utility_ok','return_runtime_ok','champion_ok','gate_failures')}
         top_selection=sorted(outcome,key=lambda m:(m.get('auc') is not None,m.get('auc') or -1),reverse=True)[:3]
         top_champion=sorted(outcome,key=lambda m:(m.get('champion_auc') is not None,m.get('champion_auc') or -1),reverse=True)[:3]
         out[key]={'trained_fill':len(g.get('fill') or []),'trained_outcome':len(outcome),'healthy_outcome':sum(bool(m.get('runtime_ok')) for m in outcome),'champion_outcome':sum(bool(m.get('champion_ok')) for m in outcome),'top_selection':[slim(m) for m in top_selection],'top_champion':[slim(m) for m in top_champion],'pretrain_rejections':len(g.get('rejections') or [])}
@@ -315,7 +349,7 @@ def train(trigger='manual'):
     champions=[m for g in models.values() for m in g['outcome'] if m.get('champion_ok')]
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','2')))
     status='champion' if len(champions)>=min_champ else 'shadow'
-    bundle={'schema':57,'version':'execution-ensemble-v57.2-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':58,'version':'execution-ensemble-v58-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}

@@ -190,3 +190,22 @@ def test_v57_2_compact_summary_keeps_top_models_and_failure_counts():
     assert summary['GLOBAL']['top_selection'][0]['auc']==0.70
     assert summary['GLOBAL']['top_champion'][0]['champion_auc']==0.65
     assert failures['champion_auc_below_floor']==1
+
+def test_v58_robust_winsor_clips_return_outlier(monkeypatch):
+    import execution_model_v57 as m
+    monkeypatch.setenv('EXECUTION_RETURN_WINSOR_LOW','0.05')
+    monkeypatch.setenv('EXECUTION_RETURN_WINSOR_HIGH','0.95')
+    vals,lo,hi=m._winsor([-100,-2,-1,0,1,2,100])
+    assert min(vals) >= lo and max(vals) <= hi
+    assert vals[0] > -100 and vals[-1] < 100
+
+def test_v58_utility_threshold_uses_profitable_selection(monkeypatch):
+    import execution_model_v57 as m
+    monkeypatch.setenv('EXECUTION_RETURN_MIN_UTILITY_TRADES','10')
+    pred=list(range(20))
+    actual=[-2.0]*10+[1.0]*10
+    u=m._utility_threshold(pred,actual)
+    assert u is not None
+    assert u['trades'] >= 10
+    assert u['expectancy'] > 0
+    assert u['profit_factor'] > 1
