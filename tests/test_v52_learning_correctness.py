@@ -3,7 +3,7 @@ import types
 
 def test_v52_version():
     from pathlib import Path
-    assert Path('VERSION').read_text().strip() in {'52.0.0','53.0.0','54.0.0','55.0.0','56.0.0','57.0.0','57.1.0','57.2.0','58.0.0','58.1.0'}
+    assert Path('VERSION').read_text().strip() in {'52.0.0','53.0.0','54.0.0','55.0.0','56.0.0','57.0.0','57.1.0','57.2.0','58.0.0','58.1.0','58.2.0'}
 
 
 def test_final_gate_uses_post_model_probability(monkeypatch):

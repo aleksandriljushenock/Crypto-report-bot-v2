@@ -1,0 +1,4 @@
+VERSION 58.2.0
+pytest: 280 passed
+compileall: PASS
+Focus: joint P(profit)+expected-return selector; anchored walk-forward; fail-closed worst-fold diagnostics

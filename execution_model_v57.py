@@ -190,17 +190,26 @@ def _winsor(values):
     lo=_quantile(values,float(os.getenv('EXECUTION_RETURN_WINSOR_LOW','0.05'))); hi=_quantile(values,float(os.getenv('EXECUTION_RETURN_WINSOR_HIGH','0.95')))
     return [max(lo,min(hi,float(v))) for v in values],lo,hi
 
-def _utility_threshold(pred,actual):
-    # Chosen on selection only. Champion/OOS is never used to tune this threshold.
+def _utility_threshold(pred,actual,profit_prob=None):
+    """Choose a joint profitability selector on SELECTION only.
+
+    V58.2 requires agreement between the return model and the profit classifier.
+    Champion and walk-forward data never tune either threshold.
+    """
     min_trades=max(10,int(os.getenv('EXECUTION_RETURN_MIN_UTILITY_TRADES','20')))
-    candidates=sorted(set([0.0]+[_quantile(pred,q) for q in (.50,.60,.70,.80,.85,.90)]))
+    ret_candidates=sorted(set([0.0]+[_quantile(pred,q) for q in (.50,.60,.70,.80,.85,.90)]))
+    probs=list(profit_prob or [])
+    prob_candidates=[0.0] if not probs else sorted(set([0.0]+[_quantile(probs,q) for q in (.40,.50,.60,.70,.80)]))
     best=None
-    for t in candidates:
-        vals=[float(a) for a,p in zip(actual,pred) if float(p)>=t]
+    for t in ret_candidates:
+      for pt in prob_candidates:
+        vals=[float(a) for i,(a,p) in enumerate(zip(actual,pred)) if float(p)>=t and (not probs or float(probs[i])>=pt)]
         if len(vals)<min_trades:continue
         pf=_profit_factor(vals); exp=sum(vals)/len(vals); downside=abs(sum(v for v in vals if v<0))/len(vals)
-        score=exp-0.15*downside+0.02*min(pf,5.0)
-        row={'threshold':float(t),'trades':len(vals),'profit_factor':pf,'expectancy':exp,'score':score}
+        wr=sum(v>0 for v in vals)/len(vals)
+        # Economic objective: expectancy dominates; PF/WR reward consistency and downside is penalized.
+        score=exp-0.25*downside+0.03*min(pf,5.0)+0.05*wr
+        row={'threshold':float(t),'probability_threshold':float(pt),'trades':len(vals),'profit_factor':pf,'expectancy':exp,'win_rate':wr,'score':score}
         if best is None or row['score']>best['score']:best=row
     return best
 
@@ -211,37 +220,51 @@ def _economic_stats(values):
     import statistics
     return {'trades':len(vals),'profit_factor':_profit_factor(vals),'expectancy':sum(vals)/len(vals),'win_rate':sum(v>0 for v in vals)/len(vals),'median':statistics.median(vals),'max_loss':min(vals)}
 
-def _walk_forward_utility(rows, feature_indices, family, seed, threshold, min_train=240):
-    """Anchored walk-forward check for economic stability.
 
-    The trading threshold is frozen before these folds. Each fold refits only on
-    observations strictly before the test block. No test fold tunes its threshold.
+def _walk_forward_utility(rows, feature_indices, family, seed, threshold, probability_threshold=0.0, min_train=240):
+    """Anchored walk-forward profitability check with classifier+return agreement.
+
+    Each fold refits both models using only past observations. Classifier calibration
+    uses the last 15% of that fold's training history; the test block remains untouched.
     """
+    from sklearn.isotonic import IsotonicRegression
     usable=[r for r in rows if str(r.get('entry_status') or '').lower()=='filled' and not bool(r.get('ambiguous_same_candle')) and str(r.get('outcome') or '').upper() not in {'','UNRESOLVED','AMBIGUOUS','OPEN'} and r.get('net_return_pct') is not None]
     n=len(usable); folds=max(2,int(os.getenv('EXECUTION_WF_FOLDS','3'))); test_frac=float(os.getenv('EXECUTION_WF_TEST_FRACTION','0.10'))
     test_size=max(30,int(n*test_frac)); need=min_train+folds*test_size
     if n<need:return {'ok':False,'reason':'walk_forward_insufficient_rows','folds':[],'rows':n,'required':need}
     start=n-folds*test_size; out=[]
     for j in range(folds):
-        cut=start+j*test_size; tr=usable[:cut]; te=usable[cut:cut+test_size]
-        X=[[extract(r)[i] for i in feature_indices] for r in tr]; Xt=[[extract(r)[i] for i in feature_indices] for r in te]
-        y=[float(r.get('net_return_pct') or 0) for r in tr]; target,wlo,whi=_winsor(y); sw=_weights(tr)
+        cut=start+j*test_size; history=usable[:cut]; te=usable[cut:cut+test_size]
+        cal_n=max(20,int(len(history)*.15)); fit_rows=history[:-cal_n]; cal_rows=history[-cal_n:]
+        if len(fit_rows)<min_train:
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'train_too_small'}); continue
+        X=[[extract(r)[i] for i in feature_indices] for r in fit_rows]; Xc=[[extract(r)[i] for i in feature_indices] for r in cal_rows]; Xt=[[extract(r)[i] for i in feature_indices] for r in te]
+        y=[float(r.get('net_return_pct') or 0) for r in fit_rows]; target,wlo,whi=_winsor(y); sw=_weights(fit_rows)
         reg=_regressor(seed+700+j)
         try:reg.fit(X,target,sample_weight=sw)
         except TypeError:reg.fit(X,target)
-        pred=[float(v) for v in reg.predict(Xt)]; actual=[float(r.get('net_return_pct') or 0) for r in te]
-        selected=[a for a,p in zip(actual,pred) if p>=float(threshold)]
-        st=_economic_stats(selected); st.update({'fold':j+1,'test_rows':len(te)})
+        clf=_family(family,seed+1700+j); labels=[1 if v>0 else 0 for v in y]
+        try:clf.fit(X,labels,sample_weight=sw)
+        except TypeError:clf.fit(X,labels)
+        cal=None; cal_y=[1 if float(r.get('net_return_pct') or 0)>0 else 0 for r in cal_rows]
+        if len(set(cal_y))>1:
+            try:
+                cal_raw=[float(v[1]) for v in clf.predict_proba(Xc)]; cal=IsotonicRegression(out_of_bounds='clip').fit(cal_raw,cal_y)
+            except Exception:cal=None
+        pred=[float(v) for v in reg.predict(Xt)]; raw_prob=[float(v[1]) for v in clf.predict_proba(Xt)]; probs=[float(v) for v in cal.predict(raw_prob)] if cal is not None else raw_prob
+        actual=[float(r.get('net_return_pct') or 0) for r in te]
+        selected=[a for a,p,pp in zip(actual,pred,probs) if p>=float(threshold) and pp>=float(probability_threshold)]
+        st=_economic_stats(selected); st.update({'fold':j+1,'test_rows':len(te),'probability_threshold':float(probability_threshold)})
         out.append(st)
     valid=[x for x in out if x['trades']>=max(10,int(os.getenv('EXECUTION_WF_MIN_TRADES_PER_FOLD','15')))]
     min_positive=max(1,int(os.getenv('EXECUTION_WF_MIN_POSITIVE_FOLDS','2'))); min_pf=float(os.getenv('EXECUTION_WF_MIN_PF','1.05')); min_exp=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY','0'))
     positive=sum((x.get('profit_factor') or 0)>=min_pf and (x.get('expectancy') or 0)>min_exp for x in valid)
-    combined=[]
-    for x in out:
-        # stats only are retained; combined profitability is represented conservatively by fold minima/medians.
-        pass
-    ok=len(valid)>=min_positive and positive>=min_positive and min((x.get('expectancy') or -999) for x in valid)>min_exp
-    return {'ok':ok,'reason':'ok' if ok else 'walk_forward_profitability_failed','folds':out,'valid_folds':len(valid),'positive_folds':positive,'min_positive_folds':min_positive}
+    # Fail closed: every valid fold must have positive expectancy; no averaging away a bad regime.
+    all_positive=bool(valid) and all((x.get('expectancy') is not None and x.get('expectancy')>min_exp) for x in valid)
+    ok=len(valid)>=min_positive and positive>=min_positive and all_positive
+    worst_exp=min((x.get('expectancy') for x in valid if x.get('expectancy') is not None),default=None)
+    worst_pf=min((x.get('profit_factor') for x in valid),default=None)
+    return {'ok':ok,'reason':'ok' if ok else 'walk_forward_profitability_failed','folds':out,'valid_folds':len(valid),'positive_folds':positive,'min_positive_folds':min_positive,'worst_expectancy':worst_exp,'worst_profit_factor':worst_pf}
 
 def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
     from sklearn.isotonic import IsotonicRegression
@@ -300,18 +323,18 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         robust_actual=[max(wlo,min(whi,v)) for v in actual]; robust_ch=[max(wlo,min(whi,v)) for v in actual_ch]
         mae=_mae(robust_actual,rp); baseline_value=sum(target)/len(target); base_mae=_mae(robust_actual,[baseline_value]*len(robust_actual)); rho=_spearman(rp,actual)
         sign=sum((a>0)==(p>0) for a,p in zip(actual,rp))/len(actual); ch_mae=_mae(robust_ch,rph); ch_rho=_spearman(rph,actual_ch); ch_sign=sum((a>0)==(p>0) for a,p in zip(actual_ch,rph))/len(actual_ch)
-        utility=_utility_threshold(rp,actual); utility_threshold=(utility or {}).get('threshold',0.0); ch_selected=[a for a,p in zip(actual_ch,rph) if p>=utility_threshold]; ch_pf=_profit_factor(ch_selected); ch_exp=sum(ch_selected)/len(ch_selected) if ch_selected else None
+        utility=_utility_threshold(rp,actual,pred); utility_threshold=(utility or {}).get('threshold',0.0); utility_probability_threshold=(utility or {}).get('probability_threshold',0.0); ch_selected=[a for a,p,pp in zip(actual_ch,rph,predh) if p>=utility_threshold and pp>=utility_probability_threshold]; ch_pf=_profit_factor(ch_selected); ch_exp=sum(ch_selected)/len(ch_selected) if ch_selected else None
         utility_ok=bool(utility and utility.get('expectancy',0)>float(os.getenv('EXECUTION_RETURN_MIN_EXPECTANCY','0')) and utility.get('profit_factor',0)>=float(os.getenv('EXECUTION_RETURN_SELECTION_MIN_PF','1.05')) and len(ch_selected)>=max(10,int(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_TRADES','20'))) and (ch_exp or 0)>float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_EXPECTANCY','0')))
         # Walk-forward is deliberately restricted to the specialist that has demonstrated economic edge.
         # GLOBAL/PULLBACK stay fail-closed even if an isolated split looks attractive.
         allow_economic=(specialist_key(usable[-1])=='BREAKOUT|LONG') if usable else False
-        wf=_walk_forward_utility(usable,indices,family,seed,utility_threshold) if utility_ok and allow_economic else {'ok':False,'reason':'specialist_not_enabled' if utility_ok else 'utility_not_ready','folds':[]}
+        wf=_walk_forward_utility(usable,indices,family,seed,utility_threshold,utility_probability_threshold) if utility_ok and allow_economic else {'ok':False,'reason':'specialist_not_enabled' if utility_ok else 'utility_not_ready','folds':[]}
         # V58.1: economic evidence can validate the return selector even when point-regression MAE/rank is mediocre.
         # Classification gates remain mandatory; this does not promote weak classifiers.
         economic_return_ok=bool(utility_ok and wf.get('ok') and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')))
         legacy_return_ok=bool(mae is not None and base_mae is not None and mae<base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')) and (rho or -1)>=float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')) and sign>=float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')) and (ch_rho or -1)>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')) and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')) and utility_ok)
         return_ok=bool(legacy_return_ok or economic_return_ok)
-        reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok,'return_winsor_low':wlo,'return_winsor_high':whi,'utility_threshold':utility_threshold,'selection_utility_pf':(utility or {}).get('profit_factor'),'selection_utility_expectancy':(utility or {}).get('expectancy'),'selection_utility_trades':(utility or {}).get('trades',0),'champion_utility_expectancy':ch_exp,'champion_utility_trades':len(ch_selected),'utility_ok':utility_ok,'walk_forward_ok':bool(wf.get('ok')),'walk_forward_reason':wf.get('reason'),'walk_forward_valid_folds':wf.get('valid_folds',0),'walk_forward_positive_folds':wf.get('positive_folds',0),'walk_forward_folds':wf.get('folds',[]),'economic_return_ok':economic_return_ok,'legacy_return_ok':legacy_return_ok}
+        reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok,'return_winsor_low':wlo,'return_winsor_high':whi,'utility_threshold':utility_threshold,'utility_probability_threshold':utility_probability_threshold,'selection_utility_pf':(utility or {}).get('profit_factor'),'selection_utility_expectancy':(utility or {}).get('expectancy'),'selection_utility_trades':(utility or {}).get('trades',0),'champion_utility_expectancy':ch_exp,'champion_utility_trades':len(ch_selected),'utility_ok':utility_ok,'walk_forward_ok':bool(wf.get('ok')),'walk_forward_reason':wf.get('reason'),'walk_forward_valid_folds':wf.get('valid_folds',0),'walk_forward_positive_folds':wf.get('positive_folds',0),'walk_forward_worst_expectancy':wf.get('worst_expectancy'),'walk_forward_worst_profit_factor':wf.get('worst_profit_factor'),'walk_forward_folds':wf.get('folds',[]),'economic_return_ok':economic_return_ok,'legacy_return_ok':legacy_return_ok}
         champion_ok=bool(champion_ok and return_ok)
     gate_failures=_gate_failures(auc=auc,brier=brier,baseline_auc=bauc,baseline_brier=bbrier,base_rate_brier=base_rate_brier,champion_auc=champion_auc,champion_brier=champion_brier,champion_precision20=champion_precision20,champion_baseline_auc=champion_baseline_auc,champion_baseline_brier=champion_baseline_brier,champion_base_rate_brier=champion_base_rate_brier,champion_baseline_precision20=champion_baseline_precision20,reg_metrics=reg_metrics if task=='outcome' else None)
     return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,'gate_failures':gate_failures,**reg_metrics}, None
@@ -363,7 +386,7 @@ def _compact_model_summary(models):
             for reason in (m.get('gate_failures') or {}).get('runtime',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
             for reason in (m.get('gate_failures') or {}).get('champion',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
         def slim(m):
-            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','utility_threshold','selection_utility_pf','selection_utility_expectancy','selection_utility_trades','champion_utility_expectancy','champion_utility_trades','utility_ok','walk_forward_ok','walk_forward_reason','walk_forward_valid_folds','walk_forward_positive_folds','economic_return_ok','legacy_return_ok','return_runtime_ok','champion_ok','gate_failures')}
+            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','utility_threshold','utility_probability_threshold','selection_utility_pf','selection_utility_expectancy','selection_utility_trades','champion_utility_expectancy','champion_utility_trades','utility_ok','walk_forward_ok','walk_forward_reason','walk_forward_valid_folds','walk_forward_positive_folds','walk_forward_worst_expectancy','walk_forward_worst_profit_factor','walk_forward_folds','economic_return_ok','legacy_return_ok','return_runtime_ok','champion_ok','gate_failures')}
         top_selection=sorted(outcome,key=lambda m:(m.get('auc') is not None,m.get('auc') or -1),reverse=True)[:3]
         top_champion=sorted(outcome,key=lambda m:(m.get('champion_auc') is not None,m.get('champion_auc') or -1),reverse=True)[:3]
         out[key]={'trained_fill':len(g.get('fill') or []),'trained_outcome':len(outcome),'healthy_outcome':sum(bool(m.get('runtime_ok')) for m in outcome),'champion_outcome':sum(bool(m.get('champion_ok')) for m in outcome),'top_selection':[slim(m) for m in top_selection],'top_champion':[slim(m) for m in top_champion],'pretrain_rejections':len(g.get('rejections') or [])}
@@ -399,7 +422,7 @@ def train(trigger='manual'):
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','1')))
     breakout_champions=[m for m in (models.get('BREAKOUT|LONG') or {}).get('outcome',[]) if m.get('champion_ok')]
     status='champion' if len(breakout_champions)>=min_champ else 'shadow'
-    bundle={'schema':581,'version':'execution-ensemble-v58.1-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':582,'version':'execution-ensemble-v58.2-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}
