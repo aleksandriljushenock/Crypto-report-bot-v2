@@ -1,0 +1,6 @@
+Crypto-report-bot v58.4.0
+Build: Regime Meta-Labeling + Bad-Regime Veto + Drawdown Gates
+pytest: 288 passed
+compileall: PASS
+Production .env: not included
+Dataset schema/backfill: unchanged; backfill not required

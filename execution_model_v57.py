@@ -217,7 +217,8 @@ def _fit_regime_model(fit_rows, cal_rows, seed):
     from sklearn.isotonic import IsotonicRegression
     if len(fit_rows)<80:
         return None,None
-    y=[1 if float(r.get('net_return_pct') or 0)>0 else 0 for r in fit_rows]
+    edge=float(os.getenv('EXECUTION_REGIME_MIN_PROFIT_PCT','0.10'))
+    y=[1 if float(r.get('net_return_pct') or 0)>edge else 0 for r in fit_rows]
     if len(set(y))<2:
         return None,None
     X=[_regime_vector(r) for r in fit_rows]
@@ -235,7 +236,7 @@ def _fit_regime_model(fit_rows, cal_rows, seed):
         model.fit(X,y)
     cal=None
     if cal_rows:
-        cy=[1 if float(r.get('net_return_pct') or 0)>0 else 0 for r in cal_rows]
+        cy=[1 if float(r.get('net_return_pct') or 0)>edge else 0 for r in cal_rows]
         if len(set(cy))>1:
             try:
                 raw=[float(v[1]) for v in model.predict_proba([_regime_vector(r) for r in cal_rows])]
@@ -331,7 +332,7 @@ def _economic_stats(values):
     }
 
 
-def _utility_threshold(pred,actual,profit_prob=None,regime_prob=None,ood_scores=None,ood_threshold=None):
+def _utility_threshold(pred,actual,profit_prob=None,regime_prob=None,ood_scores=None,ood_threshold=None,require_regime=False):
     """Tune return/alpha/regime TRADE-SKIP thresholds on a selection slice only."""
     min_trades=max(10,int(os.getenv('EXECUTION_RETURN_MIN_UTILITY_TRADES','20')))
     ret_candidates=sorted(set([0.0]+[_quantile(pred,q) for q in (.50,.60,.70,.80,.85,.90)]))
@@ -339,12 +340,17 @@ def _utility_threshold(pred,actual,profit_prob=None,regime_prob=None,ood_scores=
     regimes=list(regime_prob or [])
     ods=list(ood_scores or [])
     prob_candidates=[0.0] if not probs else sorted(set([0.0]+[_quantile(probs,q) for q in (.40,.50,.60,.70,.80)]))
-    regime_candidates=[0.0] if not regimes else sorted(set([0.0]+[_quantile(regimes,q) for q in (.35,.45,.55,.65,.75)]))
-    ot=float(ood_threshold) if ood_threshold is not None else float('inf')
+    regime_floor=float(os.getenv('EXECUTION_REGIME_MIN_PROBABILITY','0.45')) if require_regime and regimes else 0.0
+    regime_candidates=[0.0] if not regimes else sorted(set(([regime_floor] if require_regime else [0.0])+[max(regime_floor,_quantile(regimes,q)) for q in (.35,.45,.55,.65,.75)]))
+    base_ot=float(ood_threshold) if ood_threshold is not None else float('inf')
+    ood_candidates=[base_ot]
+    if ods:
+        ood_candidates=sorted(set([min(base_ot,_quantile(ods,q)) for q in (.80,.90,.95)]+[base_ot]))
     best=None
     for t in ret_candidates:
         for pt in prob_candidates:
             for rt in regime_candidates:
+              for ot in ood_candidates:
                 vals=[]
                 for i,(a,p) in enumerate(zip(actual,pred)):
                     if float(p)<t:
@@ -445,9 +451,14 @@ def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, pr
         sreg=_regime_probs(regime_model,regime_cal,sel_rows)
         sood=_ood_scores(ood,sel_rows)
         sactual=[float(r.get('net_return_pct') or 0) for r in sel_rows]
-        tuned=_utility_threshold(spred,sactual,sprob,sreg,sood,(ood or {}).get('threshold'))
+        tuned=_utility_threshold(spred,sactual,sprob,sreg,sood,(ood or {}).get('threshold'),require_regime=regime_model is not None)
         if not tuned:
             out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'inner_utility_unavailable'})
+            continue
+        inner_min_pf=float(os.getenv('EXECUTION_WF_INNER_MIN_PF','1.05'))
+        inner_min_exp=float(os.getenv('EXECUTION_WF_INNER_MIN_EXPECTANCY','0.0'))
+        if (tuned.get('profit_factor') or 0)<inner_min_pf or (tuned.get('expectancy') is None or tuned.get('expectancy')<=inner_min_exp):
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'inner_profitability_veto','inner_selection_trades':tuned.get('trades',0),'inner_selection_pf':tuned.get('profit_factor'),'inner_selection_expectancy':tuned.get('expectancy'),'regime_probability_threshold':tuned.get('regime_probability_threshold'),'ood_threshold':tuned.get('ood_threshold')})
             continue
         pred=[float(v) for v in reg.predict(Xt)]
         probs=alpha_prob(Xt)
@@ -492,7 +503,10 @@ def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, pr
     ci_lo,ci_hi=_bootstrap_expectancy_ci(pooled,seed+9000)
     min_ci=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY_CI_LOW','0.0'))
     pooled_stats=_economic_stats(pooled)
+    min_agg_pf=float(os.getenv('EXECUTION_WF_MIN_AGGREGATE_PF','1.15'))
+    max_dd=float(os.getenv('EXECUTION_WF_MAX_AGGREGATE_DRAWDOWN','25.0'))
     ok=(len(valid)>=min_positive and positive>=min_positive and not bad and len(pooled)>=total_min and
+        pooled_stats['profit_factor']>=min_agg_pf and pooled_stats['max_drawdown']<=max_dd and
         ci_lo is not None and ci_lo>min_ci)
     worst_exp=min((x.get('expectancy') for x in valid if x.get('expectancy') is not None),default=None)
     worst_pf=min((x.get('profit_factor') for x in valid),default=None)
@@ -577,7 +591,7 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         ood_profile=_ood_profile(tr)
         regime_se=_regime_probs(regime_model,regime_calibrator,se); regime_ch=_regime_probs(regime_model,regime_calibrator,ch)
         ood_se=_ood_scores(ood_profile,se); ood_ch=_ood_scores(ood_profile,ch)
-        utility=_utility_threshold(rp,actual,pred,regime_se,ood_se,(ood_profile or {}).get('threshold'))
+        utility=_utility_threshold(rp,actual,pred,regime_se,ood_se,(ood_profile or {}).get('threshold'),require_regime=regime_model is not None)
         utility_threshold=(utility or {}).get('threshold',0.0)
         utility_probability_threshold=(utility or {}).get('probability_threshold',0.0)
         regime_probability_threshold=(utility or {}).get('regime_probability_threshold',0.0)
@@ -683,7 +697,7 @@ def train(trigger='manual'):
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','1')))
     breakout_champions=[m for m in (models.get('BREAKOUT|LONG') or {}).get('outcome',[]) if m.get('champion_ok')]
     status='champion' if len(breakout_champions)>=min_champ else 'shadow'
-    bundle={'schema':583,'version':'execution-ensemble-v58.3-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':584,'version':'execution-ensemble-v58.4-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}
