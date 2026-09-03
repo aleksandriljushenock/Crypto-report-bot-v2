@@ -386,12 +386,45 @@ def _utility_threshold(pred,actual,profit_prob=None,regime_prob=None,ood_scores=
     return best
 
 
-def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, probability_threshold=0.0, min_train=240):
-    """Nested anchored walk-forward with regime meta-model, OOD veto and abstention.
+def _wf_purge_history(history, test_rows):
+    """Remove observations whose realized outcome overlaps the future test block."""
+    if not history or not test_rows:
+        return history,0,None
+    boundary=_dt(test_rows[0].get('signal_created_at'))
+    if boundary is None:
+        return history,0,None
+    embargo=max(0.0,float(os.getenv('EXECUTION_WF_EMBARGO_HOURS','1')))
+    limit=boundary-timedelta(hours=embargo)
+    kept=[]
+    for r in history:
+        end=_dt(r.get('exit_at')) or _dt(r.get('signal_created_at'))
+        if end is not None and end < limit:
+            kept.append(r)
+    return kept,len(history)-len(kept),embargo
 
-    Every fold refits models on the past and tunes thresholds only on an inner
-    historical selection slice. The fold test block stays fully untouched.
-    """
+
+def _adaptive_inner_plan(history, min_train):
+    """Chronology-safe candidate plans, from recent to broader historical evidence."""
+    n=len(history)
+    min_sel=max(30,int(os.getenv('EXECUTION_WF_INNER_MIN_ROWS','60')))
+    min_cal=max(20,int(os.getenv('EXECUTION_WF_CAL_MIN_ROWS','30')))
+    plans=[]
+    for frac in (.15,.20,.25,.30,.35,.40):
+        sel=max(min_sel,int(n*frac))
+        cal=max(min_cal,int(n*.10))
+        if n-sel-cal>=min_train:
+            plans.append((sel,cal,'recent_'+str(int(frac*100))))
+    # Deduplicate identical sizes while preserving recency preference.
+    out=[]; seen=set()
+    for x in plans:
+        key=x[:2]
+        if key not in seen:
+            seen.add(key); out.append(x)
+    return out
+
+
+def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, probability_threshold=0.0, min_train=240):
+    """Purged nested anchored WF with adaptive historical evidence and explicit NO_EVIDENCE."""
     from sklearn.isotonic import IsotonicRegression
     usable=[r for r in rows if str(r.get('entry_status') or '').lower()=='filled' and not bool(r.get('ambiguous_same_candle')) and str(r.get('outcome') or '').upper() not in {'','UNRESOLVED','AMBIGUOUS','OPEN'} and r.get('net_return_pct') is not None]
     n=len(usable)
@@ -405,129 +438,78 @@ def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, pr
     out=[]; pooled=[]
     for j in range(folds):
         cut=start+j*test_size
-        history=usable[:cut]
+        raw_history=usable[:cut]
         te=usable[cut:cut+test_size]
-        inner=max(20,int(len(history)*.15))
-        cal_n=max(20,int(len(history)*.15))
-        if len(history)-inner-cal_n<min_train:
-            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'train_too_small'})
+        history,purged,embargo=_wf_purge_history(raw_history,te)
+        plans=_adaptive_inner_plan(history,min_train)
+        if not plans:
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'no_evidence','evidence_state':'NO_EVIDENCE','detail':'adaptive_inner_plan_unavailable','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo})
             continue
-        fit_rows=history[:-(inner+cal_n)]
-        cal_rows=history[-(inner+cal_n):-inner]
-        sel_rows=history[-inner:]
-        X=[[extract(r)[i] for i in feature_indices] for r in fit_rows]
-        Xc=[[extract(r)[i] for i in feature_indices] for r in cal_rows]
-        Xs=[[extract(r)[i] for i in feature_indices] for r in sel_rows]
+        chosen=None; diagnostics=[]
+        for plan_no,(inner,cal_n,source) in enumerate(plans):
+            fit_rows=history[:-(inner+cal_n)]; cal_rows=history[-(inner+cal_n):-inner]; sel_rows=history[-inner:]
+            X=[[extract(r)[i] for i in feature_indices] for r in fit_rows]
+            Xc=[[extract(r)[i] for i in feature_indices] for r in cal_rows]
+            Xs=[[extract(r)[i] for i in feature_indices] for r in sel_rows]
+            y=[float(r.get('net_return_pct') or 0) for r in fit_rows]
+            labels=[1 if v>0 else 0 for v in y]
+            if len(set(labels))<2:
+                diagnostics.append({'source':source,'selection_rows':inner,'calibration_rows':cal_n,'fit_rows':len(fit_rows),'reason':'alpha_single_class'})
+                continue
+            target,_,_=_winsor(y); sw=_weights(fit_rows)
+            reg=_regressor(seed+700+j)
+            try: reg.fit(X,target,sample_weight=sw)
+            except TypeError: reg.fit(X,target)
+            clf=_family(family,seed+1700+j)
+            try: clf.fit(X,labels,sample_weight=sw)
+            except TypeError: clf.fit(X,labels)
+            cal=None; cal_y=[1 if float(r.get('net_return_pct') or 0)>0 else 0 for r in cal_rows]
+            if len(set(cal_y))>1:
+                try:
+                    cal_raw=[float(v[1]) for v in clf.predict_proba(Xc)]
+                    cal=IsotonicRegression(out_of_bounds='clip').fit(cal_raw,cal_y)
+                except Exception: cal=None
+            regime_model,regime_cal=_fit_regime_model(fit_rows,cal_rows,seed+2700+j)
+            ood=_ood_profile(fit_rows)
+            raw=[float(v[1]) for v in clf.predict_proba(Xs)]
+            sprob=[float(v) for v in cal.predict(raw)] if cal is not None else raw
+            spred=[float(v) for v in reg.predict(Xs)]
+            sreg=_regime_probs(regime_model,regime_cal,sel_rows); sood=_ood_scores(ood,sel_rows)
+            sactual=[float(r.get('net_return_pct') or 0) for r in sel_rows]
+            tuned=_utility_threshold(spred,sactual,sprob,sreg,sood,(ood or {}).get('threshold'),require_regime=regime_model is not None)
+            diag={'source':source,'selection_rows':inner,'calibration_rows':cal_n,'fit_rows':len(fit_rows),'utility_available':bool(tuned)}
+            if tuned: diag.update({'trades':tuned.get('trades'),'profit_factor':tuned.get('profit_factor'),'expectancy':tuned.get('expectancy')})
+            diagnostics.append(diag)
+            if tuned:
+                chosen=(fit_rows,cal_rows,sel_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,source,inner,cal_n)
+                break
+        if chosen is None:
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'no_evidence','evidence_state':'NO_EVIDENCE','detail':'inner_utility_unavailable_after_adaptive_search','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'inner_attempts':diagnostics})
+            continue
+        fit_rows,cal_rows,sel_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,source,inner,cal_n=chosen
+        inner_min_pf=float(os.getenv('EXECUTION_WF_INNER_MIN_PF','1.05')); inner_min_exp=float(os.getenv('EXECUTION_WF_INNER_MIN_EXPECTANCY','0.0'))
+        if (tuned.get('profit_factor') or 0)<inner_min_pf or tuned.get('expectancy') is None or tuned.get('expectancy')<=inner_min_exp:
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'inner_profitability_veto','evidence_state':'BAD_REGIME','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'inner_source':source,'inner_selection_rows':inner,'inner_calibration_rows':cal_n,'inner_selection_trades':tuned.get('trades',0),'inner_selection_pf':tuned.get('profit_factor'),'inner_selection_expectancy':tuned.get('expectancy'),'regime_probability_threshold':tuned.get('regime_probability_threshold'),'ood_threshold':tuned.get('ood_threshold'),'inner_attempts':diagnostics})
+            continue
         Xt=[[extract(r)[i] for i in feature_indices] for r in te]
-        y=[float(r.get('net_return_pct') or 0) for r in fit_rows]
-        target,_,_=_winsor(y)
-        sw=_weights(fit_rows)
-        reg=_regressor(seed+700+j)
-        try:
-            reg.fit(X,target,sample_weight=sw)
-        except TypeError:
-            reg.fit(X,target)
-        clf=_family(family,seed+1700+j)
-        labels=[1 if v>0 else 0 for v in y]
-        try:
-            clf.fit(X,labels,sample_weight=sw)
-        except TypeError:
-            clf.fit(X,labels)
-        cal=None
-        cal_y=[1 if float(r.get('net_return_pct') or 0)>0 else 0 for r in cal_rows]
-        if len(set(cal_y))>1:
-            try:
-                cal_raw=[float(v[1]) for v in clf.predict_proba(Xc)]
-                cal=IsotonicRegression(out_of_bounds='clip').fit(cal_raw,cal_y)
-            except Exception:
-                cal=None
-        regime_model,regime_cal=_fit_regime_model(fit_rows,cal_rows,seed+2700+j)
-        ood=_ood_profile(fit_rows)
-        def alpha_prob(Xz):
-            raw=[float(v[1]) for v in clf.predict_proba(Xz)]
-            return [float(v) for v in cal.predict(raw)] if cal is not None else raw
-        spred=[float(v) for v in reg.predict(Xs)]
-        sprob=alpha_prob(Xs)
-        sreg=_regime_probs(regime_model,regime_cal,sel_rows)
-        sood=_ood_scores(ood,sel_rows)
-        sactual=[float(r.get('net_return_pct') or 0) for r in sel_rows]
-        tuned=_utility_threshold(spred,sactual,sprob,sreg,sood,(ood or {}).get('threshold'),require_regime=regime_model is not None)
-        if not tuned:
-            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'inner_utility_unavailable'})
-            continue
-        inner_min_pf=float(os.getenv('EXECUTION_WF_INNER_MIN_PF','1.05'))
-        inner_min_exp=float(os.getenv('EXECUTION_WF_INNER_MIN_EXPECTANCY','0.0'))
-        if (tuned.get('profit_factor') or 0)<inner_min_pf or (tuned.get('expectancy') is None or tuned.get('expectancy')<=inner_min_exp):
-            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'inner_profitability_veto','inner_selection_trades':tuned.get('trades',0),'inner_selection_pf':tuned.get('profit_factor'),'inner_selection_expectancy':tuned.get('expectancy'),'regime_probability_threshold':tuned.get('regime_probability_threshold'),'ood_threshold':tuned.get('ood_threshold')})
-            continue
         pred=[float(v) for v in reg.predict(Xt)]
-        probs=alpha_prob(Xt)
-        rprob=_regime_probs(regime_model,regime_cal,te)
-        oscore=_ood_scores(ood,te)
-        actual=[float(r.get('net_return_pct') or 0) for r in te]
+        raw=[float(v[1]) for v in clf.predict_proba(Xt)]; probs=[float(v) for v in cal.predict(raw)] if cal is not None else raw
+        rprob=_regime_probs(regime_model,regime_cal,te); oscore=_ood_scores(ood,te); actual=[float(r.get('net_return_pct') or 0) for r in te]
         stage_return=[i for i,p in enumerate(pred) if p>=tuned['threshold']]
         stage_alpha=[i for i in stage_return if probs[i]>=tuned['probability_threshold']]
         stage_regime=[i for i in stage_alpha if rprob[i]>=tuned['regime_probability_threshold']]
         stage_ood=[i for i in stage_regime if oscore[i]<=tuned['ood_threshold']]
-        selected=[actual[i] for i in stage_ood]
-        pooled.extend(selected)
-        st=_economic_stats(selected)
-        start_dt=_dt(te[0].get('signal_created_at')) if te else None
-        end_dt=_dt(te[-1].get('signal_created_at')) if te else None
-        st.update({
-            'fold':j+1,
-            'test_rows':len(te),
-            'test_start':start_dt.isoformat() if start_dt else None,
-            'test_end':end_dt.isoformat() if end_dt else None,
-            'after_return_filter':len(stage_return),
-            'after_alpha_filter':len(stage_alpha),
-            'after_regime_filter':len(stage_regime),
-            'after_ood_filter':len(stage_ood),
-            'probability_threshold':tuned['probability_threshold'],
-            'return_threshold':tuned['threshold'],
-            'regime_probability_threshold':tuned['regime_probability_threshold'],
-            'ood_threshold':tuned['ood_threshold'],
-            'inner_selection_trades':tuned['trades'],
-            'inner_selection_pf':tuned['profit_factor'],
-            'inner_selection_expectancy':tuned['expectancy'],
-        })
+        selected=[actual[i] for i in stage_ood]; pooled.extend(selected); st=_economic_stats(selected)
+        start_dt=_dt(te[0].get('signal_created_at')) if te else None; end_dt=_dt(te[-1].get('signal_created_at')) if te else None
+        st.update({'fold':j+1,'test_rows':len(te),'test_start':start_dt.isoformat() if start_dt else None,'test_end':end_dt.isoformat() if end_dt else None,'evidence_state':'TRADE','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'inner_source':source,'inner_selection_rows':inner,'inner_calibration_rows':cal_n,'after_return_filter':len(stage_return),'after_alpha_filter':len(stage_alpha),'after_regime_filter':len(stage_regime),'after_ood_filter':len(stage_ood),'probability_threshold':tuned['probability_threshold'],'return_threshold':tuned['threshold'],'regime_probability_threshold':tuned['regime_probability_threshold'],'ood_threshold':tuned['ood_threshold'],'inner_selection_trades':tuned['trades'],'inner_selection_pf':tuned['profit_factor'],'inner_selection_expectancy':tuned['expectancy'],'inner_attempts':diagnostics})
         out.append(st)
-    min_trades=max(10,int(os.getenv('EXECUTION_WF_MIN_TRADES_PER_FOLD','15')))
-    valid=[x for x in out if x['trades']>=min_trades]
-    min_positive=max(2,int(os.getenv('EXECUTION_WF_MIN_POSITIVE_FOLDS','3')))
-    min_pf=float(os.getenv('EXECUTION_WF_MIN_PF','1.05'))
-    min_exp=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY','0'))
-    positive=sum((x.get('profit_factor') or 0)>=min_pf and (x.get('expectancy') or 0)>min_exp for x in valid)
-    bad=[x for x in valid if x.get('expectancy') is None or x.get('expectancy')<=min_exp or (x.get('profit_factor') or 0)<min_pf]
-    total_min=max(30,int(os.getenv('EXECUTION_WF_MIN_TOTAL_TRADES','60')))
-    ci_lo,ci_hi=_bootstrap_expectancy_ci(pooled,seed+9000)
-    min_ci=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY_CI_LOW','0.0'))
-    pooled_stats=_economic_stats(pooled)
-    min_agg_pf=float(os.getenv('EXECUTION_WF_MIN_AGGREGATE_PF','1.15'))
-    max_dd=float(os.getenv('EXECUTION_WF_MAX_AGGREGATE_DRAWDOWN','25.0'))
-    ok=(len(valid)>=min_positive and positive>=min_positive and not bad and len(pooled)>=total_min and
-        pooled_stats['profit_factor']>=min_agg_pf and pooled_stats['max_drawdown']<=max_dd and
-        ci_lo is not None and ci_lo>min_ci)
-    worst_exp=min((x.get('expectancy') for x in valid if x.get('expectancy') is not None),default=None)
-    worst_pf=min((x.get('profit_factor') for x in valid),default=None)
-    return {
-        'ok':ok,
-        'reason':'ok' if ok else 'walk_forward_profitability_failed',
-        'folds':out,
-        'valid_folds':len(valid),
-        'positive_folds':positive,
-        'abstain_folds':sum(x['trades']<min_trades for x in out),
-        'bad_folds':len(bad),
-        'min_positive_folds':min_positive,
-        'worst_expectancy':worst_exp,
-        'worst_profit_factor':worst_pf,
-        'total_trades':len(pooled),
-        'aggregate_profit_factor':pooled_stats['profit_factor'],
-        'aggregate_expectancy':pooled_stats['expectancy'],
-        'aggregate_max_drawdown':pooled_stats['max_drawdown'],
-        'expectancy_ci_low':ci_lo,
-        'expectancy_ci_high':ci_hi,
-    }
+    min_trades=max(10,int(os.getenv('EXECUTION_WF_MIN_TRADES_PER_FOLD','15'))); valid=[x for x in out if x['trades']>=min_trades]
+    min_positive=max(2,int(os.getenv('EXECUTION_WF_MIN_POSITIVE_FOLDS','3'))); min_pf=float(os.getenv('EXECUTION_WF_MIN_PF','1.05')); min_exp=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY','0'))
+    positive=sum((x.get('profit_factor') or 0)>=min_pf and (x.get('expectancy') or 0)>min_exp for x in valid); bad=[x for x in valid if x.get('expectancy') is None or x.get('expectancy')<=min_exp or (x.get('profit_factor') or 0)<min_pf]
+    total_min=max(30,int(os.getenv('EXECUTION_WF_MIN_TOTAL_TRADES','60'))); ci_lo,ci_hi=_bootstrap_expectancy_ci(pooled,seed+9000); min_ci=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY_CI_LOW','0.0')); pooled_stats=_economic_stats(pooled)
+    min_agg_pf=float(os.getenv('EXECUTION_WF_MIN_AGGREGATE_PF','1.15')); max_dd=float(os.getenv('EXECUTION_WF_MAX_AGGREGATE_DRAWDOWN','25.0'))
+    ok=(len(valid)>=min_positive and positive>=min_positive and not bad and len(pooled)>=total_min and pooled_stats['profit_factor']>=min_agg_pf and pooled_stats['max_drawdown']<=max_dd and ci_lo is not None and ci_lo>min_ci)
+    return {'ok':ok,'reason':'ok' if ok else 'walk_forward_profitability_failed','folds':out,'valid_folds':len(valid),'positive_folds':positive,'abstain_folds':sum(x['trades']<min_trades for x in out),'no_evidence_folds':sum(x.get('evidence_state')=='NO_EVIDENCE' for x in out),'veto_folds':sum(x.get('evidence_state')=='BAD_REGIME' for x in out),'bad_folds':len(bad),'min_positive_folds':min_positive,'worst_expectancy':min((x.get('expectancy') for x in valid if x.get('expectancy') is not None),default=None),'worst_profit_factor':min((x.get('profit_factor') for x in valid),default=None),'total_trades':len(pooled),'aggregate_profit_factor':pooled_stats['profit_factor'],'aggregate_expectancy':pooled_stats['expectancy'],'aggregate_max_drawdown':pooled_stats['max_drawdown'],'expectancy_ci_low':ci_lo,'expectancy_ci_high':ci_hi}
 
 def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
     from sklearn.isotonic import IsotonicRegression
@@ -609,7 +591,7 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         economic_return_ok=bool(utility_ok and wf.get('ok') and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')))
         legacy_return_ok=bool(mae is not None and base_mae is not None and mae<base_mae*float(os.getenv('EXECUTION_RETURN_MAX_MAE_RATIO','0.95')) and (rho or -1)>=float(os.getenv('EXECUTION_RETURN_MIN_SPEARMAN','0.12')) and sign>=float(os.getenv('EXECUTION_RETURN_MIN_SIGN_ACCURACY','0.56')) and (ch_rho or -1)>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SPEARMAN','0.12')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')) and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')) and utility_ok)
         return_ok=bool(legacy_return_ok or economic_return_ok)
-        reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok,'return_winsor_low':wlo,'return_winsor_high':whi,'utility_threshold':utility_threshold,'utility_probability_threshold':utility_probability_threshold,'regime_probability_threshold':regime_probability_threshold,'ood_threshold':ood_threshold,'regime_model':regime_model,'regime_calibrator':regime_calibrator,'ood_profile':ood_profile,'selection_utility_pf':(utility or {}).get('profit_factor'),'selection_utility_expectancy':(utility or {}).get('expectancy'),'selection_utility_trades':(utility or {}).get('trades',0),'selection_utility_max_drawdown':(utility or {}).get('max_drawdown'),'champion_utility_expectancy':ch_exp,'champion_utility_trades':len(ch_selected),'utility_ok':utility_ok,'walk_forward_ok':bool(wf.get('ok')),'walk_forward_reason':wf.get('reason'),'walk_forward_valid_folds':wf.get('valid_folds',0),'walk_forward_positive_folds':wf.get('positive_folds',0),'walk_forward_abstain_folds':wf.get('abstain_folds',0),'walk_forward_bad_folds':wf.get('bad_folds',0),'walk_forward_total_trades':wf.get('total_trades',0),'walk_forward_aggregate_pf':wf.get('aggregate_profit_factor'),'walk_forward_aggregate_expectancy':wf.get('aggregate_expectancy'),'walk_forward_aggregate_max_drawdown':wf.get('aggregate_max_drawdown'),'walk_forward_expectancy_ci_low':wf.get('expectancy_ci_low'),'walk_forward_expectancy_ci_high':wf.get('expectancy_ci_high'),'walk_forward_worst_expectancy':wf.get('worst_expectancy'),'walk_forward_worst_profit_factor':wf.get('worst_profit_factor'),'walk_forward_folds':wf.get('folds',[]),'economic_return_ok':economic_return_ok,'legacy_return_ok':legacy_return_ok}
+        reg_metrics={'return_mae':mae,'baseline_return_mae':base_mae,'return_spearman':rho,'return_sign_accuracy':sign,'champion_return_mae':ch_mae,'champion_return_spearman':ch_rho,'champion_return_sign_accuracy':ch_sign,'champion_return_pf':ch_pf,'return_runtime_ok':return_ok,'return_winsor_low':wlo,'return_winsor_high':whi,'utility_threshold':utility_threshold,'utility_probability_threshold':utility_probability_threshold,'regime_probability_threshold':regime_probability_threshold,'ood_threshold':ood_threshold,'regime_model':regime_model,'regime_calibrator':regime_calibrator,'ood_profile':ood_profile,'selection_utility_pf':(utility or {}).get('profit_factor'),'selection_utility_expectancy':(utility or {}).get('expectancy'),'selection_utility_trades':(utility or {}).get('trades',0),'selection_utility_max_drawdown':(utility or {}).get('max_drawdown'),'champion_utility_expectancy':ch_exp,'champion_utility_trades':len(ch_selected),'utility_ok':utility_ok,'walk_forward_ok':bool(wf.get('ok')),'walk_forward_reason':wf.get('reason'),'walk_forward_valid_folds':wf.get('valid_folds',0),'walk_forward_positive_folds':wf.get('positive_folds',0),'walk_forward_abstain_folds':wf.get('abstain_folds',0),'walk_forward_no_evidence_folds':wf.get('no_evidence_folds',0),'walk_forward_veto_folds':wf.get('veto_folds',0),'walk_forward_bad_folds':wf.get('bad_folds',0),'walk_forward_total_trades':wf.get('total_trades',0),'walk_forward_aggregate_pf':wf.get('aggregate_profit_factor'),'walk_forward_aggregate_expectancy':wf.get('aggregate_expectancy'),'walk_forward_aggregate_max_drawdown':wf.get('aggregate_max_drawdown'),'walk_forward_expectancy_ci_low':wf.get('expectancy_ci_low'),'walk_forward_expectancy_ci_high':wf.get('expectancy_ci_high'),'walk_forward_worst_expectancy':wf.get('worst_expectancy'),'walk_forward_worst_profit_factor':wf.get('worst_profit_factor'),'walk_forward_folds':wf.get('folds',[]),'economic_return_ok':economic_return_ok,'legacy_return_ok':legacy_return_ok}
         champion_ok=bool(champion_ok and return_ok)
     gate_failures=_gate_failures(auc=auc,brier=brier,baseline_auc=bauc,baseline_brier=bbrier,base_rate_brier=base_rate_brier,champion_auc=champion_auc,champion_brier=champion_brier,champion_precision20=champion_precision20,champion_baseline_auc=champion_baseline_auc,champion_baseline_brier=champion_baseline_brier,champion_base_rate_brier=champion_base_rate_brier,champion_baseline_precision20=champion_baseline_precision20,reg_metrics=reg_metrics if task=='outcome' else None)
     return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,'gate_failures':gate_failures,**reg_metrics}, None
@@ -661,7 +643,7 @@ def _compact_model_summary(models):
             for reason in (m.get('gate_failures') or {}).get('runtime',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
             for reason in (m.get('gate_failures') or {}).get('champion',[]): failure_counts[reason]=failure_counts.get(reason,0)+1
         def slim(m):
-            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','utility_threshold','utility_probability_threshold','regime_probability_threshold','ood_threshold','selection_utility_pf','selection_utility_expectancy','selection_utility_trades','selection_utility_max_drawdown','champion_utility_expectancy','champion_utility_trades','utility_ok','walk_forward_ok','walk_forward_reason','walk_forward_valid_folds','walk_forward_positive_folds','walk_forward_abstain_folds','walk_forward_bad_folds','walk_forward_total_trades','walk_forward_aggregate_pf','walk_forward_aggregate_expectancy','walk_forward_aggregate_max_drawdown','walk_forward_expectancy_ci_low','walk_forward_expectancy_ci_high','walk_forward_worst_expectancy','walk_forward_worst_profit_factor','walk_forward_folds','economic_return_ok','legacy_return_ok','return_runtime_ok','champion_ok','gate_failures')}
+            return {k:m.get(k) for k in ('window','family','feature_set','samples','selection_samples','champion_samples','auc','brier','baseline_auc','base_rate_brier','runtime_ok','champion_auc','champion_brier','champion_precision20','champion_baseline_auc','champion_base_rate_brier','champion_baseline_precision20','return_spearman','return_sign_accuracy','champion_return_spearman','champion_return_sign_accuracy','champion_return_pf','utility_threshold','utility_probability_threshold','regime_probability_threshold','ood_threshold','selection_utility_pf','selection_utility_expectancy','selection_utility_trades','selection_utility_max_drawdown','champion_utility_expectancy','champion_utility_trades','utility_ok','walk_forward_ok','walk_forward_reason','walk_forward_valid_folds','walk_forward_positive_folds','walk_forward_abstain_folds','walk_forward_no_evidence_folds','walk_forward_veto_folds','walk_forward_bad_folds','walk_forward_total_trades','walk_forward_aggregate_pf','walk_forward_aggregate_expectancy','walk_forward_aggregate_max_drawdown','walk_forward_expectancy_ci_low','walk_forward_expectancy_ci_high','walk_forward_worst_expectancy','walk_forward_worst_profit_factor','walk_forward_folds','economic_return_ok','legacy_return_ok','return_runtime_ok','champion_ok','gate_failures')}
         top_selection=sorted(outcome,key=lambda m:(m.get('auc') is not None,m.get('auc') or -1),reverse=True)[:3]
         top_champion=sorted(outcome,key=lambda m:(m.get('champion_auc') is not None,m.get('champion_auc') or -1),reverse=True)[:3]
         out[key]={'trained_fill':len(g.get('fill') or []),'trained_outcome':len(outcome),'healthy_outcome':sum(bool(m.get('runtime_ok')) for m in outcome),'champion_outcome':sum(bool(m.get('champion_ok')) for m in outcome),'top_selection':[slim(m) for m in top_selection],'top_champion':[slim(m) for m in top_champion],'pretrain_rejections':len(g.get('rejections') or [])}
@@ -697,7 +679,7 @@ def train(trigger='manual'):
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','1')))
     breakout_champions=[m for m in (models.get('BREAKOUT|LONG') or {}).get('outcome',[]) if m.get('champion_ok')]
     status='champion' if len(breakout_champions)>=min_champ else 'shadow'
-    bundle={'schema':584,'version':'execution-ensemble-v58.4-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':585,'version':'execution-ensemble-v58.5-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}
