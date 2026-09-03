@@ -1,0 +1,10 @@
+Crypto-report-bot v58.3.0 build report
+
+Focus: regime-aware profitability, nested walk-forward, TRADE/SKIP meta-filter, OOD veto.
+
+Validation:
+- VERSION: 58.3.0
+- pytest: 285 passed
+- python compileall: PASS
+- specialist GLOBAL fallback after regime veto: disabled (fail closed)
+- existing AUC/Brier/champion gates: preserved
