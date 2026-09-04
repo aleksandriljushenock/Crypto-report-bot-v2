@@ -557,8 +557,21 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
     margin = float(position.get("margin_usd") or 0)
     entry_fee = float(position.get("entry_fee") or 0)
     fee_rate = max(0.0, _float("PAPER_FEE_PCT_PER_SIDE", 0.06) / 100.0)
-    slippage = max(0.0, _float("PAPER_SLIPPAGE_PCT", 0.03) / 100.0)
+    base_slippage_pct = max(0.0, _float("PAPER_SLIPPAGE_PCT", 0.03))
+    audit0 = dict(position.get("execution_audit") or {})
+    spread_pct = max(0.0, float(audit0.get("spread_pct") or 0.0))
+    volatility_pct = max(0.0, float(audit0.get("volatility_pct") or 0.0))
+    notional_impact = min(max(0.0, _float("PAPER_MAX_MARKET_IMPACT_PCT", 0.20)), max(0.0, notional) / max(1.0, _float("PAPER_LIQUIDITY_REFERENCE_USD", 100000.0)) * 100.0)
+    dynamic_slippage_pct = base_slippage_pct + 0.5*spread_pct + 0.05*volatility_pct + notional_impact
+    slippage = dynamic_slippage_pct / 100.0
     side = str(position.get("side") or "LONG")
+    opened_dt = _parse_ts(position.get("opened_at") or _iso())
+    closed_dt = _parse_ts(closed_at or _iso())
+    held_hours=max(0.0,(closed_dt-opened_dt).total_seconds()/3600.0)
+    funding_rate_8h=float(position.get("funding_rate_8h") or audit0.get("funding_rate_8h") or _float("PAPER_FUNDING_RATE_8H_PCT",0.01))/100.0
+    funding_intervals=held_hours/8.0
+    # Positive funding means LONG pays SHORT; negative funding reverses the cash flow.
+    funding_cost = notional * funding_rate_8h * funding_intervals * (1.0 if side == "LONG" else -1.0)
     is_liquidation = str(reason or "").upper().startswith("LIQUIDATION")
 
     # Isolated-margin liquidation cannot lose more than the reserved margin
@@ -566,16 +579,17 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
     # slippage/fee beyond the estimated liquidation point; otherwise Paper can
     # create impossible losses larger than isolated collateral.
     if is_liquidation:
+        funding_cost = 0.0  # isolated liquidation remains capped to reserved collateral
         adjusted_exit = float(position.get("estimated_liquidation_price") or exit_price or 0)
         gross_pnl = -margin
         exit_fee = 0.0
-        net_pnl = -margin - entry_fee
+        net_pnl = -margin - entry_fee - max(0.0,funding_cost)
         released = 0.0
     else:
         adjusted_exit = exit_price * (1.0 - slippage if side == "LONG" else 1.0 + slippage)
         gross_pnl = notional * _signed_return(side, entry, adjusted_exit)
         exit_fee = notional * fee_rate
-        net_pnl = gross_pnl - entry_fee - exit_fee
+        net_pnl = gross_pnl - entry_fee - exit_fee - funding_cost
         released = max(0.0, margin + gross_pnl - exit_fee)
 
     now = closed_at or _iso()
@@ -609,6 +623,8 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
         "net_pnl": net_pnl,
         "return_on_margin_pct": (net_pnl / margin * 100.0) if margin else 0.0,
         "fees": entry_fee + exit_fee,
+        "funding_cost": funding_cost,
+        "slippage_pct": dynamic_slippage_pct,
         "close_reason": reason,
         "quality_score": position.get("quality_score"),
         "probability": position.get("probability"),
@@ -620,7 +636,7 @@ def _close_position(position: dict[str, Any], exit_price: float, reason: str, cl
     }
     # V39 closes the position, writes the ledger and updates account aggregates
     # in one PostgreSQL transaction. This removes cross-process lost updates.
-    equity_delta = -margin if is_liquidation else (gross_pnl - exit_fee)
+    equity_delta = (-margin - max(0.0,funding_cost)) if is_liquidation else (gross_pnl - exit_fee - funding_cost)
     try:
         with _PAPER_LOCK:
             result = paper_repo.close_atomic(

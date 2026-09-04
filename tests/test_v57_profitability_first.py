@@ -33,7 +33,7 @@ def test_real_closed_fill_requires_fill_source():
     s=bf._paper_sample(row)
     assert s['entry_status']=='filled'
     assert s['sample_type']=='PAPER_EXECUTION'
-    assert s['net_return_pct']==2.0
+    assert 1.99 < s['net_return_pct'] < 2.0
 
 
 def test_profile_separates_execution_from_research():

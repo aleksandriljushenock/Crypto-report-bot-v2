@@ -44,3 +44,7 @@ data/*
 *.sqlite3
 
 backups/
+# V58.6 release hygiene
+.pytest_cache/
+*.log
+.env#*

@@ -208,6 +208,14 @@ def _regime_vector(row):
         out.extend([math.sin(angle),math.cos(angle),float(dt.weekday())/6.0,1.0 if dt.weekday()>=5 else 0.0])
     else:
         out.extend([0.0,0.0,0.5,0.0])
+    # Optional broad-market context. Missing values remain neutral and never require a network call at inference time.
+    payload=row.get('feature_payload') or {}
+    if not isinstance(payload,dict): payload={}
+    ctx=payload.get('marketContext') or payload.get('market_context') or {}
+    if not isinstance(ctx,dict): ctx={}
+    for key in ('btcReturn5m','btcReturn15m','btcReturn1h','btcReturn4h','btcVolatility','marketBreadth','btcCorrelation','btcDominanceChange'):
+        try: out.append(float(ctx.get(key) or payload.get(key) or 0.0))
+        except Exception: out.append(0.0)
     return out
 
 
@@ -275,7 +283,7 @@ def _ood_profile(rows):
     return {
         'median':med,
         'scale':scale,
-        'threshold':max(float(os.getenv('EXECUTION_OOD_MIN_THRESHOLD','1.5')),_quantile(scores,q)),
+        'threshold':min(float(os.getenv('EXECUTION_OOD_MAX_SCORE','3.0')), max(float(os.getenv('EXECUTION_OOD_TRAIN_FLOOR','0.25')),_quantile(scores,q))),
     }
 
 
@@ -299,165 +307,151 @@ def _max_drawdown(values):
     return mdd
 
 
-def _bootstrap_expectancy_ci(values, seed=58):
+def _block_bootstrap_stats(values, seed=58):
+    """Moving-block bootstrap for temporally dependent trade returns."""
     vals=[float(v) for v in values]
     if len(vals)<10:
-        return None,None
+        return {'expectancy_ci':(None,None),'pf_ci':(None,None)}
     import random
-    rng=random.Random(seed)
-    n=len(vals)
+    rng=random.Random(seed); n=len(vals)
     reps=max(100,int(os.getenv('EXECUTION_BOOTSTRAP_REPS','400')))
-    means=[]
+    block=max(2,min(n,int(os.getenv('EXECUTION_BOOTSTRAP_BLOCK_TRADES',str(max(3,round(n**0.5)))))))
+    means=[]; pfs=[]
     for _ in range(reps):
-        means.append(sum(vals[rng.randrange(n)] for _ in range(n))/n)
-    return _quantile(means,.025),_quantile(means,.975)
+        sample=[]
+        while len(sample)<n:
+            st=rng.randrange(n)
+            sample.extend(vals[(st+k)%n] for k in range(block))
+        sample=sample[:n]
+        means.append(sum(sample)/n); pfs.append(_profit_factor(sample))
+    return {'expectancy_ci':(_quantile(means,.025),_quantile(means,.975)), 'pf_ci':(_quantile(pfs,.025),_quantile(pfs,.975)), 'block_trades':block}
+
+
+def _bootstrap_expectancy_ci(values, seed=58):
+    return _block_bootstrap_stats(values,seed)['expectancy_ci']
 
 
 def _economic_stats(values):
     vals=[float(v) for v in values]
     if not vals:
-        return {'trades':0,'profit_factor':0.0,'expectancy':None,'win_rate':None,'median':None,'max_loss':None,'max_drawdown':0.0,'downside_deviation':0.0}
+        return {'trades':0,'profit_factor':0.0,'expectancy':None,'win_rate':None,'median':None,'max_loss':None,'max_drawdown':0.0,'downside_deviation':0.0,'cvar_10':None}
     import statistics
     neg=[v for v in vals if v<0]
     downside=(sum(v*v for v in neg)/len(vals))**0.5 if neg else 0.0
-    return {
-        'trades':len(vals),
-        'profit_factor':_profit_factor(vals),
-        'expectancy':sum(vals)/len(vals),
-        'win_rate':sum(v>0 for v in vals)/len(vals),
-        'median':statistics.median(vals),
-        'max_loss':min(vals),
-        'max_drawdown':_max_drawdown(vals),
-        'downside_deviation':downside,
-    }
+    tail=sorted(vals)[:max(1,int(math.ceil(len(vals)*.10)))]
+    return {'trades':len(vals),'profit_factor':_profit_factor(vals),'expectancy':sum(vals)/len(vals),
+            'win_rate':sum(v>0 for v in vals)/len(vals),'median':statistics.median(vals),'max_loss':min(vals),
+            'max_drawdown':_max_drawdown(vals),'downside_deviation':downside,'cvar_10':sum(tail)/len(tail)}
+
+
+def _apply_thresholds(pred, actual, profit_prob, regime_prob, ood_scores, tuned):
+    idx=[]
+    for i,p in enumerate(pred):
+        if float(p)<float(tuned['threshold']): continue
+        if profit_prob and float(profit_prob[i])<float(tuned['probability_threshold']): continue
+        if regime_prob and float(regime_prob[i])<float(tuned['regime_probability_threshold']): continue
+        if ood_scores and float(ood_scores[i])>float(tuned['ood_threshold']): continue
+        idx.append(i)
+    return idx,[float(actual[i]) for i in idx]
 
 
 def _utility_threshold(pred,actual,profit_prob=None,regime_prob=None,ood_scores=None,ood_threshold=None,require_regime=False):
-    """Tune return/alpha/regime TRADE-SKIP thresholds on a selection slice only."""
+    """Tune thresholds on tune data only. Production alpha can never be disabled."""
     min_trades=max(10,int(os.getenv('EXECUTION_RETURN_MIN_UTILITY_TRADES','20')))
     ret_candidates=sorted(set([0.0]+[_quantile(pred,q) for q in (.50,.60,.70,.80,.85,.90)]))
-    probs=list(profit_prob or [])
-    regimes=list(regime_prob or [])
-    ods=list(ood_scores or [])
-    prob_candidates=[0.0] if not probs else sorted(set([0.0]+[_quantile(probs,q) for q in (.40,.50,.60,.70,.80)]))
+    probs=list(profit_prob or []); regimes=list(regime_prob or []); ods=list(ood_scores or [])
+    alpha_floor=max(0.01,float(os.getenv('EXECUTION_ALPHA_MIN_PROBABILITY','0.52')))
+    prob_candidates=[alpha_floor] if not probs else sorted(set([max(alpha_floor,_quantile(probs,q)) for q in (.35,.45,.55,.65,.75)]))
     regime_floor=float(os.getenv('EXECUTION_REGIME_MIN_PROBABILITY','0.45')) if require_regime and regimes else 0.0
     regime_candidates=[0.0] if not regimes else sorted(set(([regime_floor] if require_regime else [0.0])+[max(regime_floor,_quantile(regimes,q)) for q in (.35,.45,.55,.65,.75)]))
-    base_ot=float(ood_threshold) if ood_threshold is not None else float('inf')
-    ood_candidates=[base_ot]
-    if ods:
-        ood_candidates=sorted(set([min(base_ot,_quantile(ods,q)) for q in (.80,.90,.95)]+[base_ot]))
-    best=None
+    # OOD is a maximum admissible score: smaller is stricter. Never exceed the train-only cap.
+    cap=float(ood_threshold) if ood_threshold is not None else float('inf')
+    ood_candidates=[cap] if not ods else sorted(set([min(cap,_quantile(ods,q)) for q in (.70,.80,.90,.95)]+[cap]))
+    best=None; trials=0
     for t in ret_candidates:
-        for pt in prob_candidates:
-            for rt in regime_candidates:
-              for ot in ood_candidates:
-                vals=[]
-                for i,(a,p) in enumerate(zip(actual,pred)):
-                    if float(p)<t:
-                        continue
-                    if probs and float(probs[i])<pt:
-                        continue
-                    if regimes and float(regimes[i])<rt:
-                        continue
-                    if ods and float(ods[i])>ot:
-                        continue
-                    vals.append(float(a))
-                if len(vals)<min_trades:
-                    continue
-                st=_economic_stats(vals)
-                size_bonus=min(1.0,len(vals)/max(min_trades*3,1))
-                score=(st['expectancy']-0.20*st['downside_deviation']-0.04*st['max_drawdown']+
-                       0.04*min(st['profit_factor'],5.0)+0.05*st['win_rate']+0.03*size_bonus)
-                row={
-                    'threshold':float(t),
-                    'probability_threshold':float(pt),
-                    'regime_probability_threshold':float(rt),
-                    'ood_threshold':ot,
-                    'trades':len(vals),
-                    'profit_factor':st['profit_factor'],
-                    'expectancy':st['expectancy'],
-                    'win_rate':st['win_rate'],
-                    'max_drawdown':st['max_drawdown'],
-                    'downside_deviation':st['downside_deviation'],
-                    'score':score,
-                }
-                if best is None or row['score']>best['score']:
-                    best=row
+      for pt in prob_candidates:
+       for rt in regime_candidates:
+        for ot in ood_candidates:
+            trials+=1
+            tuned={'threshold':float(t),'probability_threshold':float(pt),'regime_probability_threshold':float(rt),'ood_threshold':float(ot)}
+            _,vals=_apply_thresholds(pred,actual,probs,regimes,ods,tuned)
+            if len(vals)<min_trades: continue
+            st=_economic_stats(vals); size_bonus=min(1.0,len(vals)/max(min_trades*3,1))
+            score=(st['expectancy']-0.20*st['downside_deviation']-0.04*st['max_drawdown']+0.04*min(st['profit_factor'],5.0)+0.05*st['win_rate']+0.03*size_bonus)
+            row={**tuned,**st,'score':score,'selection_trials':trials}
+            if best is None or row['score']>best['score']: best=row
+    if best: best['selection_trials']=trials
     return best
 
 
 def _wf_purge_history(history, test_rows):
-    """Remove observations whose realized outcome overlaps the future test block."""
-    if not history or not test_rows:
-        return history,0,None
+    if not history or not test_rows: return history,0,None
     boundary=_dt(test_rows[0].get('signal_created_at'))
-    if boundary is None:
-        return history,0,None
-    embargo=max(0.0,float(os.getenv('EXECUTION_WF_EMBARGO_HOURS','1')))
-    limit=boundary-timedelta(hours=embargo)
+    if boundary is None: return history,0,None
+    embargo=max(0.0,float(os.getenv('EXECUTION_WF_EMBARGO_HOURS','1'))); limit=boundary-timedelta(hours=embargo)
     kept=[]
     for r in history:
         end=_dt(r.get('exit_at')) or _dt(r.get('signal_created_at'))
-        if end is not None and end < limit:
-            kept.append(r)
+        if end is not None and end < limit: kept.append(r)
     return kept,len(history)-len(kept),embargo
 
 
 def _adaptive_inner_plan(history, min_train):
-    """Chronology-safe candidate plans, from recent to broader historical evidence."""
-    n=len(history)
-    min_sel=max(30,int(os.getenv('EXECUTION_WF_INNER_MIN_ROWS','60')))
-    min_cal=max(20,int(os.getenv('EXECUTION_WF_CAL_MIN_ROWS','30')))
+    n=len(history); min_sel=max(60,int(os.getenv('EXECUTION_WF_INNER_MIN_ROWS','90'))); min_cal=max(20,int(os.getenv('EXECUTION_WF_CAL_MIN_ROWS','30')))
     plans=[]
-    for frac in (.15,.20,.25,.30,.35,.40):
-        sel=max(min_sel,int(n*frac))
-        cal=max(min_cal,int(n*.10))
-        if n-sel-cal>=min_train:
-            plans.append((sel,cal,'recent_'+str(int(frac*100))))
-    # Deduplicate identical sizes while preserving recency preference.
+    for frac in (.15,.20,.25,.30,.35,.40,.45):
+        sel=max(min_sel,int(n*frac)); cal=max(min_cal,int(n*.10))
+        if n-sel-cal>=min_train: plans.append((sel,cal,'recent_'+str(int(frac*100))))
     out=[]; seen=set()
     for x in plans:
-        key=x[:2]
-        if key not in seen:
-            seen.add(key); out.append(x)
+        if x[:2] not in seen: seen.add(x[:2]); out.append(x)
     return out
 
 
+def _fixed_threshold_evidence(sel_rows, reg, clf, cal, regime_model, regime_cal, ood, tuned, feature_indices):
+    """Evaluate already chosen thresholds on untouched inner holdout."""
+    X=[[extract(r)[i] for i in feature_indices] for r in sel_rows]
+    pred=[float(v) for v in reg.predict(X)]
+    raw=[float(v[1]) for v in clf.predict_proba(X)]; probs=[float(v) for v in cal.predict(raw)] if cal is not None else raw
+    rprob=_regime_probs(regime_model,regime_cal,sel_rows); ods=_ood_scores(ood,sel_rows); actual=[float(r.get('net_return_pct') or 0) for r in sel_rows]
+    idx,vals=_apply_thresholds(pred,actual,probs,rprob,ods,tuned); st=_economic_stats(vals); boot=_block_bootstrap_stats(vals,585)
+    stress_bps=max(0.0,float(os.getenv('EXECUTION_WF_STRESS_COST_BPS','10'))); stressed=[v-stress_bps/100.0 for v in vals]; stress=_economic_stats(stressed)
+    st.update({'selected_indices':idx,'expectancy_ci_low':boot['expectancy_ci'][0],'expectancy_ci_high':boot['expectancy_ci'][1],
+               'pf_ci_low':boot['pf_ci'][0],'pf_ci_high':boot['pf_ci'][1],'stress_cost_bps':stress_bps,
+               'stress_pf':stress['profit_factor'],'stress_expectancy':stress['expectancy']})
+    return st
+
+
+def _threshold_drift_ok(tuned, previous):
+    if not previous: return True,{}
+    limits={'probability_threshold':float(os.getenv('EXECUTION_WF_MAX_ALPHA_THRESHOLD_DRIFT','0.25')),
+            'regime_probability_threshold':float(os.getenv('EXECUTION_WF_MAX_REGIME_THRESHOLD_DRIFT','0.30')),
+            'threshold':float(os.getenv('EXECUTION_WF_MAX_RETURN_THRESHOLD_DRIFT','2.0'))}
+    drift={k:abs(float(tuned.get(k,0))-float(previous.get(k,0))) for k in limits}
+    return all(drift[k]<=limits[k] for k in limits),drift
+
+
 def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, probability_threshold=0.0, min_train=240):
-    """Purged nested anchored WF with adaptive historical evidence and explicit NO_EVIDENCE."""
+    """V58.6: purged nested WF; tune and evidence are strictly separated."""
     from sklearn.isotonic import IsotonicRegression
     usable=[r for r in rows if str(r.get('entry_status') or '').lower()=='filled' and not bool(r.get('ambiguous_same_candle')) and str(r.get('outcome') or '').upper() not in {'','UNRESOLVED','AMBIGUOUS','OPEN'} and r.get('net_return_pct') is not None]
-    n=len(usable)
-    folds=max(3,int(os.getenv('EXECUTION_WF_FOLDS','5')))
-    test_frac=float(os.getenv('EXECUTION_WF_TEST_FRACTION','0.08'))
-    test_size=max(30,int(n*test_frac))
+    n=len(usable); folds=max(3,int(os.getenv('EXECUTION_WF_FOLDS','5'))); test_frac=float(os.getenv('EXECUTION_WF_TEST_FRACTION','0.08')); test_size=max(30,int(n*test_frac))
     need=min_train+folds*test_size
-    if n<need:
-        return {'ok':False,'reason':'walk_forward_insufficient_rows','folds':[],'rows':n,'required':need}
-    start=n-folds*test_size
-    out=[]; pooled=[]
+    if n<need:return {'ok':False,'reason':'walk_forward_insufficient_rows','folds':[],'rows':n,'required':need}
+    start=n-folds*test_size; out=[]; pooled=[]; previous_tuned=None
     for j in range(folds):
-        cut=start+j*test_size
-        raw_history=usable[:cut]
-        te=usable[cut:cut+test_size]
-        history,purged,embargo=_wf_purge_history(raw_history,te)
-        plans=_adaptive_inner_plan(history,min_train)
+        cut=start+j*test_size; raw_history=usable[:cut]; te=usable[cut:cut+test_size]; history,purged,embargo=_wf_purge_history(raw_history,te); plans=_adaptive_inner_plan(history,min_train)
         if not plans:
-            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'no_evidence','evidence_state':'NO_EVIDENCE','detail':'adaptive_inner_plan_unavailable','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo})
-            continue
-        chosen=None; diagnostics=[]
-        for plan_no,(inner,cal_n,source) in enumerate(plans):
-            fit_rows=history[:-(inner+cal_n)]; cal_rows=history[-(inner+cal_n):-inner]; sel_rows=history[-inner:]
-            X=[[extract(r)[i] for i in feature_indices] for r in fit_rows]
-            Xc=[[extract(r)[i] for i in feature_indices] for r in cal_rows]
-            Xs=[[extract(r)[i] for i in feature_indices] for r in sel_rows]
-            y=[float(r.get('net_return_pct') or 0) for r in fit_rows]
-            labels=[1 if v>0 else 0 for v in y]
-            if len(set(labels))<2:
-                diagnostics.append({'source':source,'selection_rows':inner,'calibration_rows':cal_n,'fit_rows':len(fit_rows),'reason':'alpha_single_class'})
-                continue
-            target,_,_=_winsor(y); sw=_weights(fit_rows)
-            reg=_regressor(seed+700+j)
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'reason':'no_evidence','evidence_state':'NO_EVIDENCE','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo}); continue
+        diagnostics=[]; candidates=[]; hard_bad=None
+        for inner,cal_n,source in plans:
+            block=history[-inner:]; evidence_n=max(20,int(len(block)*float(os.getenv('EXECUTION_WF_EVIDENCE_FRACTION','0.40')))); tune_rows=block[:-evidence_n]; evidence_rows=block[-evidence_n:]
+            fit_rows=history[:-(inner+cal_n)]; cal_rows=history[-(inner+cal_n):-inner]
+            if len(tune_rows)<max(20,int(os.getenv('EXECUTION_RETURN_MIN_UTILITY_TRADES','20'))): continue
+            X=[[extract(r)[i] for i in feature_indices] for r in fit_rows]; Xc=[[extract(r)[i] for i in feature_indices] for r in cal_rows]; Xt=[[extract(r)[i] for i in feature_indices] for r in tune_rows]
+            y=[float(r.get('net_return_pct') or 0) for r in fit_rows]; labels=[1 if v>0 else 0 for v in y]
+            if len(set(labels))<2: diagnostics.append({'source':source,'reason':'alpha_single_class'}); continue
+            target,_,_=_winsor(y); sw=_weights(fit_rows); reg=_regressor(seed+700+j)
             try: reg.fit(X,target,sample_weight=sw)
             except TypeError: reg.fit(X,target)
             clf=_family(family,seed+1700+j)
@@ -465,51 +459,42 @@ def _walk_forward_utility(rows, feature_indices, family, seed, threshold=0.0, pr
             except TypeError: clf.fit(X,labels)
             cal=None; cal_y=[1 if float(r.get('net_return_pct') or 0)>0 else 0 for r in cal_rows]
             if len(set(cal_y))>1:
-                try:
-                    cal_raw=[float(v[1]) for v in clf.predict_proba(Xc)]
-                    cal=IsotonicRegression(out_of_bounds='clip').fit(cal_raw,cal_y)
+                try: cal=IsotonicRegression(out_of_bounds='clip').fit([float(v[1]) for v in clf.predict_proba(Xc)],cal_y)
                 except Exception: cal=None
-            regime_model,regime_cal=_fit_regime_model(fit_rows,cal_rows,seed+2700+j)
-            ood=_ood_profile(fit_rows)
-            raw=[float(v[1]) for v in clf.predict_proba(Xs)]
-            sprob=[float(v) for v in cal.predict(raw)] if cal is not None else raw
-            spred=[float(v) for v in reg.predict(Xs)]
-            sreg=_regime_probs(regime_model,regime_cal,sel_rows); sood=_ood_scores(ood,sel_rows)
-            sactual=[float(r.get('net_return_pct') or 0) for r in sel_rows]
-            tuned=_utility_threshold(spred,sactual,sprob,sreg,sood,(ood or {}).get('threshold'),require_regime=regime_model is not None)
-            diag={'source':source,'selection_rows':inner,'calibration_rows':cal_n,'fit_rows':len(fit_rows),'utility_available':bool(tuned)}
-            if tuned: diag.update({'trades':tuned.get('trades'),'profit_factor':tuned.get('profit_factor'),'expectancy':tuned.get('expectancy')})
-            diagnostics.append(diag)
-            if tuned:
-                chosen=(fit_rows,cal_rows,sel_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,source,inner,cal_n)
-                break
-        if chosen is None:
-            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'no_evidence','evidence_state':'NO_EVIDENCE','detail':'inner_utility_unavailable_after_adaptive_search','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'inner_attempts':diagnostics})
-            continue
-        fit_rows,cal_rows,sel_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,source,inner,cal_n=chosen
-        inner_min_pf=float(os.getenv('EXECUTION_WF_INNER_MIN_PF','1.05')); inner_min_exp=float(os.getenv('EXECUTION_WF_INNER_MIN_EXPECTANCY','0.0'))
-        if (tuned.get('profit_factor') or 0)<inner_min_pf or tuned.get('expectancy') is None or tuned.get('expectancy')<=inner_min_exp:
-            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'profit_factor':0.0,'expectancy':None,'reason':'inner_profitability_veto','evidence_state':'BAD_REGIME','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'inner_source':source,'inner_selection_rows':inner,'inner_calibration_rows':cal_n,'inner_selection_trades':tuned.get('trades',0),'inner_selection_pf':tuned.get('profit_factor'),'inner_selection_expectancy':tuned.get('expectancy'),'regime_probability_threshold':tuned.get('regime_probability_threshold'),'ood_threshold':tuned.get('ood_threshold'),'inner_attempts':diagnostics})
-            continue
-        Xt=[[extract(r)[i] for i in feature_indices] for r in te]
-        pred=[float(v) for v in reg.predict(Xt)]
-        raw=[float(v[1]) for v in clf.predict_proba(Xt)]; probs=[float(v) for v in cal.predict(raw)] if cal is not None else raw
-        rprob=_regime_probs(regime_model,regime_cal,te); oscore=_ood_scores(ood,te); actual=[float(r.get('net_return_pct') or 0) for r in te]
-        stage_return=[i for i,p in enumerate(pred) if p>=tuned['threshold']]
-        stage_alpha=[i for i in stage_return if probs[i]>=tuned['probability_threshold']]
-        stage_regime=[i for i in stage_alpha if rprob[i]>=tuned['regime_probability_threshold']]
-        stage_ood=[i for i in stage_regime if oscore[i]<=tuned['ood_threshold']]
-        selected=[actual[i] for i in stage_ood]; pooled.extend(selected); st=_economic_stats(selected)
-        start_dt=_dt(te[0].get('signal_created_at')) if te else None; end_dt=_dt(te[-1].get('signal_created_at')) if te else None
-        st.update({'fold':j+1,'test_rows':len(te),'test_start':start_dt.isoformat() if start_dt else None,'test_end':end_dt.isoformat() if end_dt else None,'evidence_state':'TRADE','history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'inner_source':source,'inner_selection_rows':inner,'inner_calibration_rows':cal_n,'after_return_filter':len(stage_return),'after_alpha_filter':len(stage_alpha),'after_regime_filter':len(stage_regime),'after_ood_filter':len(stage_ood),'probability_threshold':tuned['probability_threshold'],'return_threshold':tuned['threshold'],'regime_probability_threshold':tuned['regime_probability_threshold'],'ood_threshold':tuned['ood_threshold'],'inner_selection_trades':tuned['trades'],'inner_selection_pf':tuned['profit_factor'],'inner_selection_expectancy':tuned['expectancy'],'inner_attempts':diagnostics})
+            regime_model,regime_cal=_fit_regime_model(fit_rows,cal_rows,seed+2700+j); ood=_ood_profile(fit_rows)
+            raw=[float(v[1]) for v in clf.predict_proba(Xt)]; p=[float(v) for v in cal.predict(raw)] if cal is not None else raw
+            pred=[float(v) for v in reg.predict(Xt)]; rp=_regime_probs(regime_model,regime_cal,tune_rows); ods=_ood_scores(ood,tune_rows); actual=[float(r.get('net_return_pct') or 0) for r in tune_rows]
+            tuned=_utility_threshold(pred,actual,p,rp,ods,(ood or {}).get('threshold'),require_regime=regime_model is not None)
+            diag={'source':source,'inner_rows':inner,'tune_rows':len(tune_rows),'evidence_rows':len(evidence_rows),'fit_rows':len(fit_rows),'utility_available':bool(tuned)}
+            if not tuned: diagnostics.append(diag); continue
+            drift_ok,drift=_threshold_drift_ok(tuned,previous_tuned); evidence=_fixed_threshold_evidence(evidence_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,feature_indices)
+            diag.update({'tune_pf':tuned.get('profit_factor'),'tune_expectancy':tuned.get('expectancy'),'evidence':evidence,'threshold_drift':drift,'threshold_drift_ok':drift_ok}); diagnostics.append(diag)
+            min_pf=float(os.getenv('EXECUTION_WF_INNER_MIN_PF','1.05')); min_exp=float(os.getenv('EXECUTION_WF_INNER_MIN_EXPECTANCY','0')); min_ev_tr=max(10,int(os.getenv('EXECUTION_WF_EVIDENCE_MIN_TRADES','12')))
+            ci_required=str(os.getenv('EXECUTION_WF_INNER_REQUIRE_POSITIVE_CI','false')).lower() in {'1','true','yes'}
+            good=(evidence['trades']>=min_ev_tr and evidence['profit_factor']>=min_pf and (evidence['expectancy'] or -999)>min_exp and evidence['stress_pf']>=1.0 and (evidence['stress_expectancy'] or -999)>0 and drift_ok)
+            if ci_required: good=good and evidence['expectancy_ci_low'] is not None and evidence['expectancy_ci_low']>min_exp
+            reliable_bad=(evidence['trades']>=min_ev_tr and ((evidence['profit_factor'] or 0)<min_pf or (evidence['expectancy'] or 0)<=min_exp))
+            if reliable_bad and source in {'recent_15','recent_20'}: hard_bad=(source,evidence); break
+            if good: candidates.append((fit_rows,cal_rows,tune_rows,evidence_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,source,evidence))
+            if len(candidates)>=max(1,int(os.getenv('EXECUTION_WF_REQUIRED_WINDOW_CONSENSUS','2'))): break
+        if hard_bad:
+            source,evidence=hard_bad; out.append({'fold':j+1,'test_rows':len(te),'trades':0,'reason':'inner_profitability_veto','evidence_state':'BAD_REGIME','inner_source':source,'inner_evidence':evidence,'inner_attempts':diagnostics,'history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo}); continue
+        required=max(1,int(os.getenv('EXECUTION_WF_REQUIRED_WINDOW_CONSENSUS','2')))
+        if len(candidates)<required:
+            out.append({'fold':j+1,'test_rows':len(te),'trades':0,'reason':'no_evidence','evidence_state':'NO_EVIDENCE','detail':'insufficient_independent_window_consensus','consensus':len(candidates),'required_consensus':required,'inner_attempts':diagnostics,'history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo}); continue
+        chosen=candidates[0]; fit_rows,cal_rows,tune_rows,evidence_rows,reg,clf,cal,regime_model,regime_cal,ood,tuned,source,evidence=chosen; previous_tuned=tuned
+        Xte=[[extract(r)[i] for i in feature_indices] for r in te]; pred=[float(v) for v in reg.predict(Xte)]; raw=[float(v[1]) for v in clf.predict_proba(Xte)]; probs=[float(v) for v in cal.predict(raw)] if cal is not None else raw
+        rprob=_regime_probs(regime_model,regime_cal,te); ods=_ood_scores(ood,te); actual=[float(r.get('net_return_pct') or 0) for r in te]; idx,selected=_apply_thresholds(pred,actual,probs,rprob,ods,tuned); pooled.extend(selected); st=_economic_stats(selected)
+        catastrophic=(len(selected)>=max(3,int(os.getenv('EXECUTION_WF_CATASTROPHIC_MIN_TRADES','5'))) and ((st['expectancy'] or 0)<=float(os.getenv('EXECUTION_WF_CATASTROPHIC_EXPECTANCY','-0.50')) or st['profit_factor']<float(os.getenv('EXECUTION_WF_CATASTROPHIC_PF','0.50'))))
+        start_dt=_dt(te[0].get('signal_created_at')); end_dt=_dt(te[-1].get('signal_created_at'))
+        st.update({'fold':j+1,'test_rows':len(te),'test_start':start_dt.isoformat() if start_dt else None,'test_end':end_dt.isoformat() if end_dt else None,'test_duration_hours':(end_dt-start_dt).total_seconds()/3600 if start_dt and end_dt else None,'evidence_state':'CATASTROPHIC' if catastrophic else 'TRADE','catastrophic':catastrophic,'inner_source':source,'inner_evidence':evidence,'inner_attempts':diagnostics,'history_rows':len(history),'purged_rows':purged,'embargo_hours':embargo,'probability_threshold':tuned['probability_threshold'],'return_threshold':tuned['threshold'],'regime_probability_threshold':tuned['regime_probability_threshold'],'ood_threshold':tuned['ood_threshold'],'selected_test_indices':idx})
         out.append(st)
-    min_trades=max(10,int(os.getenv('EXECUTION_WF_MIN_TRADES_PER_FOLD','15'))); valid=[x for x in out if x['trades']>=min_trades]
-    min_positive=max(2,int(os.getenv('EXECUTION_WF_MIN_POSITIVE_FOLDS','3'))); min_pf=float(os.getenv('EXECUTION_WF_MIN_PF','1.05')); min_exp=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY','0'))
-    positive=sum((x.get('profit_factor') or 0)>=min_pf and (x.get('expectancy') or 0)>min_exp for x in valid); bad=[x for x in valid if x.get('expectancy') is None or x.get('expectancy')<=min_exp or (x.get('profit_factor') or 0)<min_pf]
-    total_min=max(30,int(os.getenv('EXECUTION_WF_MIN_TOTAL_TRADES','60'))); ci_lo,ci_hi=_bootstrap_expectancy_ci(pooled,seed+9000); min_ci=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY_CI_LOW','0.0')); pooled_stats=_economic_stats(pooled)
-    min_agg_pf=float(os.getenv('EXECUTION_WF_MIN_AGGREGATE_PF','1.15')); max_dd=float(os.getenv('EXECUTION_WF_MAX_AGGREGATE_DRAWDOWN','25.0'))
-    ok=(len(valid)>=min_positive and positive>=min_positive and not bad and len(pooled)>=total_min and pooled_stats['profit_factor']>=min_agg_pf and pooled_stats['max_drawdown']<=max_dd and ci_lo is not None and ci_lo>min_ci)
-    return {'ok':ok,'reason':'ok' if ok else 'walk_forward_profitability_failed','folds':out,'valid_folds':len(valid),'positive_folds':positive,'abstain_folds':sum(x['trades']<min_trades for x in out),'no_evidence_folds':sum(x.get('evidence_state')=='NO_EVIDENCE' for x in out),'veto_folds':sum(x.get('evidence_state')=='BAD_REGIME' for x in out),'bad_folds':len(bad),'min_positive_folds':min_positive,'worst_expectancy':min((x.get('expectancy') for x in valid if x.get('expectancy') is not None),default=None),'worst_profit_factor':min((x.get('profit_factor') for x in valid),default=None),'total_trades':len(pooled),'aggregate_profit_factor':pooled_stats['profit_factor'],'aggregate_expectancy':pooled_stats['expectancy'],'aggregate_max_drawdown':pooled_stats['max_drawdown'],'expectancy_ci_low':ci_lo,'expectancy_ci_high':ci_hi}
+    min_trades=max(10,int(os.getenv('EXECUTION_WF_MIN_TRADES_PER_FOLD','15'))); min_hours=max(0.0,float(os.getenv('EXECUTION_WF_MIN_TEST_DURATION_HOURS','6'))); valid=[x for x in out if x.get('trades',0)>=min_trades and (x.get('test_duration_hours') is None or x.get('test_duration_hours')>=min_hours)]; min_positive=max(2,int(os.getenv('EXECUTION_WF_MIN_POSITIVE_FOLDS','3'))); min_pf=float(os.getenv('EXECUTION_WF_MIN_PF','1.05')); min_exp=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY','0'))
+    positive=sum((x.get('profit_factor') or 0)>=min_pf and (x.get('expectancy') or 0)>min_exp for x in valid); bad=[x for x in valid if x.get('expectancy') is None or x.get('expectancy')<=min_exp or (x.get('profit_factor') or 0)<min_pf]; catastrophic=[x for x in out if x.get('catastrophic')]
+    total_min=max(30,int(os.getenv('EXECUTION_WF_MIN_TOTAL_TRADES','60'))); boot=_block_bootstrap_stats(pooled,seed+9000); ci_lo,ci_hi=boot['expectancy_ci']; pf_lo,pf_hi=boot['pf_ci']; pooled_stats=_economic_stats(pooled); min_ci=float(os.getenv('EXECUTION_WF_MIN_EXPECTANCY_CI_LOW','0')); min_agg_pf=float(os.getenv('EXECUTION_WF_MIN_AGGREGATE_PF','1.15')); max_dd=float(os.getenv('EXECUTION_WF_MAX_AGGREGATE_DRAWDOWN','25.0')); min_pf_ci=float(os.getenv('EXECUTION_WF_MIN_PF_CI_LOW','1.0'))
+    stress_bps=float(os.getenv('EXECUTION_WF_STRESS_COST_BPS','10')); stress=_economic_stats([v-stress_bps/100.0 for v in pooled])
+    ok=(len(valid)>=min_positive and positive>=min_positive and not bad and not catastrophic and len(pooled)>=total_min and pooled_stats['profit_factor']>=min_agg_pf and pooled_stats['max_drawdown']<=max_dd and ci_lo is not None and ci_lo>min_ci and pf_lo is not None and pf_lo>=min_pf_ci and stress['profit_factor']>=1.0 and (stress['expectancy'] or -999)>0)
+    return {'ok':ok,'reason':'ok' if ok else 'walk_forward_profitability_failed','folds':out,'valid_folds':len(valid),'positive_folds':positive,'abstain_folds':sum(x.get('trades',0)<min_trades for x in out),'no_evidence_folds':sum(x.get('evidence_state')=='NO_EVIDENCE' for x in out),'veto_folds':sum(x.get('evidence_state')=='BAD_REGIME' for x in out),'small_sample_folds':sum(0<x.get('trades',0)<min_trades for x in out),'zero_trade_folds':sum(x.get('trades',0)==0 for x in out),'catastrophic_folds':len(catastrophic),'bad_folds':len(bad),'min_positive_folds':min_positive,'worst_expectancy':min((x.get('expectancy') for x in valid if x.get('expectancy') is not None),default=None),'worst_profit_factor':min((x.get('profit_factor') for x in valid),default=None),'total_trades':len(pooled),'aggregate_profit_factor':pooled_stats['profit_factor'],'aggregate_expectancy':pooled_stats['expectancy'],'aggregate_max_drawdown':pooled_stats['max_drawdown'],'aggregate_cvar_10':pooled_stats['cvar_10'],'expectancy_ci_low':ci_lo,'expectancy_ci_high':ci_hi,'pf_ci_low':pf_lo,'pf_ci_high':pf_hi,'bootstrap_block_trades':boot.get('block_trades'),'stress_cost_bps':stress_bps,'stress_profit_factor':stress['profit_factor'],'stress_expectancy':stress['expectancy']}
 
 def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
     from sklearn.isotonic import IsotonicRegression
@@ -679,7 +664,7 @@ def train(trigger='manual'):
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','1')))
     breakout_champions=[m for m in (models.get('BREAKOUT|LONG') or {}).get('outcome',[]) if m.get('champion_ok')]
     status='champion' if len(breakout_champions)>=min_champ else 'shadow'
-    bundle={'schema':585,'version':'execution-ensemble-v58.5-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':586,'version':'execution-ensemble-v58.6-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}

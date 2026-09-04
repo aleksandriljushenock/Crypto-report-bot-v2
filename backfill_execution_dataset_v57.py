@@ -114,6 +114,12 @@ def _candles_any(symbol,start,end,interval='5m',preferred=None,session=None):
         if rows:return rows,provider,attempts
     return [],None,attempts
 
+def _funding_pct(side, start, end):
+    if not start or not end: return 0.0
+    hours=max(0.0,(end-start).total_seconds()/3600.0)
+    rate=float(os.getenv('PAPER_FUNDING_RATE_8H_PCT','0.01'))
+    return rate*(hours/8.0)*(1.0 if str(side).upper()=='LONG' else -1.0)
+
 def _resolve(row,candles,minute_loader=None):
     side=_side(row.get('direction')); entry=_num(row.get('actual_entry') or row.get('target_entry')); stop=_num(row.get('stop')); tp1=_num(row.get('tp1')); filled=_dt(row.get('filled_at'))
     if not (entry>0 and filled and stop>0 and tp1>0):return {'outcome':'UNRESOLVED'}
@@ -134,13 +140,13 @@ def _resolve(row,candles,minute_loader=None):
         if sl or tp:
             reason='SL' if sl else 'TP1'; exit_price=stop if sl else tp1
             gross=((exit_price-entry)/entry*100) if side=='LONG' else ((entry-exit_price)/entry*100)
-            net=gross-2*float(os.getenv('PAPER_FEE_PCT_PER_SIDE','0.06'))-2*float(os.getenv('PAPER_SLIPPAGE_PCT','0.03'))
+            net=gross-2*float(os.getenv('PAPER_FEE_PCT_PER_SIDE','0.06'))-2*float(os.getenv('PAPER_SLIPPAGE_PCT','0.03'))-_funding_pct(side,filled,end)
             risk=abs(entry-stop)/entry*100
             return {'outcome':reason,'exit_reason':reason,'exit_at':end.isoformat(),'net_return_pct':net,'r_multiple':net/risk if risk>1e-9 else 0.0,'mfe_pct':best,'mae_pct':worst,'bars_to_exit':bars,'ambiguous_same_candle':False}
     if candles:
         c=candles[-1]; exit_price=float(c[3]); end=datetime.fromtimestamp(c[4]/1000,tz=timezone.utc)
         gross=((exit_price-entry)/entry*100) if side=='LONG' else ((entry-exit_price)/entry*100)
-        net=gross-2*float(os.getenv('PAPER_FEE_PCT_PER_SIDE','0.06'))-2*float(os.getenv('PAPER_SLIPPAGE_PCT','0.03'))
+        net=gross-2*float(os.getenv('PAPER_FEE_PCT_PER_SIDE','0.06'))-2*float(os.getenv('PAPER_SLIPPAGE_PCT','0.03'))-_funding_pct(side,filled,end)
         risk=abs(entry-stop)/entry*100
         return {'outcome':'TIME_EXIT','exit_reason':'TIME_EXIT','exit_at':end.isoformat(),'net_return_pct':net,'r_multiple':net/risk if risk>1e-9 else 0.0,'mfe_pct':best,'mae_pct':worst,'bars_to_exit':bars,'ambiguous_same_candle':False}
     return {'outcome':'UNRESOLVED'}
@@ -236,9 +242,11 @@ def _paper_sample(r):
     if terminal_no_fill: out='NO_FILL'
     if filled and status=='closed' and r.get('net_pnl') is not None:
         notional=_num(r.get('notional_usd')); net_ret=_num(r.get('net_pnl'))/notional*100 if notional>0 else None
+        if net_ret is not None and r.get('funding_cost') is None:
+            net_ret -= _funding_pct(r.get('side'), _dt(r.get('opened_at')), _dt(r.get('closed_at')))
         risk=_num(r.get('stop_distance_pct')); rmult=net_ret/risk if net_ret is not None and risk>1e-9 else None; out=str(r.get('close_reason') or 'CLOSED')
     sample_type='PAPER_EXECUTION' if filled and out not in {'UNRESOLVED','NO_FILL'} else ('PAPER_FILL' if filled else ('PAPER_NO_FILL' if terminal_no_fill else 'PAPER_PENDING'))
-    return {'sample_id':'paper:'+str(r.get('id')),'source_id':str(r.get('id')),'sample_type':sample_type,'decision_at_signal':'ACCEPTED','fingerprint':r.get('fingerprint'),'symbol':r.get('symbol'),'direction':r.get('side'),'setup':payload.get('setup'),'source':r.get('source'),'signal_created_at':r.get('created_at') or r.get('opened_at'),'entry_status':entry_status,'target_entry':r.get('signal_entry_price') or r.get('entry_price'),'actual_entry':r.get('entry_price') if filled else None,'filled_at':r.get('opened_at') if filled else None,'exit_at':r.get('closed_at') if filled else None,'exit_reason':r.get('close_reason'),'outcome':out,'net_return_pct':net_ret,'r_multiple':rmult,'provider':r.get('execution_provider') if filled else None,'provider_attempts':[],'candle_interval':'paper','ambiguous_same_candle':False,'label_version':'paper_verified_v57','sample_weight':float(os.getenv('EXECUTION_PAPER_SAMPLE_WEIGHT','4.0')),'feature_payload':payload,'updated_at':datetime.now(timezone.utc).isoformat()}
+    return {'sample_id':'paper:'+str(r.get('id')),'source_id':str(r.get('id')),'sample_type':sample_type,'decision_at_signal':'ACCEPTED','fingerprint':r.get('fingerprint'),'symbol':r.get('symbol'),'direction':r.get('side'),'setup':payload.get('setup'),'source':r.get('source'),'signal_created_at':r.get('created_at') or r.get('opened_at'),'entry_status':entry_status,'target_entry':r.get('signal_entry_price') or r.get('entry_price'),'actual_entry':r.get('entry_price') if filled else None,'filled_at':r.get('opened_at') if filled else None,'exit_at':r.get('closed_at') if filled else None,'exit_reason':r.get('close_reason'),'outcome':out,'net_return_pct':net_ret,'r_multiple':rmult,'provider':r.get('execution_provider') if filled else None,'provider_attempts':[],'candle_interval':'paper','ambiguous_same_candle':False,'label_version':'paper_verified_v586_costs','sample_weight':float(os.getenv('EXECUTION_PAPER_SAMPLE_WEIGHT','4.0')),'feature_payload':payload,'updated_at':datetime.now(timezone.utc).isoformat()}
 
 def backfill(limit=10000,dry_run=False):
     shadows=_paged('shadow_signals_v22',limit,'created_at'); sess=requests.Session(); done=unresolved=ambiguous=errors=0
@@ -246,7 +254,7 @@ def backfill(limit=10000,dry_run=False):
     for row in shadows:
         try:
             created=_dt(row.get('created_at')); filled=_dt(row.get('filled_at')); status=str(row.get('status') or '').lower(); payload=row.get('payload') or {}; payload=json.loads(payload) if isinstance(payload,str) else (payload or {}); fp=str(payload.get('fingerprint') or ''); payload=_merge_payload(payload,rich_by_fp.get(fp) or rich_by_key.get(_legacy_match_key(row)))
-            base={'sample_id':'shadow:'+str(row['id']),'source_id':row['id'],'sample_type':'SHADOW_EXECUTION' if filled else 'SHADOW_NO_FILL','decision_at_signal':str(payload.get('decisionAtSignal') or 'REJECTED'),'fingerprint':payload.get('fingerprint'),'symbol':row.get('symbol'),'direction':row.get('direction'),'setup':row.get('setup'),'source':row.get('source'),'signal_created_at':row.get('created_at'),'target_entry':row.get('target_entry'),'actual_entry':row.get('actual_entry'),'filled_at':row.get('filled_at'),'feature_payload':payload,'label_version':'first_hit_v57','sample_weight':1.0,'updated_at':datetime.now(timezone.utc).isoformat(),'ambiguous_same_candle':False}
+            base={'sample_id':'shadow:'+str(row['id']),'source_id':row['id'],'sample_type':'SHADOW_EXECUTION' if filled else 'SHADOW_NO_FILL','decision_at_signal':str(payload.get('decisionAtSignal') or 'REJECTED'),'fingerprint':payload.get('fingerprint'),'symbol':row.get('symbol'),'direction':row.get('direction'),'setup':row.get('setup'),'source':row.get('source'),'signal_created_at':row.get('created_at'),'target_entry':row.get('target_entry'),'actual_entry':row.get('actual_entry'),'filled_at':row.get('filled_at'),'feature_payload':payload,'label_version':'first_hit_v586_costs','sample_weight':1.0,'updated_at':datetime.now(timezone.utc).isoformat(),'ambiguous_same_candle':False}
             if status=='expired' and not filled:base.update(entry_status='no_fill',outcome='NO_FILL',provider_attempts=[])
             elif filled:
                 end=min(filled+timedelta(hours=float(os.getenv('EXECUTION_BACKFILL_MAX_HOLD_HOURS','72'))),datetime.now(timezone.utc)); preferred=str(payload.get('executionProvider') or payload.get('marketProvider') or '').lower() or None
