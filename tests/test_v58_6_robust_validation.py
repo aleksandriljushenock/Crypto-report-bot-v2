@@ -23,7 +23,7 @@ def test_ood_cap_semantics(monkeypatch):
     assert p['threshold'] <= .75
 
 def test_version_586():
-    assert open('VERSION').read().strip()=='58.6.1'
+    assert open('VERSION').read().strip()=='58.6.2'
 
 def test_v5861_breakout_wf_runs_without_main_utility(monkeypatch):
     import execution_model_v57 as m
@@ -35,7 +35,7 @@ def test_v5861_breakout_wf_runs_without_main_utility(monkeypatch):
 
 def test_v5861_runtime_bundle_strips_nonchampion_models():
     import execution_model_v57 as m
-    b={'schema':5861,'version':'x','status':'shadow','trained_at':'t','feature_names':[], 'rows':1,'trigger':'t','models':{'BREAKOUT|LONG':{'key':'BREAKOUT|LONG','samples':1,'fill_prior':.5,'fill':[{'runtime_ok':True}],'outcome':[{'champion_ok':False}]}}}
+    b={'schema':5862,'version':'x','status':'shadow','trained_at':'t','feature_names':[], 'rows':1,'trigger':'t','models':{'BREAKOUT|LONG':{'key':'BREAKOUT|LONG','samples':1,'fill_prior':.5,'fill':[{'runtime_ok':True}],'outcome':[{'champion_ok':False}]}}}
     rb=m._runtime_bundle(b)
     assert rb['models']['BREAKOUT|LONG']['outcome']==[]
     assert rb['models']['BREAKOUT|LONG']['fill']==[]
@@ -43,16 +43,19 @@ def test_v5861_runtime_bundle_strips_nonchampion_models():
 def test_v5861_cloud_bundle_compresses_and_is_minimal(tmp_path):
     import joblib
     import execution_model_v57 as m
-    bundle={'schema':5861,'version':'execution-ensemble-v58.6.1-test','status':'shadow','trained_at':'t','feature_names':['x'],'rows':10,'trigger':'test','models':{'BREAKOUT|LONG':{'key':'BREAKOUT|LONG','samples':10,'fill_prior':.5,'fill':[{'runtime_ok':True,'blob':'x'*10000}],'outcome':[{'champion_ok':False,'blob':'y'*10000}]}}}
+    bundle={'schema':5862,'version':'execution-ensemble-v58.6.2-test','status':'shadow','trained_at':'t','feature_names':['x'],'rows':10,'trigger':'test','models':{'BREAKOUT|LONG':{'key':'BREAKOUT|LONG','samples':10,'fill_prior':.5,'fill':[{'runtime_ok':True,'blob':'x'*10000}],'outcome':[{'champion_ok':False,'blob':'y'*10000}]}}}
     rb=m._runtime_bundle(bundle)
     p=tmp_path/'r.joblib'; joblib.dump(rb,p,compress=3)
     assert p.stat().st_size < 5000
     assert rb['models']['BREAKOUT|LONG']['outcome']==[]
 
 
-def test_v5861_background_execution_cycle_source_contains_auto_pipeline():
+def test_v5862_background_execution_cycle_is_isolated():
     from pathlib import Path
     src=Path('background_services.py').read_text()
-    assert "backfill(limit=integer('EXECUTION_AUTO_BACKFILL_ROWS'" in src
-    assert "train_execution_model_v57(trigger='scheduled-auto')" in src
-    assert 'execution_v58_6_1_latest_diagnostic.json' in src
+    worker=Path('execution_auto_worker.py').read_text()
+    assert "subprocess.Popen" in src
+    assert "execution_auto_worker.py" in src
+    assert "backfill(limit=limit, dry_run=False)" in worker
+    assert "train(trigger='scheduled-auto-subprocess')" in worker
+    assert 'execution_v58_6_2_latest_diagnostic.json' in worker

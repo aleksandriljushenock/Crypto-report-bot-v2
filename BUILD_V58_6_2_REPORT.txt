@@ -1,0 +1,8 @@
+Crypto-report-bot v58.6.2
+Profile: VPS MAX 4 vCPU / 7.71 GiB
+pytest: 306 passed
+compileall: PASS
+Docker compose parse: PASS
+Release secret/runtime exclusion: PASS
+Dockerfile.vps packaged: PASS
+Autonomous subprocess worker packaged: PASS

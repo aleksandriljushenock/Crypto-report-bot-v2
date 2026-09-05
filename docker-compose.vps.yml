@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile.vps
     container_name: crypto-report-bot
     restart: unless-stopped
+    cpus: "4.0"
+    mem_limit: 6g
+    mem_reservation: 2g
     env_file:
       - .env
     environment:
@@ -12,6 +15,10 @@ services:
       LOG_DIR: /app/logs
       TZ: ${TZ:-Europe/Minsk}
       PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: ${VPS_OMP_NUM_THREADS:-4}
+      MKL_NUM_THREADS: ${VPS_MKL_NUM_THREADS:-1}
+      OPENBLAS_NUM_THREADS: ${VPS_OPENBLAS_NUM_THREADS:-1}
+      NUMEXPR_NUM_THREADS: ${VPS_NUMEXPR_NUM_THREADS:-2}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

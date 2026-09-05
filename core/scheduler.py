@@ -38,12 +38,17 @@ class PeriodicWorker:
             return
         while not self._stop.is_set():
             started = time.monotonic()
+            result = None
             try:
-                self.target()
+                result = self.target()
             except Exception as exc:
                 self.logger(f"{self.name}: {exc}")
             elapsed = time.monotonic() - started
             delay = max(30.0, self.interval_seconds - elapsed)
+            # A transient memory/busy guard must not postpone a critical job for
+            # its full multi-hour interval. Retry quickly and autonomously.
+            if isinstance(result, dict) and result.get('status') in {'skipped-memory','skipped-busy'}:
+                delay = min(delay, 60.0)
             if self.jitter_seconds:
                 delay += random.uniform(0, self.jitter_seconds)
             self._stop.wait(delay)

@@ -168,17 +168,17 @@ def _weights(rows):
 def _family(kind, seed):
     if kind=='hgb':
         from sklearn.ensemble import HistGradientBoostingClassifier
-        return HistGradientBoostingClassifier(max_iter=int(os.getenv('EXECUTION_ML_MAX_ITER','500')),learning_rate=float(os.getenv('EXECUTION_ML_LEARNING_RATE','0.045')),max_leaf_nodes=int(os.getenv('EXECUTION_ML_MAX_LEAVES','21')),l2_regularization=float(os.getenv('EXECUTION_ML_L2','1.5')),random_state=seed)
+        return HistGradientBoostingClassifier(max_iter=int(os.getenv('EXECUTION_ML_MAX_ITER','800')),learning_rate=float(os.getenv('EXECUTION_ML_LEARNING_RATE','0.045')),max_leaf_nodes=int(os.getenv('EXECUTION_ML_MAX_LEAVES','21')),l2_regularization=float(os.getenv('EXECUTION_ML_L2','1.5')),random_state=seed)
     if kind=='extra':
         from sklearn.ensemble import ExtraTreesClassifier
-        return ExtraTreesClassifier(n_estimators=int(os.getenv('EXECUTION_ML_TREES','350')),min_samples_leaf=int(os.getenv('EXECUTION_ML_MIN_LEAF','8')),max_features='sqrt',class_weight='balanced',n_jobs=int(os.getenv('EXECUTION_ML_N_JOBS','-1')),random_state=seed)
+        return ExtraTreesClassifier(n_estimators=int(os.getenv('EXECUTION_ML_TREES','600')),min_samples_leaf=int(os.getenv('EXECUTION_ML_MIN_LEAF','8')),max_features='sqrt',class_weight='balanced',n_jobs=int(os.getenv('EXECUTION_ML_N_JOBS','4')),random_state=seed)
     from sklearn.ensemble import RandomForestClassifier
-    return RandomForestClassifier(n_estimators=int(os.getenv('EXECUTION_ML_TREES','300')),min_samples_leaf=int(os.getenv('EXECUTION_ML_MIN_LEAF','8')),max_features='sqrt',class_weight='balanced_subsample',n_jobs=int(os.getenv('EXECUTION_ML_N_JOBS','-1')),random_state=seed)
+    return RandomForestClassifier(n_estimators=int(os.getenv('EXECUTION_ML_TREES','600')),min_samples_leaf=int(os.getenv('EXECUTION_ML_MIN_LEAF','8')),max_features='sqrt',class_weight='balanced_subsample',n_jobs=int(os.getenv('EXECUTION_ML_N_JOBS','4')),random_state=seed)
 
 def _regressor(seed):
     from sklearn.ensemble import HistGradientBoostingRegressor
     # V58: absolute-error loss is deliberately robust to crypto return outliers.
-    return HistGradientBoostingRegressor(loss=os.getenv('EXECUTION_RETURN_LOSS','absolute_error'),max_iter=int(os.getenv('EXECUTION_ML_MAX_ITER','500')),learning_rate=float(os.getenv('EXECUTION_ML_LEARNING_RATE','0.045')),max_leaf_nodes=int(os.getenv('EXECUTION_ML_MAX_LEAVES','21')),l2_regularization=float(os.getenv('EXECUTION_ML_L2','1.5')),random_state=seed)
+    return HistGradientBoostingRegressor(loss=os.getenv('EXECUTION_RETURN_LOSS','absolute_error'),max_iter=int(os.getenv('EXECUTION_ML_MAX_ITER','800')),learning_rate=float(os.getenv('EXECUTION_ML_LEARNING_RATE','0.045')),max_leaf_nodes=int(os.getenv('EXECUTION_ML_MAX_LEAVES','21')),l2_regularization=float(os.getenv('EXECUTION_ML_L2','1.5')),random_state=seed)
 
 def _quantile(values,q):
     vals=sorted(float(v) for v in values)
@@ -231,7 +231,7 @@ def _fit_regime_model(fit_rows, cal_rows, seed):
         return None,None
     X=[_regime_vector(r) for r in fit_rows]
     model=HistGradientBoostingClassifier(
-        max_iter=int(os.getenv('EXECUTION_REGIME_MAX_ITER','250')),
+        max_iter=int(os.getenv('EXECUTION_REGIME_MAX_ITER','500')),
         learning_rate=float(os.getenv('EXECUTION_REGIME_LEARNING_RATE','0.04')),
         max_leaf_nodes=int(os.getenv('EXECUTION_REGIME_MAX_LEAVES','15')),
         l2_regularization=float(os.getenv('EXECUTION_REGIME_L2','2.0')),
@@ -314,7 +314,7 @@ def _block_bootstrap_stats(values, seed=58):
         return {'expectancy_ci':(None,None),'pf_ci':(None,None)}
     import random
     rng=random.Random(seed); n=len(vals)
-    reps=max(100,int(os.getenv('EXECUTION_BOOTSTRAP_REPS','400')))
+    reps=max(100,int(os.getenv('EXECUTION_BOOTSTRAP_REPS','1200')))
     block=max(2,min(n,int(os.getenv('EXECUTION_BOOTSTRAP_BLOCK_TRADES',str(max(3,round(n**0.5)))))))
     means=[]; pfs=[]
     for _ in range(reps):
@@ -582,7 +582,7 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
     return {'classifier':clf,'calibrator':cal,'regressor':reg,'window':window,'family':family,'feature_set':feature_set,'feature_indices':indices,'samples':len(usable),'train_samples':len(tr),'calibration_samples':len(ca),'selection_samples':len(se),'champion_samples':len(ch),'split_meta':split_meta,'auc':auc,'brier':brier,'baseline_auc':bauc,'baseline_brier':bbrier,'base_rate_brier':base_rate_brier,'champion_base_rate_brier':champion_base_rate_brier,'runtime_ok':runtime_ok,'champion_ok':champion_ok,'champion_auc':champion_auc,'champion_brier':champion_brier,'champion_precision20':champion_precision20,'champion_baseline_auc':champion_baseline_auc,'champion_baseline_brier':champion_baseline_brier,'champion_baseline_precision20':champion_baseline_precision20,'gate_failures':gate_failures,**reg_metrics}, None
 
 def _train_group(rows,key):
-    windows=[int(x) for x in os.getenv('EXECUTION_ML_WINDOWS','500,1000,2500,5000').split(',') if x.strip()]
+    windows=[int(x) for x in os.getenv('EXECUTION_ML_WINDOWS','1000,2500,5000,7500').split(',') if x.strip()]
     families=[x.strip() for x in os.getenv('EXECUTION_ML_FAMILIES','hgb,extra,rf').split(',') if x.strip()]
     fill=[]; outcome=[]; rejections=[]
     feature_sets=[x.strip() for x in os.getenv('EXECUTION_ML_FEATURE_SETS','raw,all').split(',') if x.strip()]
@@ -615,34 +615,53 @@ def _upload_bundle(bundle):
     global _LAST_CLOUD_ERROR
     _LAST_CLOUD_ERROR=None
     tmp=MODEL_PATH.with_suffix('.cloud.joblib')
+    verify=MODEL_PATH.with_suffix('.verify.joblib')
     try:
-        import joblib, hashlib
+        import joblib, hashlib, time
         rb=_runtime_bundle(bundle)
         joblib.dump(rb,tmp,compress=3)
         data=tmp.read_bytes(); max_bytes=int(os.getenv('EXECUTION_CLOUD_MAX_BYTES','45000000'))
         if len(data)>max_bytes:
             raise RuntimeError(f'compact runtime bundle too large: {len(data)} > {max_bytes}')
         st=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')); obj=_cloud_path()
-        try:st.upload(obj,data,{'content-type':'application/octet-stream','upsert':'true'})
-        except Exception:st.update(obj,data,{'content-type':'application/octet-stream'})
-        # Read-after-write verification: version/schema/hash must match what was published.
-        downloaded=st.download(obj); downloaded=downloaded if isinstance(downloaded,bytes) else bytes(getattr(downloaded,'content',downloaded))
-        if hashlib.sha256(downloaded).hexdigest()!=hashlib.sha256(data).hexdigest():
-            raise RuntimeError('cloud publish hash verification failed')
-        verify=MODEL_PATH.with_suffix('.verify.joblib'); verify.write_bytes(downloaded); vb=joblib.load(verify); verify.unlink(missing_ok=True)
-        if vb.get('version')!=bundle.get('version') or vb.get('schema')!=bundle.get('schema'):
-            raise RuntimeError('cloud publish version/schema verification failed')
-        return True
+        attempts=max(1,min(5,int(os.getenv('EXECUTION_CLOUD_PUBLISH_RETRIES','3'))))
+        last=None
+        for attempt in range(1,attempts+1):
+            try:
+                try: st.upload(obj,data,{'content-type':'application/octet-stream','upsert':'true'})
+                except Exception: st.update(obj,data,{'content-type':'application/octet-stream'})
+                downloaded=st.download(obj); downloaded=downloaded if isinstance(downloaded,bytes) else bytes(getattr(downloaded,'content',downloaded))
+                if hashlib.sha256(downloaded).hexdigest()!=hashlib.sha256(data).hexdigest():
+                    raise RuntimeError('cloud publish hash verification failed')
+                verify.write_bytes(downloaded); vb=joblib.load(verify)
+                if vb.get('version')!=bundle.get('version') or vb.get('schema')!=bundle.get('schema'):
+                    raise RuntimeError('cloud publish version/schema verification failed')
+                return True
+            except Exception as exc:
+                last=exc
+                if attempt<attempts: time.sleep(min(8,2**(attempt-1)))
+        raise last or RuntimeError('cloud publish failed')
     except Exception as exc:
         _LAST_CLOUD_ERROR=f'{type(exc).__name__}: {exc}'
         return False
     finally:
-        tmp.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True); verify.unlink(missing_ok=True)
 
 def _restore():
     try:
-        data=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')).download(_cloud_path()); MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); MODEL_PATH.write_bytes(data); return True
-    except Exception:return False
+        import joblib
+        data=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')).download(_cloud_path())
+        data=data if isinstance(data,bytes) else bytes(getattr(data,'content',data))
+        tmp=MODEL_PATH.with_suffix('.restore.joblib'); tmp.parent.mkdir(parents=True,exist_ok=True); tmp.write_bytes(data)
+        bundle=joblib.load(tmp)
+        if not isinstance(bundle,dict) or not str(bundle.get('version') or '').startswith('execution-ensemble-'):
+            raise RuntimeError('invalid cloud execution bundle')
+        MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); tmp.replace(MODEL_PATH)
+        return True
+    except Exception:
+        try: MODEL_PATH.with_suffix('.restore.joblib').unlink(missing_ok=True)
+        except Exception: pass
+        return False
 
 def _compact_model_summary(models):
     out={}
@@ -669,7 +688,7 @@ def diagnose(path=None):
 
 def train(trigger='manual'):
     import joblib
-    rows=_load_rows(int(os.getenv('EXECUTION_ML_MAX_ROWS','20000')))
+    rows=_load_rows(int(os.getenv('EXECUTION_ML_MAX_ROWS','30000')))
     minimum=int(os.getenv('EXECUTION_ML_MIN_SAMPLES','240'))
     if len(rows)<minimum:return {'status':'insufficient-data','rows':len(rows)}
     entry_labels=[str(r.get('entry_status') or '').lower() for r in rows]
@@ -689,7 +708,7 @@ def train(trigger='manual'):
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','1')))
     breakout_champions=[m for m in (models.get('BREAKOUT|LONG') or {}).get('outcome',[]) if m.get('champion_ok')]
     status='champion' if len(breakout_champions)>=min_champ else 'shadow'
-    bundle={'schema':5861,'version':'execution-ensemble-v58.6.1-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    bundle={'schema':5862,'version':'execution-ensemble-v58.6.2-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
     MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH,compress=3); cloud=_upload_bundle(bundle); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}

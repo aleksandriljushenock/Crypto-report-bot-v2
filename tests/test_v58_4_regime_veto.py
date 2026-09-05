@@ -17,4 +17,4 @@ def test_ood_threshold_can_be_tightened(monkeypatch):
     assert u["ood_threshold"] <= 1.5
 
 def test_v584_version_file():
-    assert open("VERSION",encoding="utf-8").read().strip()in {"58.4.0","58.5.0","58.6.0","58.6.1"}
+    assert open("VERSION",encoding="utf-8").read().strip()in {"58.4.0","58.5.0","58.6.0","58.6.1","58.6.2"}

@@ -66,14 +66,18 @@ def _memory_allows_load() -> bool:
     if not _bool('CHRONOS_MEMORY_GUARD_ENABLED', True):
         return True
     try:
-        from memory_guard import cleanup, rss_mb
-        cleanup()
-        current = rss_mb()
-        hard = number('MEMORY_HARD_LIMIT_MB', 500.0, strategy=False)
-        headroom = number('CHRONOS_REQUIRED_HEADROOM_MB', 230.0, strategy=False)
-        allowed = current + headroom < hard
+        from memory_guard import cleanup, pressure
+        state = cleanup()
+        current = float(state.get('rssMb') or 0.0)
+        hard = float(state.get('hardLimitMb') or 5600.0)
+        available = float(state.get('effectiveAvailableMb') or 0.0)
+        headroom = number('CHRONOS_REQUIRED_HEADROOM_MB', 512.0, strategy=False)
+        allowed = (current + headroom < hard) and (available <= 0 or available > headroom)
         if not allowed:
-            logger.warning('Chronos skipped by memory guard: rss=%.1fMB required_headroom=%.1fMB hard=%.1fMB', current, headroom, hard)
+            logger.warning(
+                'Chronos skipped by memory guard: rss=%.1fMB available=%.1fMB required_headroom=%.1fMB hard=%.1fMB',
+                current, available, headroom, hard,
+            )
         return allowed
     except Exception:
         return True

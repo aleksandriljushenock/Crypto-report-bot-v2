@@ -20,7 +20,6 @@ from ai_optimizer import run_optimizer
 from adaptive_model_manager import train_candidate
 from strategies.scheduler import run_scheduled_cycle as run_strategy_lab_scheduled_cycle
 from build_profit_profile import rebuild_from_supabase
-from execution_model_v57 import train as train_execution_model_v57
 
 
 from core.scheduler import PeriodicWorker
@@ -102,6 +101,7 @@ class AutomationSupervisor:
         profile_rebuild_minutes = self._minutes('PROFIT_PROFILE_REBUILD_INTERVAL_MINUTES', 1440)
         execution_model_minutes = self._minutes('EXECUTION_ML_TRAIN_INTERVAL_MINUTES', 360)
         execution_backfill_minutes = self._minutes('EXECUTION_BACKFILL_INTERVAL_MINUTES', 1440)
+        execution_auto_pipeline = self._bool_env('EXECUTION_AUTO_PIPELINE_ENABLED', True)
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
@@ -181,12 +181,12 @@ class AutomationSupervisor:
             PeriodicWorker(
                 'execution-v57-model-trainer', execution_model_minutes * 60,
                 self._guarded('execution-v57-model-trainer', self._run_execution_model_v57), self.logger,
-                enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=300,
+                enabled=(self._bool_env('EXECUTION_ML_ENABLED', True) and execution_auto_pipeline), first_delay=integer('EXECUTION_ML_FIRST_DELAY_SECONDS', 120, minimum=30, maximum=3600),
             ),
             PeriodicWorker(
                 'execution-v57-backfill', execution_backfill_minutes * 60,
                 self._guarded('execution-v57-backfill', self._run_execution_backfill_v57), self.logger,
-                enabled=self._bool_env('EXECUTION_BACKFILL_ENABLED', True), first_delay=90,
+                enabled=(self._bool_env('EXECUTION_BACKFILL_ENABLED', True) and not execution_auto_pipeline), first_delay=integer('EXECUTION_BACKFILL_FIRST_DELAY_SECONDS', 1800, minimum=60, maximum=86400),
             ),
         ]
 
@@ -194,6 +194,16 @@ class AutomationSupervisor:
         started = 0
         for worker in self.workers:
             started += int(worker.start())
+        try:
+            from memory_guard import pressure
+            mem = pressure()
+            self.logger(
+                f"VPS resource profile: rss={mem.get('rssMb')}MB available={mem.get('effectiveAvailableMb')}MB "
+                f"soft={mem.get('softLimitMb')}MB hard={mem.get('hardLimitMb')}MB auto_scaled={mem.get('autoScaled')} "
+                f"execution_workers={min(__import__('os').cpu_count() or 1, integer('EXECUTION_VPS_TRAINING_WORKERS',4,minimum=1,maximum=4))}"
+            )
+        except Exception as exc:
+            self.logger(f"VPS resource profile unavailable: {exc}")
         self.logger(f'Автосервисы запущены: {started}/{len(self.workers)}')
         return started
 
@@ -356,34 +366,105 @@ class AutomationSupervisor:
         return result
 
     def _run_execution_model_v57(self):
-        """Fully automatic execution learning cycle: refresh labels -> train -> diagnose -> publish status."""
-        try:
-            from backfill_execution_dataset_v57 import backfill
-            from execution_model_v57 import diagnose
-            import json
-            from pathlib import Path
-            backfill_result=backfill(limit=integer('EXECUTION_AUTO_BACKFILL_ROWS',10000,minimum=1,maximum=20000),dry_run=False)
-            if backfill_result.get('errors'):
-                self.logger(f"Execution ML auto: backfill errors={backfill_result.get('errors')}; training blocked")
-                return {'status':'backfill-error','backfill':backfill_result}
-            result=train_execution_model_v57(trigger='scheduled-auto')
-            diagnostic=diagnose()
-            diag_path=Path('data/execution_v58_6_1_latest_diagnostic.json')
-            diag_path.parent.mkdir(parents=True,exist_ok=True)
-            diag_path.write_text(json.dumps(diagnostic,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-            self.logger(f"Execution ML auto: status={result.get('status')} rows={result.get('rows')} healthy={result.get('healthy_models')} champions={result.get('champion_models')} cloud_saved={result.get('cloud_saved')}")
-            if self.chat_id and self._bool_env('EXECUTION_ML_AUTO_NOTIFY', True):
-                msg=("🧠 <b>Execution ML auto</b>\n"
-                     f"Status: {result.get('status')}\nRows: {result.get('rows')}\n"
-                     f"Healthy: {result.get('healthy_models')} | Champion: {result.get('champion_models')}\n"
-                     f"Cloud: {'OK' if result.get('cloud_saved') else 'ERROR'}")
-                if result.get('cloud_error'): msg += f"\nCloud error: {str(result.get('cloud_error'))[:180]}"
-                try: self.sender(self.chat_id,msg)
-                except Exception as exc: self.logger(f"Execution ML auto notify error: {exc}")
-            return {'status':result.get('status'),'training':result,'backfill':backfill_result,'diagnostic_path':str(diag_path)}
-        except Exception as exc:
-            self.logger(f"Execution ML auto error: {type(exc).__name__}: {exc}")
-            return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
+        """Run the execution-learning pipeline in an isolated subprocess.
+
+        Isolation is intentional: sklearn/NumPy allocations are returned to the OS
+        when the child exits, so the long-lived Telegram process does not retain a
+        multi-GB training heap. The child performs backfill -> train -> diagnose ->
+        cloud verification and writes a compact result JSON for the parent.
+        """
+        import json
+        import os
+        import subprocess
+        import sys
+        import time
+        from pathlib import Path
+
+        result_path = Path('data/execution_auto_result.json')
+        log_path = Path('logs/execution_auto_training.log')
+        state_path = Path('data/execution_auto_state.json')
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        timeout = integer('EXECUTION_TRAINING_TIMEOUT_SECONDS', 10800, minimum=900, maximum=21600)
+        retries = integer('EXECUTION_AUTO_RETRIES', 2, minimum=1, maximum=4)
+        backoff = integer('EXECUTION_AUTO_RETRY_BACKOFF_SECONDS', 60, minimum=10, maximum=900)
+        workers = min(os.cpu_count() or 1, integer('EXECUTION_VPS_TRAINING_WORKERS', 4, minimum=1, maximum=4))
+        env = os.environ.copy()
+        env['EXECUTION_ML_N_JOBS'] = str(workers)
+        env['OMP_NUM_THREADS'] = str(workers)
+        env['MKL_NUM_THREADS'] = '1'
+        env['OPENBLAS_NUM_THREADS'] = '1'
+        env['NUMEXPR_NUM_THREADS'] = '2'
+        if self._bool_env('EXECUTION_VPS_MAX_PROFILE', True):
+            # Force the high-capacity profile in the isolated child even when an
+            # old persistent .env still contains conservative Render-era values.
+            env['EXECUTION_ML_MAX_ROWS'] = str(max(30000, int(float(env.get('EXECUTION_ML_MAX_ROWS', '0') or 0))))
+            env['EXECUTION_ML_MAX_ITER'] = str(max(800, int(float(env.get('EXECUTION_ML_MAX_ITER', '0') or 0))))
+            env['EXECUTION_ML_TREES'] = str(max(600, int(float(env.get('EXECUTION_ML_TREES', '0') or 0))))
+            env['EXECUTION_BOOTSTRAP_REPS'] = str(max(1200, int(float(env.get('EXECUTION_BOOTSTRAP_REPS', '0') or 0))))
+            env['EXECUTION_REGIME_MAX_ITER'] = str(max(500, int(float(env.get('EXECUTION_REGIME_MAX_ITER', '0') or 0))))
+            env['EXECUTION_AUTO_BACKFILL_ROWS'] = str(max(20000, int(float(env.get('EXECUTION_AUTO_BACKFILL_ROWS', '0') or 0))))
+            env['EXECUTION_ML_WINDOWS'] = '1000,2500,5000,7500'
+
+        last_error = None
+        for attempt in range(1, retries + 1):
+            started = time.time()
+            state = {'status': 'running', 'attempt': attempt, 'started_at': datetime.now(timezone.utc).isoformat()}
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+            self.logger(f"Execution ML auto: subprocess start attempt={attempt}/{retries} workers={workers} timeout={timeout}s")
+            with log_path.open('a', encoding='utf-8') as log:
+                log.write(f"\n===== AUTO TRAIN {state['started_at']} attempt={attempt} =====\n")
+                proc = subprocess.Popen(
+                    [sys.executable, 'execution_auto_worker.py'],
+                    stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True,
+                )
+                try:
+                    rc = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    import signal
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        proc.wait(timeout=20)
+                    except Exception:
+                        try: os.killpg(proc.pid, signal.SIGKILL)
+                        except Exception: pass
+                    rc = 124
+                    last_error = f'training-timeout-{timeout}s'
+            if rc == 0 and result_path.exists():
+                try:
+                    result = json.loads(result_path.read_text(encoding='utf-8'))
+                except Exception as exc:
+                    result = {'status': 'error', 'error': f'result-json-error: {exc}'}
+                result['duration_seconds'] = round(time.time() - started, 1)
+                state = {'status': 'finished', 'attempt': attempt, 'finished_at': datetime.now(timezone.utc).isoformat(), 'result': result}
+                state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+                self.logger(
+                    f"Execution ML auto: status={result.get('status')} rows={result.get('rows')} "
+                    f"healthy={result.get('healthy_models')} champions={result.get('champion_models')} "
+                    f"cloud_saved={result.get('cloud_saved')} duration={result.get('duration_seconds')}s"
+                )
+                if self.chat_id and self._bool_env('EXECUTION_ML_AUTO_NOTIFY', True):
+                    analysis=result.get('auto_analysis') or {}
+                    msg=("🧠 <b>Execution ML v58.6.2 auto</b>\n"
+                         f"Status: {result.get('status')}\nRows: {result.get('rows')}\n"
+                         f"Healthy: {result.get('healthy_models')} | Champion: {result.get('champion_models')}\n"
+                         f"BREAKOUT AUC: {analysis.get('champion_auc')} | PF: {analysis.get('champion_pf')}\n"
+                         f"WF: {analysis.get('wf_reason')} | trades={analysis.get('wf_trades')} | PF={analysis.get('wf_pf')} | exp={analysis.get('wf_expectancy')}\n"
+                         f"Cloud: {'OK' if result.get('cloud_saved') else 'ERROR'}\n"
+                         f"Time: {result.get('duration_seconds')} sec")
+                    if result.get('cloud_error'): msg += f"\nCloud error: {str(result.get('cloud_error'))[:180]}"
+                    try: self.sender(self.chat_id,msg)
+                    except Exception as exc: self.logger(f"Execution ML auto notify error: {exc}")
+                return result
+            last_error = last_error or f'worker-exit-{rc}'
+            self.logger(f"Execution ML auto: attempt={attempt} failed: {last_error}")
+            if attempt < retries:
+                time.sleep(backoff * attempt)
+
+        state = {'status': 'error', 'error': last_error, 'finished_at': datetime.now(timezone.utc).isoformat()}
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        return state
 
     def _run_execution_backfill_v57(self):
         try:
@@ -431,8 +512,8 @@ def build_automation_status(supervisor):
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
         'profit-profile-rebuild': 'Profit Profile Rebuild',
-        'execution-v57-model-trainer': 'Execution ML v57',
-        'execution-v57-backfill': 'Execution Backfill v57',
+        'execution-v57-model-trainer': 'Execution ML v58.6.2',
+        'execution-v57-backfill': 'Execution Backfill',
     }
     for name, runtime in status['runtime'].items():
         saved = status['stored'].get(name, {})
