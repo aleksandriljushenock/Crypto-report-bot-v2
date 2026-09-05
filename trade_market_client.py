@@ -13,6 +13,7 @@ logger = logging.getLogger("trade_market_client")
 _PROVIDER_HEALTH = {}
 _PROVIDER_SYMBOLS = {}
 _UNSUPPORTED_SYMBOLS = {}
+_GLOBAL_UNSUPPORTED_UNTIL = {}
 _PROVIDER_MARKET_COUNTS = {}
 _LAST_UNIVERSE_SUMMARY = {}
 _PROVIDER_LOCK = threading.Lock()
@@ -23,6 +24,17 @@ _METHOD_HEALTH = {}
 
 def _provider_order():
     return configured_names()
+
+def normalize_trade_symbol(symbol: str | None) -> str:
+    """Canonical USDT-perpetual symbol used by all futures providers."""
+    raw=str(symbol or '').strip().upper().replace('/','').replace('-','').replace('_','')
+    if not raw:
+        return raw
+    if raw.endswith('USDT'):
+        return raw
+    # Outcome/learning records historically sometimes stored only the base asset.
+    # The production trade universe is USDT perpetual, so canonicalize once here.
+    return raw + 'USDT'
 
 
 def _cooldown_seconds():
@@ -98,6 +110,35 @@ def _rate_limit(provider, method: str = ""):
 
 def _build_provider(name, timeout):
     return create_provider(name, timeout)
+
+
+def _negative_symbol_ttl() -> int:
+    return integer("UNSUPPORTED_SYMBOL_NEGATIVE_TTL_SECONDS", 21600, minimum=300, maximum=604800, strategy=False)
+
+def _global_symbol_blocked(symbol: str | None) -> bool:
+    if not symbol:
+        return False
+    now=time.time(); sym=str(symbol).upper()
+    with _PROVIDER_LOCK:
+        until=float(_GLOBAL_UNSUPPORTED_UNTIL.get(sym,0) or 0)
+        if until and until <= now:
+            _GLOBAL_UNSUPPORTED_UNTIL.pop(sym,None); return False
+        return until > now
+
+def _mark_global_symbol_unsupported(symbol: str | None) -> None:
+    if not symbol:
+        return
+    with _PROVIDER_LOCK:
+        _GLOBAL_UNSUPPORTED_UNTIL[str(symbol).upper()] = time.time() + _negative_symbol_ttl()
+
+def _looks_like_unsupported_symbol(exc: Exception) -> bool:
+    text=f"{type(exc).__name__}: {exc}".lower()
+    markers=(
+        'symbol is invalid','invalid symbol','unknown symbol','symbol not found',
+        'unsupported symbol','does not exist','instrument not found','contract not found',
+        'market symbol not found','ticker not found'
+    )
+    return any(m in text for m in markers)
 
 def _mark_symbol_unsupported(provider, symbol):
     if not symbol:
@@ -287,8 +328,14 @@ class FallbackTradeMarketClient:
         symbol = kwargs.get("symbol")
         if symbol is None and args and method not in {"ticker_24h_all", "exchange_info"}:
             first = args[0]
-            if isinstance(first, str) and first.upper().endswith("USDT"):
-                symbol = first.upper()
+            if isinstance(first, str):
+                symbol = normalize_trade_symbol(first)
+                args = (symbol,) + tuple(args[1:])
+        elif symbol is not None:
+            symbol = normalize_trade_symbol(symbol)
+            kwargs = dict(kwargs); kwargs["symbol"] = symbol
+        if _global_symbol_blocked(symbol):
+            raise UnsupportedSymbolError(f"globally cached unsupported symbol: {symbol}")
 
         for name in self.provider_names:
             if not _available(name, method):
@@ -315,13 +362,23 @@ class FallbackTradeMarketClient:
                 errors.append(f"{name}: unsupported: {exc}")
                 logger.debug("Trade market symbol unsupported: method=%s provider=%s symbol=%s", method, name, symbol)
             except Exception as exc:
-                if _should_trip_provider(exc):
+                if symbol and _looks_like_unsupported_symbol(exc):
+                    _mark_symbol_unsupported(name, symbol)
+                    errors.append(f"{name}: unsupported: {exc}")
+                    logger.debug("Trade market invalid symbol cached: method=%s provider=%s symbol=%s", method, name, symbol)
+                elif _should_trip_provider(exc):
                     _mark_failed(name, exc, method)
                     logger.warning("Trade market provider failed: method=%s provider=%s error=%s", method, name, exc)
+                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
                 else:
                     _mark_soft_failure(name, exc, method)
                     logger.debug("Trade market method unavailable: method=%s provider=%s error=%s", method, name, exc)
-                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
+        if symbol and self.provider_names and all(not _provider_supports_symbol(name, symbol) for name in self.provider_names):
+            _mark_global_symbol_unsupported(symbol)
+            self.last_errors = errors
+            raise UnsupportedSymbolError(f"no configured provider supports symbol: {symbol}")
 
         if not attempted:
             errors.append("all eligible providers are on cooldown or unsupported")

@@ -40,7 +40,7 @@ def test_release_builder_includes_vps_dockerfile():
 
 def test_autonomous_worker_isolated_and_diagnostic_versioned():
     text=Path('execution_auto_worker.py').read_text()
-    assert 'execution_v58_6_2_latest_diagnostic.json' in text
+    assert 'execution_v58_6_3_latest_diagnostic.json' in text
     assert "train(trigger='scheduled-auto-subprocess')" in text
 
 

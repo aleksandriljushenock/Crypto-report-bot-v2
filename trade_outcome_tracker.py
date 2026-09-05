@@ -10,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from trade_market_client import create_trade_market_client
+from trade_market_client import create_trade_market_client, normalize_trade_symbol
+from market_errors import UnsupportedSymbolError
 
 logger = logging.getLogger("trade_outcome_tracker")
 
@@ -141,7 +142,7 @@ def register_trade_signal(signal: dict[str, Any], cloud_id: str | None = None, p
     fingerprint = str(signal.get("fingerprint") or "")
     if entry is None or not fingerprint:
         return False
-    symbol = str(signal.get("symbol") or "").upper()
+    symbol = normalize_trade_symbol(signal.get("symbol"))
     direction = str(signal.get("direction") or signal.get("signal_direction") or "")
     timeframe = str(signal.get("timeframe") or signal.get("interval") or "unknown").lower()
     created_at = str(signal.get("created_at") or signal.get("signal_created_at") or utc_iso()) if preserve_created_at else utc_iso()
@@ -241,6 +242,8 @@ def _historical_prices(client: Any, symbol: str, target: datetime, now: datetime
             end = datetime.fromtimestamp(float(item[6]) / 1000.0, tz=timezone.utc) if len(item) > 6 and item[6] is not None else start + timedelta(minutes=minutes)
             result.append((start, end, float(item[4]), float(item[2]), float(item[3])))
         return sorted(result, key=lambda x: x[0])
+    except UnsupportedSymbolError:
+        raise
     except Exception as exc:
         logger.warning("Historical candle recovery unavailable for %s: %s", symbol, exc)
         return []
@@ -357,7 +360,9 @@ def update_trade_outcomes() -> dict[str, Any]:
     """Recover cloud rows, calculate due horizons and durably sync every result."""
     initialize_trade_outcomes()
     imported = sync_pending_from_cloud()
-    client = create_trade_market_client()
+    default_client = create_trade_market_client()
+    client_cache: dict[str, Any] = {}
+    unavailable_symbols: set[str] = set()
     now = utc_now()
     retention_days = max(7, int(os.getenv("TRACKED_SIGNAL_RETENTION_DAYS", "30")))
     recovery_days = max(retention_days, int(os.getenv("OUTCOME_MAX_RECOVERY_DAYS", "45")))
@@ -374,6 +379,23 @@ def update_trade_outcomes() -> dict[str, Any]:
                 errors.append(f"fingerprint={row['fingerprint']}: bad created_at: {exc}")
                 continue
             row_changed = False
+            symbol_key = normalize_trade_symbol(row["symbol"])
+            if symbol_key and symbol_key != str(row["symbol"] or "").upper():
+                conn.execute("UPDATE tracked_signals SET symbol=? WHERE fingerprint=?", (symbol_key, row["fingerprint"]))
+            if symbol_key in unavailable_symbols:
+                continue
+            client = default_client
+            try:
+                original = json.loads(row["payload_json"] or "{}")
+                provider_hint = str(original.get("execution_provider") or original.get("executionProvider") or original.get("exchange") or "").lower()
+                if provider_hint:
+                    if provider_hint not in client_cache:
+                        from exchanges.registry import configured_names
+                        order=[provider_hint] + [x for x in configured_names() if x != provider_hint]
+                        client_cache[provider_hint]=create_trade_market_client(providers=order)
+                    client=client_cache[provider_hint]
+            except Exception:
+                client=default_client
             for horizon, hours in HORIZONS.items():
                 if now < created + timedelta(hours=hours):
                     continue
@@ -400,7 +422,7 @@ def update_trade_outcomes() -> dict[str, Any]:
                     interval = "1m" if age_minutes + 1 <= 1000 else ("5m" if age_minutes + 5 <= 5000 else "1h")
                     cache_key = (str(row["symbol"]), interval)
                     if cache_key not in candle_cache:
-                        candle_cache[cache_key] = _historical_prices(client, row["symbol"], target_time, now=now)
+                        candle_cache[cache_key] = _historical_prices(client, symbol_key, target_time, now=now)
                     historical_price = _price_at(candle_cache[cache_key], target_time)
                     if historical_price is None:
                         # A historical label must never fall back to the *current* ticker.
@@ -424,6 +446,11 @@ def update_trade_outcomes() -> dict[str, Any]:
                     )
                     updated += 1
                     row_changed = True
+                except UnsupportedSymbolError as exc:
+                    unavailable_symbols.add(symbol_key)
+                    error = f"symbol={symbol_key}, status=market-unavailable, error={exc}"
+                    logger.info("Outcome tracker market unavailable (negative cached): %s", error)
+                    break
                 except Exception as exc:
                     error = f"symbol={row['symbol']}, horizon={horizon}, fingerprint={row['fingerprint']}, error={type(exc).__name__}: {exc}"
                     logger.warning("Outcome tracker error: %s", error)
@@ -453,7 +480,7 @@ def update_trade_outcomes() -> dict[str, Any]:
             fingerprint IN (SELECT fingerprint FROM trade_outcomes WHERE horizon=?) OR
             fingerprint IN (SELECT fingerprint FROM outcome_failures WHERE horizon=?)
         )""", (cutoff, OUTCOME_COMPLETE_HORIZON, OUTCOME_COMPLETE_HORIZON))
-    return {"imported": imported, "updated": updated, "cloud_synced": cloud_synced, "errors": errors}
+    return {"imported": imported, "updated": updated, "cloud_synced": cloud_synced, "unsupported_symbols": sorted(unavailable_symbols), "errors": errors}
 
 
 def get_trade_performance() -> list[dict[str, Any]]:

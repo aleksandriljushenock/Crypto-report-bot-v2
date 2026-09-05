@@ -3,7 +3,7 @@
 from pathlib import Path
 import re, zipfile, sys
 ROOT=Path(__file__).resolve().parents[1]
-OUT=Path(sys.argv[1] if len(sys.argv)>1 else ROOT/'dist'/'Crypto-report-bot-v58.6.2-vps-max.zip')
+OUT=Path(sys.argv[1] if len(sys.argv)>1 else ROOT/'dist'/'Crypto-report-bot-v58.6.3-orchestrated.zip')
 EXCLUDE={'.git','.pytest_cache','__pycache__','logs','data','models','checkpoints','backups','.venv','venv','env','dist'}
 SECRET_NAMES=re.compile(r'^\.env(?!.*\.example$)',re.I)
 SECRET_PATTERNS=[re.compile(r'\bsk-[A-Za-z0-9_-]{20,}\b'), re.compile(r'(?i)service_role_[A-Za-z0-9._-]{24,}'), re.compile(r'\b\d{6,12}:[A-Za-z0-9_-]{30,}\b'), re.compile(r'\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b')]

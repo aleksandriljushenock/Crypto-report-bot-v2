@@ -10,7 +10,7 @@ from learning_engine_v14 import train as train_v14
 
 def train():
     from model_training_coordinator import training_slot
-    with training_slot() as acquired:
+    with training_slot(owner="train-cloud-v14") as acquired:
         if not acquired:
             return {"status": "already-running"}
         return train_v14(DEFAULT_WEIGHTS)

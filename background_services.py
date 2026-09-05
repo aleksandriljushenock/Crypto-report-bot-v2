@@ -28,8 +28,9 @@ from core.runtime_config import boolean, integer, number
 from core.events import emit
 
 
-_HEAVY_TASK_LOCK = threading.Lock()
+_HEAVY_TASK_LOCK = threading.Lock()  # legacy compatibility only; orchestration uses priority queue
 _PAPER_TASK_LOCK = threading.Lock()
+_IO_TASK_SEMAPHORE = threading.BoundedSemaphore(4)
 
 
 class AutomationSupervisor:
@@ -48,39 +49,70 @@ class AutomationSupervisor:
     def _minutes(name, default):
         return integer(name, default, minimum=1)
 
-    def _guarded(self, name, callback, *, shared_heavy_lock=True):
+    def _guarded(self, name, callback, *, lock_kind="heavy", shared_heavy_lock=None):
+        if shared_heavy_lock is not None:
+            lock_kind = 'heavy' if shared_heavy_lock else 'paper'
         def runner():
+            from contextlib import nullcontext
             from memory_guard import cleanup, pressure
             state = pressure()
             if state.get('high'):
                 cleanup()
                 state = pressure()
             if state.get('critical'):
-                self.logger(f"{name}: skipped due to critical memory rss={state.get('rssMb')}MB")
+                self.logger(f"{name}: skipped due to critical memory rss={state.get('rssMb')}MB available={state.get('effectiveAvailableMb')}MB")
                 return {'status': 'skipped-memory', 'rssMb': state.get('rssMb')}
 
-            lock = _HEAVY_TASK_LOCK if shared_heavy_lock else _PAPER_TASK_LOCK
-            if not lock.acquire(blocking=False):
-                reason = 'another heavy task is running' if shared_heavy_lock else 'previous paper cycle is still running'
-                self.logger(f"{name}: skipped because {reason}")
-                return {'status': 'skipped-busy'}
-            runtime_key = 'heavy_task' if shared_heavy_lock else 'paper_task'
-            runtime_start(runtime_key, name=name)
-            emit('BACKGROUND_TASK_STARTED', name=name)
-            try:
-                result=callback()
-                try: save_service_state(name, True, payload=result if isinstance(result,dict) else {"result":str(result)[:500]})
-                except Exception: pass
-                return result
-            except Exception as exc:
-                try: save_service_state(name, False, payload={}, error=f"{type(exc).__name__}: {exc}")
-                except Exception: pass
-                raise
-            finally:
-                emit('BACKGROUND_TASK_FINISHED', name=name)
-                runtime_finish(runtime_key)
-                cleanup()
-                lock.release()
+            acquired = False
+            slot_ctx = None
+            if lock_kind == 'heavy':
+                from core.heavy_task_coordinator import heavy_slot, snapshot
+                wait_seconds = integer('HEAVY_TASK_QUEUE_WAIT_SECONDS', 7200, minimum=60, maximum=21600)
+                snap = snapshot()
+                if snap.get('active'):
+                    a=snap['active']
+                    self.logger(f"{name}: queued behind heavy owner={a.get('name')} pid={a.get('pid')} elapsed={a.get('elapsed_seconds')}s")
+                slot_ctx = heavy_slot(name, wait_seconds=wait_seconds)
+            elif lock_kind == 'paper':
+                class _LockCtx:
+                    def __enter__(_self): return _PAPER_TASK_LOCK.acquire(timeout=30)
+                    def __exit__(_self,*_):
+                        if acquired: _PAPER_TASK_LOCK.release()
+                slot_ctx = _LockCtx()
+            elif lock_kind == 'io':
+                class _IoCtx:
+                    def __enter__(_self): return _IO_TASK_SEMAPHORE.acquire(timeout=60)
+                    def __exit__(_self,*_):
+                        if acquired: _IO_TASK_SEMAPHORE.release()
+                slot_ctx = _IoCtx()
+            else:
+                slot_ctx = nullcontext(True)
+
+            with slot_ctx as acquired:
+                if not acquired:
+                    self.logger(f"{name}: queue wait timed out lock_kind={lock_kind}")
+                    return {'status': 'skipped-busy', 'lockKind': lock_kind}
+                # Re-check memory after queueing; another job may have changed pressure.
+                state = pressure()
+                if state.get('critical'):
+                    self.logger(f"{name}: deferred after queue due to critical memory rss={state.get('rssMb')}MB available={state.get('effectiveAvailableMb')}MB")
+                    return {'status': 'skipped-memory', 'rssMb': state.get('rssMb')}
+                runtime_key = 'heavy_task' if lock_kind == 'heavy' else f'{lock_kind}_task'
+                runtime_start(runtime_key, name=name)
+                emit('BACKGROUND_TASK_STARTED', name=name, lock_kind=lock_kind)
+                try:
+                    result=callback()
+                    try: save_service_state(name, True, payload=result if isinstance(result,dict) else {"result":str(result)[:500]})
+                    except Exception: pass
+                    return result
+                except Exception as exc:
+                    try: save_service_state(name, False, payload={}, error=f"{type(exc).__name__}: {exc}")
+                    except Exception: pass
+                    raise
+                finally:
+                    emit('BACKGROUND_TASK_FINISHED', name=name, lock_kind=lock_kind)
+                    runtime_finish(runtime_key)
+                    cleanup()
         return runner
 
     def _build_workers(self):
@@ -105,52 +137,52 @@ class AutomationSupervisor:
         self.workers = [
             PeriodicWorker(
                 'early-discovery-monitor', discovery_minutes * 60,
-                self._guarded('early-discovery-monitor', self._run_discovery), self.logger,
+                self._guarded('early-discovery-monitor', self._run_discovery, lock_kind='io'), self.logger,
                 enabled=self._bool_env('DISCOVERY_MONITOR_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=20,
             ),
             PeriodicWorker(
                 'listing-database-refresh', listing_minutes * 60,
-                self._guarded('listing-database-refresh', self._run_listing_refresh), self.logger,
+                self._guarded('listing-database-refresh', self._run_listing_refresh, lock_kind='io'), self.logger,
                 enabled=self._bool_env('LISTING_REFRESH_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=60,
             ),
             PeriodicWorker(
                 'trade-outcome-tracker', trade_outcome_minutes * 60,
-                self._guarded('trade-outcome-tracker', self._run_trade_outcomes), self.logger,
+                self._guarded('trade-outcome-tracker', self._run_trade_outcomes, lock_kind='io'), self.logger,
                 enabled=self._bool_env('TRADE_OUTCOME_TRACKER_ENABLED', True), first_delay=120,
             ),
             PeriodicWorker(
                 'paper-trading-tracker', paper_minutes * 60,
-                self._guarded('paper-trading-tracker', self._run_paper_trading, shared_heavy_lock=False), self.logger,
+                self._guarded('paper-trading-tracker', self._run_paper_trading, lock_kind='paper'), self.logger,
                 enabled=self._bool_env('PAPER_TRACKER_ENABLED', True), first_delay=45,
             ),
             PeriodicWorker(
                 'outcome-tracker', outcome_minutes * 60,
-                self._guarded('outcome-tracker', self._run_outcomes), self.logger,
+                self._guarded('outcome-tracker', self._run_outcomes, lock_kind='io'), self.logger,
                 enabled=self._bool_env('OUTCOME_TRACKER_ENABLED', True), first_delay=90,
             ),
             PeriodicWorker(
                 'capital-flow-engine', capital_flow_minutes * 60,
-                self._guarded('capital-flow-engine', self._run_capital_flows), self.logger,
+                self._guarded('capital-flow-engine', self._run_capital_flows, lock_kind='io'), self.logger,
                 enabled=self._bool_env('CAPITAL_FLOW_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=45,
             ),
             PeriodicWorker(
                 'ai-news-engine', news_minutes * 60,
-                self._guarded('ai-news-engine', self._run_news), self.logger,
+                self._guarded('ai-news-engine', self._run_news, lock_kind='io'), self.logger,
                 enabled=self._bool_env('NEWS_ENGINE_ENABLED', True), first_delay=75,
             ),
             PeriodicWorker(
                 'narrative-engine', narrative_minutes * 60,
-                self._guarded('narrative-engine', self._run_narratives), self.logger,
+                self._guarded('narrative-engine', self._run_narratives, lock_kind='io'), self.logger,
                 enabled=self._bool_env('NARRATIVE_ENGINE_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=105,
             ),
             PeriodicWorker(
                 'smart-money-engine', smart_money_minutes * 60,
-                self._guarded('smart-money-engine', self._run_smart_money), self.logger,
+                self._guarded('smart-money-engine', self._run_smart_money, lock_kind='io'), self.logger,
                 enabled=self._bool_env('SMART_MONEY_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=135,
             ),
             PeriodicWorker(
                 'ai-intelligence-engine', ai_minutes * 60,
-                self._guarded('ai-intelligence-engine', self._run_ai_intelligence), self.logger,
+                self._guarded('ai-intelligence-engine', self._run_ai_intelligence, lock_kind='io'), self.logger,
                 enabled=self._bool_env('AI_INTELLIGENCE_ENABLED', not self._bool_env('LOW_MEMORY_MODE', True)), first_delay=150,
             ),
             PeriodicWorker(
@@ -214,7 +246,17 @@ class AutomationSupervisor:
     def status(self):
         runtime = {w.name: {'enabled': w.enabled, 'alive': w.alive(), 'intervalMinutes': round(w.interval_seconds / 60)} for w in self.workers}
         stored = {row['service']: row for row in get_service_states()}
-        return {'runtime': runtime, 'stored': stored}
+        try:
+            from core.heavy_task_coordinator import snapshot as heavy_snapshot
+            heavy = heavy_snapshot()
+        except Exception as exc:
+            heavy = {'error': f'{type(exc).__name__}: {exc}'}
+        try:
+            from model_training_coordinator import local_training_status, distributed_training_status
+            training = {'local': local_training_status(), 'distributed': distributed_training_status()}
+        except Exception as exc:
+            training = {'error': f'{type(exc).__name__}: {exc}'}
+        return {'runtime': runtime, 'stored': stored, 'heavyQueue': heavy, 'trainingLease': training}
 
     def _run_discovery(self):
         limit = integer('DISCOVERY_ANALYSIS_LIMIT', 20, minimum=1)
@@ -250,7 +292,7 @@ class AutomationSupervisor:
 
     def _run_trade_outcomes(self):
         result = update_trade_outcomes()
-        self.logger(f"Trade outcomes: imported={result.get('imported')}, updated={result.get('updated')}, cloud_synced={result.get('cloud_synced')}, errors={len(result.get('errors', []))}")
+        self.logger(f"Trade outcomes: imported={result.get('imported')}, updated={result.get('updated')}, cloud_synced={result.get('cloud_synced')}, unsupported={len(result.get('unsupported_symbols', []))}, errors={len(result.get('errors', []))}")
         return result
 
     def _run_paper_trading(self):
@@ -381,6 +423,7 @@ class AutomationSupervisor:
         from pathlib import Path
 
         result_path = Path('data/execution_auto_result.json')
+        progress_path = Path('data/execution_auto_progress.json')
         log_path = Path('logs/execution_auto_training.log')
         state_path = Path('data/execution_auto_state.json')
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -396,6 +439,7 @@ class AutomationSupervisor:
         env['MKL_NUM_THREADS'] = '1'
         env['OPENBLAS_NUM_THREADS'] = '1'
         env['NUMEXPR_NUM_THREADS'] = '2'
+        env['EXECUTION_AUTO_PROGRESS_PATH'] = str(progress_path)
         if self._bool_env('EXECUTION_VPS_MAX_PROFILE', True):
             # Force the high-capacity profile in the isolated child even when an
             # old persistent .env still contains conservative Render-era values.
@@ -413,15 +457,44 @@ class AutomationSupervisor:
             state = {'status': 'running', 'attempt': attempt, 'started_at': datetime.now(timezone.utc).isoformat()}
             state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
             self.logger(f"Execution ML auto: subprocess start attempt={attempt}/{retries} workers={workers} timeout={timeout}s")
+            # Never accept a stale result/progress file from a previous cycle.
+            for stale in (result_path, progress_path):
+                try: stale.unlink(missing_ok=True)
+                except Exception: pass
             with log_path.open('a', encoding='utf-8') as log:
                 log.write(f"\n===== AUTO TRAIN {state['started_at']} attempt={attempt} =====\n")
                 proc = subprocess.Popen(
                     [sys.executable, 'execution_auto_worker.py'],
                     stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True,
                 )
-                try:
-                    rc = proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
+                deadline = time.monotonic() + timeout
+                last_stage = None
+                last_heartbeat = 0.0
+                rc = None
+                while time.monotonic() < deadline:
+                    rc = proc.poll()
+                    if rc is not None:
+                        break
+                    stage = None
+                    try:
+                        if progress_path.exists():
+                            progress = json.loads(progress_path.read_text(encoding='utf-8'))
+                            stage = progress.get('stage')
+                    except Exception:
+                        progress = {}
+                    now_mono = time.monotonic()
+                    if stage != last_stage or now_mono - last_heartbeat >= 60:
+                        rss_mb = None
+                        try:
+                            for line in Path(f'/proc/{proc.pid}/status').read_text().splitlines():
+                                if line.startswith('VmRSS:'):
+                                    rss_mb = round(int(line.split()[1]) / 1024.0, 1); break
+                        except Exception:
+                            pass
+                        self.logger(f"Execution ML auto: running pid={proc.pid} stage={stage or 'starting'} elapsed={round(timeout-(deadline-now_mono),1)}s rss={rss_mb}MB")
+                        last_stage = stage; last_heartbeat = now_mono
+                    time.sleep(2)
+                if rc is None:
                     import signal
                     try:
                         os.killpg(proc.pid, signal.SIGTERM)
@@ -431,6 +504,13 @@ class AutomationSupervisor:
                         except Exception: pass
                     rc = 124
                     last_error = f'training-timeout-{timeout}s'
+            if rc == 4 and result_path.exists():
+                try:
+                    busy_result = json.loads(result_path.read_text(encoding='utf-8'))
+                except Exception:
+                    busy_result = {'status': 'training-slot-busy'}
+                self.logger('Execution ML auto: distributed training lease busy; releasing local queue and retrying later')
+                return {'status': 'skipped-busy', 'reason': 'distributed-training-lease', 'worker': busy_result}
             if rc == 0 and result_path.exists():
                 try:
                     result = json.loads(result_path.read_text(encoding='utf-8'))
@@ -446,7 +526,7 @@ class AutomationSupervisor:
                 )
                 if self.chat_id and self._bool_env('EXECUTION_ML_AUTO_NOTIFY', True):
                     analysis=result.get('auto_analysis') or {}
-                    msg=("🧠 <b>Execution ML v58.6.2 auto</b>\n"
+                    msg=("🧠 <b>Execution ML v58.6.3 auto</b>\n"
                          f"Status: {result.get('status')}\nRows: {result.get('rows')}\n"
                          f"Healthy: {result.get('healthy_models')} | Champion: {result.get('champion_models')}\n"
                          f"BREAKOUT AUC: {analysis.get('champion_auc')} | PF: {analysis.get('champion_pf')}\n"
@@ -512,7 +592,7 @@ def build_automation_status(supervisor):
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
         'profit-profile-rebuild': 'Profit Profile Rebuild',
-        'execution-v57-model-trainer': 'Execution ML v58.6.2',
+        'execution-v57-model-trainer': 'Execution ML v58.6.3',
         'execution-v57-backfill': 'Execution Backfill',
     }
     for name, runtime in status['runtime'].items():

@@ -1,0 +1,9 @@
+Crypto-report-bot v58.6.3
+Focus: autonomous heavy-task orchestration + outcome symbol recovery
+VPS profile: 4 vCPU / 6 GiB Docker RAM
+Execution ML workers: 4
+Heavy tasks: priority/FIFO queued
+Network jobs: independent I/O semaphore
+Distributed execution lease owner: enabled
+Unsupported-symbol negative cache: enabled
+Outcome symbol canonicalization: enabled

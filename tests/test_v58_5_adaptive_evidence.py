@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 import execution_model_v57 as m
 
 def test_v585_version():
-    assert open('VERSION',encoding='utf-8').read().strip()in {'58.5.0','58.6.0','58.6.1','58.6.2'},'58.6.0'
+    assert open('VERSION',encoding='utf-8').read().strip()in {'58.5.0','58.6.0','58.6.1','58.6.2','58.6.3'},'58.6.0'
 
 def test_adaptive_inner_plan_expands_and_preserves_train(monkeypatch):
     monkeypatch.setenv('EXECUTION_WF_INNER_MIN_ROWS','60')

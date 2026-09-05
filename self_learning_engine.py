@@ -7,7 +7,7 @@ from learning_engine_v14 import diagnostics, train
 
 
 def retrain():
-    with training_slot() as acquired:
+    with training_slot(owner="self-learning-v14") as acquired:
         if not acquired:
             local = {"status": "already-running", "message": "another model training is already running"}
             return {"local": local, "cloudAdaptive": {"status": "skipped"}, "status": "already-running"}

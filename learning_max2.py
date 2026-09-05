@@ -227,7 +227,7 @@ def explain(features: Mapping[str, Any], prediction: Mapping[str, Any]) -> Dict[
 def train_incremental() -> Dict[str, Any]:
     """Safe incremental trigger through the global training coordinator."""
     from model_training_coordinator import training_slot
-    with training_slot() as acquired:
+    with training_slot(owner="learning-max2-incremental") as acquired:
         if not acquired:
             return {"status": "already-running"}
         return train(DEFAULT_WEIGHTS)

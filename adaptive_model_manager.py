@@ -249,7 +249,7 @@ def latest_models(limit: int = 5) -> List[Dict[str, Any]]:
 
 def train_candidate(trigger: str = "scheduled") -> Dict[str, Any]:
     from model_training_coordinator import training_slot
-    with training_slot() as acquired:
+    with training_slot(owner=f"adaptive-model:{trigger}") as acquired:
         if not acquired:
             return {"status": "already-running", "trigger": trigger}
         return _train_candidate_unlocked(trigger)

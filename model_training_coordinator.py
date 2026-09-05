@@ -21,12 +21,12 @@ def _client():
     from cloud_client import get_supabase_client
     return get_supabase_client()
 
-def _ttl(): return max(180,int(os.getenv("MODEL_TRAINING_LEASE_SECONDS","900")))
+def _ttl(): return max(180,int(os.getenv("MODEL_TRAINING_LEASE_SECONDS","360")))
 
-def _acquire(token):
+def _acquire(token, owner):
     if not _enabled(): return True,0
     try:
-        data=_client().rpc("model_training_lease_acquire_v48",{"p_lock_name":"v14-training","p_token":token,"p_owner":socket.gethostname(),"p_ttl_seconds":_ttl()}).execute().data
+        data=_client().rpc("model_training_lease_acquire_v48",{"p_lock_name":"v14-training","p_token":token,"p_owner":str(owner),"p_ttl_seconds":_ttl()}).execute().data
         if isinstance(data,dict): return bool(data.get("ok")),int(data.get("generation") or 0)
         return False,0
     except Exception:
@@ -78,7 +78,7 @@ def lease_fence()->tuple[str|None,int|None]:
         return str(_ACTIVE["token"]),int(_ACTIVE["generation"])
 
 @contextmanager
-def training_slot():
+def training_slot(owner: str = "unknown"):
     global _ACTIVE
     if not _LOCAL.acquire(blocking=False): yield False; return
     fh=None; locked=False; token=uuid.uuid4().hex; distributed=False; generation=0
@@ -89,10 +89,11 @@ def training_slot():
             try: fcntl.flock(fh.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB); locked=True
             except BlockingIOError: yield False; return
         else: locked=True
-        distributed,generation=_acquire(token)
+        owner_label=f"{socket.gethostname()}:{os.getpid()}:{owner}"
+        distributed,generation=_acquire(token, owner_label)
         if not distributed: yield False; return
         with _STATE_LOCK:
-            _ACTIVE={"token":token,"generation":generation,"lost":lost}
+            _ACTIVE={"token":token,"generation":generation,"lost":lost,"owner":owner_label,"started_at":time.time(),"pid":os.getpid()}
         if _enabled():
             hb=threading.Thread(target=_heartbeat,args=(token,generation,stop,lost),daemon=True,name="model-training-lease-heartbeat"); hb.start()
         yield True
@@ -109,6 +110,29 @@ def training_slot():
             try: fh.close()
             except Exception: pass
         _LOCAL.release()
+
+def local_training_status() -> dict:
+    with _STATE_LOCK:
+        state=_ACTIVE
+        if not state:
+            return {"active": False}
+        return {
+            "active": True, "owner": state.get("owner"), "pid": state.get("pid"),
+            "generation": state.get("generation"), "lease_lost": bool(state["lost"].is_set()),
+            "elapsed_seconds": round(max(0.0,time.time()-float(state.get("started_at") or time.time())),1),
+        }
+
+def distributed_training_status() -> dict:
+    if not _enabled():
+        return {"enabled": False, "active": False}
+    try:
+        rows=(_client().table("model_training_leases_v46").select("lock_name,owner,expires_at,updated_at,generation")
+              .eq("lock_name","v14-training").limit(1).execute().data or [])
+        if not rows:
+            return {"enabled": True, "active": False}
+        row=dict(rows[0]); row.update({"enabled": True, "active": True}); return row
+    except Exception as exc:
+        return {"enabled": True, "active": None, "error": f"{type(exc).__name__}: {exc}"}
 
 def training_running()->bool:
     if not _LOCAL.acquire(blocking=False): return True

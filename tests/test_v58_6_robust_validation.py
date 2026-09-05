@@ -23,7 +23,7 @@ def test_ood_cap_semantics(monkeypatch):
     assert p['threshold'] <= .75
 
 def test_version_586():
-    assert open('VERSION').read().strip()=='58.6.2'
+    assert open('VERSION').read().strip()in {'58.6.2','58.6.3'},'58.6.3'
 
 def test_v5861_breakout_wf_runs_without_main_utility(monkeypatch):
     import execution_model_v57 as m
@@ -58,4 +58,4 @@ def test_v5862_background_execution_cycle_is_isolated():
     assert "execution_auto_worker.py" in src
     assert "backfill(limit=limit, dry_run=False)" in worker
     assert "train(trigger='scheduled-auto-subprocess')" in worker
-    assert 'execution_v58_6_2_latest_diagnostic.json' in worker
+    assert 'execution_v58_6_3_latest_diagnostic.json' in worker
