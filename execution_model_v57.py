@@ -570,7 +570,7 @@ def _fit_one(rows,task,window,family='hgb',seed=55,feature_set='all'):
         # Walk-forward is deliberately restricted to the specialist that has demonstrated economic edge.
         # GLOBAL/PULLBACK stay fail-closed even if an isolated split looks attractive.
         allow_economic=(specialist_key(usable[-1])=='BREAKOUT|LONG') if usable else False
-        wf=_walk_forward_utility(usable,indices,family,seed,utility_threshold,utility_probability_threshold) if utility_ok and allow_economic else {'ok':False,'reason':'specialist_not_enabled' if utility_ok else 'utility_not_ready','folds':[]}
+        wf=_walk_forward_utility(usable,indices,family,seed,utility_threshold,utility_probability_threshold) if allow_economic else {'ok':False,'reason':'specialist_not_enabled','folds':[]}
         # V58.1: economic evidence can validate the return selector even when point-regression MAE/rank is mediocre.
         # Classification gates remain mandatory; this does not promote weak classifiers.
         economic_return_ok=bool(utility_ok and wf.get('ok') and ch_pf>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_PF','1.10')) and ch_sign>=float(os.getenv('EXECUTION_RETURN_CHAMPION_MIN_SIGN_ACCURACY','0.56')))
@@ -601,18 +601,43 @@ def _train_group(rows,key):
     return {'fill':fill,'outcome':outcome,'rejections':rejections,'samples':len(rows),'key':key,'fill_prior':fill_prior}
 
 def _cloud_path():return os.getenv('EXECUTION_MODEL_V57_CLOUD_PATH','v57/latest/execution_model_v57.joblib')
-def _upload(path):
+def _runtime_bundle(bundle):
+    """Build a minimal inference bundle for cloud publication. Training/WF diagnostics stay local."""
+    runtime_models={}
+    for key,g in (bundle.get('models') or {}).items():
+        # A shadow bundle is never used for inference, so do not upload dozens of fitted estimators.
+        outcome=[m for m in (g.get('outcome') or []) if m.get('champion_ok')]
+        fill=[m for m in (g.get('fill') or []) if m.get('runtime_ok')] if outcome else []
+        runtime_models[key]={'key':g.get('key') or key,'samples':g.get('samples'),'fill_prior':g.get('fill_prior'),'fill':fill,'outcome':outcome,'rejections':[]}
+    return {k:bundle.get(k) for k in ('schema','version','status','trained_at','feature_names','rows','trigger')} | {'models':runtime_models}
+
+def _upload_bundle(bundle):
     global _LAST_CLOUD_ERROR
     _LAST_CLOUD_ERROR=None
+    tmp=MODEL_PATH.with_suffix('.cloud.joblib')
     try:
-        st=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')); data=path.read_bytes(); obj=_cloud_path()
+        import joblib, hashlib
+        rb=_runtime_bundle(bundle)
+        joblib.dump(rb,tmp,compress=3)
+        data=tmp.read_bytes(); max_bytes=int(os.getenv('EXECUTION_CLOUD_MAX_BYTES','45000000'))
+        if len(data)>max_bytes:
+            raise RuntimeError(f'compact runtime bundle too large: {len(data)} > {max_bytes}')
+        st=_client().storage.from_(os.getenv('SUPABASE_MODEL_BUCKET','models')); obj=_cloud_path()
         try:st.upload(obj,data,{'content-type':'application/octet-stream','upsert':'true'})
-        except Exception:
-            st.update(obj,data,{'content-type':'application/octet-stream'})
+        except Exception:st.update(obj,data,{'content-type':'application/octet-stream'})
+        # Read-after-write verification: version/schema/hash must match what was published.
+        downloaded=st.download(obj); downloaded=downloaded if isinstance(downloaded,bytes) else bytes(getattr(downloaded,'content',downloaded))
+        if hashlib.sha256(downloaded).hexdigest()!=hashlib.sha256(data).hexdigest():
+            raise RuntimeError('cloud publish hash verification failed')
+        verify=MODEL_PATH.with_suffix('.verify.joblib'); verify.write_bytes(downloaded); vb=joblib.load(verify); verify.unlink(missing_ok=True)
+        if vb.get('version')!=bundle.get('version') or vb.get('schema')!=bundle.get('schema'):
+            raise RuntimeError('cloud publish version/schema verification failed')
         return True
     except Exception as exc:
         _LAST_CLOUD_ERROR=f'{type(exc).__name__}: {exc}'
         return False
+    finally:
+        tmp.unlink(missing_ok=True)
 
 def _restore():
     try:
@@ -664,8 +689,8 @@ def train(trigger='manual'):
     min_champ=max(1,int(os.getenv('EXECUTION_ML_CHAMPION_MIN_MODELS','1')))
     breakout_champions=[m for m in (models.get('BREAKOUT|LONG') or {}).get('outcome',[]) if m.get('champion_ok')]
     status='champion' if len(breakout_champions)>=min_champ else 'shadow'
-    bundle={'schema':586,'version':'execution-ensemble-v58.6-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
-    MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH); cloud=_upload(MODEL_PATH); invalidate_cache()
+    bundle={'schema':5861,'version':'execution-ensemble-v58.6.1-'+datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),'status':status,'trained_at':datetime.now(timezone.utc).isoformat(),'feature_names':FEATURE_NAMES,'models':models,'rows':len(rows),'trigger':trigger}
+    MODEL_PATH.parent.mkdir(parents=True,exist_ok=True); joblib.dump(bundle,MODEL_PATH,compress=3); cloud=_upload_bundle(bundle); invalidate_cache()
     trained_models=sum(len(g.get('fill') or [])+len(g.get('outcome') or []) for g in models.values())
     rejection_counts={}
     for g in models.values():

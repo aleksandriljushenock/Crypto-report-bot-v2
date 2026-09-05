@@ -181,7 +181,7 @@ class AutomationSupervisor:
             PeriodicWorker(
                 'execution-v57-model-trainer', execution_model_minutes * 60,
                 self._guarded('execution-v57-model-trainer', self._run_execution_model_v57), self.logger,
-                enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=900,
+                enabled=self._bool_env('EXECUTION_ML_ENABLED', True), first_delay=300,
             ),
             PeriodicWorker(
                 'execution-v57-backfill', execution_backfill_minutes * 60,
@@ -356,12 +356,33 @@ class AutomationSupervisor:
         return result
 
     def _run_execution_model_v57(self):
+        """Fully automatic execution learning cycle: refresh labels -> train -> diagnose -> publish status."""
         try:
-            result=train_execution_model_v57(trigger='scheduled')
-            self.logger(f"Execution ML v57: status={result.get('status')} rows={result.get('rows')} best_auc={result.get('best_auc')}")
-            return result
+            from backfill_execution_dataset_v57 import backfill
+            from execution_model_v57 import diagnose
+            import json
+            from pathlib import Path
+            backfill_result=backfill(limit=integer('EXECUTION_AUTO_BACKFILL_ROWS',10000,minimum=1,maximum=20000),dry_run=False)
+            if backfill_result.get('errors'):
+                self.logger(f"Execution ML auto: backfill errors={backfill_result.get('errors')}; training blocked")
+                return {'status':'backfill-error','backfill':backfill_result}
+            result=train_execution_model_v57(trigger='scheduled-auto')
+            diagnostic=diagnose()
+            diag_path=Path('data/execution_v58_6_1_latest_diagnostic.json')
+            diag_path.parent.mkdir(parents=True,exist_ok=True)
+            diag_path.write_text(json.dumps(diagnostic,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            self.logger(f"Execution ML auto: status={result.get('status')} rows={result.get('rows')} healthy={result.get('healthy_models')} champions={result.get('champion_models')} cloud_saved={result.get('cloud_saved')}")
+            if self.chat_id and self._bool_env('EXECUTION_ML_AUTO_NOTIFY', True):
+                msg=("🧠 <b>Execution ML auto</b>\n"
+                     f"Status: {result.get('status')}\nRows: {result.get('rows')}\n"
+                     f"Healthy: {result.get('healthy_models')} | Champion: {result.get('champion_models')}\n"
+                     f"Cloud: {'OK' if result.get('cloud_saved') else 'ERROR'}")
+                if result.get('cloud_error'): msg += f"\nCloud error: {str(result.get('cloud_error'))[:180]}"
+                try: self.sender(self.chat_id,msg)
+                except Exception as exc: self.logger(f"Execution ML auto notify error: {exc}")
+            return {'status':result.get('status'),'training':result,'backfill':backfill_result,'diagnostic_path':str(diag_path)}
         except Exception as exc:
-            self.logger(f"Execution ML v57 error: {type(exc).__name__}: {exc}")
+            self.logger(f"Execution ML auto error: {type(exc).__name__}: {exc}")
             return {'status':'error','error':f'{type(exc).__name__}: {exc}'}
 
     def _run_execution_backfill_v57(self):
