@@ -305,7 +305,10 @@ class AutomationSupervisor:
 
     def _run_outcomes(self):
         result = update_due_outcomes()
-        self.logger(f"Outcome tracker: updated={result.get('updated')}, errors={len(result.get('errors', []))}")
+        unavailable=result.get('market_unavailable', []) or []
+        self.logger(f"Outcome tracker: updated={result.get('updated')}, market_unavailable={len(unavailable)}, errors={len(result.get('errors', []))}")
+        for item in unavailable[:10]:
+            self.logger(f"Outcome tracker market unavailable: {item}")
         for error_text in result.get("errors", []):
             self.logger(f"Outcome tracker error: {error_text}")
         return result
@@ -430,6 +433,16 @@ class AutomationSupervisor:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         timeout = integer('EXECUTION_TRAINING_TIMEOUT_SECONDS', 10800, minimum=900, maximum=21600)
+        stage_limits = {
+            'lease-wait': integer('EXECUTION_STAGE_LEASE_TIMEOUT_SECONDS', 300, minimum=60, maximum=1800),
+            'backfill': integer('EXECUTION_STAGE_BACKFILL_TIMEOUT_SECONDS', 1800, minimum=300, maximum=7200),
+            'train': integer('EXECUTION_STAGE_TRAIN_TIMEOUT_SECONDS', 9000, minimum=900, maximum=18000),
+            'diagnose': integer('EXECUTION_STAGE_DIAGNOSE_TIMEOUT_SECONDS', 900, minimum=120, maximum=3600),
+        }
+        stall_limits = {
+            'backfill': integer('EXECUTION_STAGE_BACKFILL_STALL_SECONDS', 300, minimum=60, maximum=1800),
+            'diagnose': integer('EXECUTION_STAGE_DIAGNOSE_STALL_SECONDS', 600, minimum=120, maximum=1800),
+        }
         retries = integer('EXECUTION_AUTO_RETRIES', 2, minimum=1, maximum=4)
         backoff = integer('EXECUTION_AUTO_RETRY_BACKOFF_SECONDS', 60, minimum=10, maximum=900)
         workers = min(os.cpu_count() or 1, integer('EXECUTION_VPS_TRAINING_WORKERS', 4, minimum=1, maximum=4))
@@ -469,13 +482,17 @@ class AutomationSupervisor:
                 )
                 deadline = time.monotonic() + timeout
                 last_stage = None
+                stage_started = time.monotonic()
+                last_progress_change = stage_started
+                last_progress_sig = None
                 last_heartbeat = 0.0
                 rc = None
+                forced_reason = None
                 while time.monotonic() < deadline:
                     rc = proc.poll()
                     if rc is not None:
                         break
-                    stage = None
+                    stage = None; progress = {}
                     try:
                         if progress_path.exists():
                             progress = json.loads(progress_path.read_text(encoding='utf-8'))
@@ -483,7 +500,17 @@ class AutomationSupervisor:
                     except Exception:
                         progress = {}
                     now_mono = time.monotonic()
-                    if stage != last_stage or now_mono - last_heartbeat >= 60:
+                    if stage != last_stage:
+                        last_stage = stage; stage_started = now_mono; last_progress_change = now_mono; last_progress_sig = None
+                    sig=(stage, progress.get('phase'), progress.get('processed'), progress.get('written'), progress.get('skipped'), progress.get('errors'))
+                    if sig != last_progress_sig:
+                        last_progress_sig=sig; last_progress_change=now_mono
+                    stage_elapsed=now_mono-stage_started
+                    if stage in stage_limits and stage_elapsed > stage_limits[stage]:
+                        forced_reason=f'stage-timeout:{stage}:{int(stage_elapsed)}s'; last_error=forced_reason; break
+                    if stage in stall_limits and now_mono-last_progress_change > stall_limits[stage]:
+                        forced_reason=f'stage-stalled:{stage}:{int(now_mono-last_progress_change)}s'; last_error=forced_reason; break
+                    if now_mono - last_heartbeat >= 60 or stage_elapsed < 3:
                         rss_mb = None
                         try:
                             for line in Path(f'/proc/{proc.pid}/status').read_text().splitlines():
@@ -491,8 +518,13 @@ class AutomationSupervisor:
                                     rss_mb = round(int(line.split()[1]) / 1024.0, 1); break
                         except Exception:
                             pass
-                        self.logger(f"Execution ML auto: running pid={proc.pid} stage={stage or 'starting'} elapsed={round(timeout-(deadline-now_mono),1)}s rss={rss_mb}MB")
-                        last_stage = stage; last_heartbeat = now_mono
+                        detail=''
+                        if stage=='backfill':
+                            detail=f" phase={progress.get('phase')} processed={progress.get('processed')}/{progress.get('total')} written={progress.get('written')} skipped={progress.get('skipped')} errors={progress.get('errors')}"
+                        self.logger(f"Execution ML auto: running pid={proc.pid} stage={stage or 'starting'} stage_elapsed={round(stage_elapsed,1)}s total_elapsed={round(timeout-(deadline-now_mono),1)}s rss={rss_mb}MB{detail}")
+                        last_heartbeat = now_mono
+                    if forced_reason:
+                        break
                     time.sleep(2)
                 if rc is None:
                     import signal
@@ -503,7 +535,7 @@ class AutomationSupervisor:
                         try: os.killpg(proc.pid, signal.SIGKILL)
                         except Exception: pass
                     rc = 124
-                    last_error = f'training-timeout-{timeout}s'
+                    last_error = forced_reason or f'training-timeout-{timeout}s'
             if rc == 4 and result_path.exists():
                 try:
                     busy_result = json.loads(result_path.read_text(encoding='utf-8'))
@@ -526,7 +558,7 @@ class AutomationSupervisor:
                 )
                 if self.chat_id and self._bool_env('EXECUTION_ML_AUTO_NOTIFY', True):
                     analysis=result.get('auto_analysis') or {}
-                    msg=("🧠 <b>Execution ML v58.6.3 auto</b>\n"
+                    msg=("🧠 <b>Execution ML v58.6.4 auto</b>\n"
                          f"Status: {result.get('status')}\nRows: {result.get('rows')}\n"
                          f"Healthy: {result.get('healthy_models')} | Champion: {result.get('champion_models')}\n"
                          f"BREAKOUT AUC: {analysis.get('champion_auc')} | PF: {analysis.get('champion_pf')}\n"
@@ -592,7 +624,7 @@ def build_automation_status(supervisor):
         'self-learning-engine': 'Self Learning Engine',
         'ai-optimizer-adaptive-models': 'AI Optimizer + Adaptive Models',
         'profit-profile-rebuild': 'Profit Profile Rebuild',
-        'execution-v57-model-trainer': 'Execution ML v58.6.3',
+        'execution-v57-model-trainer': 'Execution ML v58.6.4',
         'execution-v57-backfill': 'Execution Backfill',
     }
     for name, runtime in status['runtime'].items():

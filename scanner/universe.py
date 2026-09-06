@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from core.runtime_config import boolean, integer, string, scanner_config
 from core.runtime_state import update as runtime_update
 from main import collect_symbol_data, select_top_symbols
-from trade_market_client import create_trade_market_client, collect_multi_exchange_universe
+from trade_market_client import create_trade_market_client, collect_multi_exchange_universe, normalize_trade_symbol, known_tradable_any
 from scanner.analysis import analyze_snapshot
 
 def _set_scan_state(**updates):
@@ -38,9 +38,13 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
         except Exception:
             tradable = set(selected_map)
 
-    for symbol in extra_symbols or []:
-        if symbol not in selected_map and (use_multi or symbol in tradable):
-            try:
+    for raw_symbol in extra_symbols or []:
+        symbol=normalize_trade_symbol(raw_symbol)
+        if not symbol or symbol in selected_map:
+            continue
+        if (use_multi and not known_tradable_any(symbol)) or (not use_multi and symbol not in tradable):
+            continue
+        try:
                 ticker = client.ticker_24h(symbol)
                 selected_map[symbol] = {
                     'symbol': symbol,
@@ -48,8 +52,8 @@ def collect_market_snapshot(extra_symbols=None, top_limit=None):
                     'priceChangePercent': float(ticker.get('priceChangePercent') or 0),
                     'quoteVolume': float(ticker.get('quoteVolume') or 0),
                 }
-            except Exception:
-                continue
+        except Exception:
+            continue
 
     result = {
         'runTimeUtc': datetime.now(timezone.utc).isoformat(),
@@ -106,8 +110,11 @@ def _select_market_symbols(extra_symbols=None, top_limit=None, only_symbols=None
     else:
         selected = select_top_symbols(client)[:limit]
     selected_map = {item['symbol']: dict(item) for item in selected}
-    for symbol in extra_symbols or []:
-        if symbol in selected_map:
+    for raw_symbol in extra_symbols or []:
+        symbol=normalize_trade_symbol(raw_symbol)
+        if not symbol or symbol in selected_map:
+            continue
+        if use_multi and not known_tradable_any(symbol):
             continue
         try:
             ticker = client.ticker_24h(symbol)
@@ -204,7 +211,7 @@ def get_priority_listing_symbols(limit=20):
                          COALESCE(onboard_timestamp, 0) DESC
                 LIMIT ?
             ''', (limit,)).fetchall()
-        symbols.extend(row['symbol'] for row in rows)
+        symbols.extend(normalize_trade_symbol(row['symbol']) for row in rows if row['symbol'])
     except Exception:
         pass
     return list(dict.fromkeys(symbols))
@@ -223,7 +230,7 @@ def get_priority_discovery_symbols(limit=20):
                 ORDER BY COALESCE(prelisting_score, 0) DESC, discovered_at DESC
                 LIMIT ?
             """, (limit,)).fetchall()
-        symbols.extend(str(row['symbol']).upper() + 'USDT' for row in rows)
+        symbols.extend(normalize_trade_symbol(row['symbol']) for row in rows if row['symbol'])
     except Exception:
         pass
     return list(dict.fromkeys(symbols))

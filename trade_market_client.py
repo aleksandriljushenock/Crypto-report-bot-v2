@@ -165,6 +165,22 @@ def _provider_supports_symbol(provider, symbol):
     return not known or symbol in known
 
 
+
+def known_tradable_any(symbol: str | None) -> bool:
+    """Return True only when the latest provider universe confirms the symbol.
+
+    If no provider universe has been loaded yet, return True to avoid a startup
+    false-negative; once universe metadata exists this becomes a strict admission gate.
+    """
+    sym=normalize_trade_symbol(symbol)
+    if not sym:
+        return False
+    with _PROVIDER_LOCK:
+        known_sets=[set(v) for v in _PROVIDER_SYMBOLS.values() if v]
+    if not known_sets:
+        return True
+    return any(sym in items for items in known_sets)
+
 def collect_multi_exchange_universe(top_limit=30, min_quote_volume=0.0, timeout=8):
     """Build a deduplicated, diverse USDT perpetual universe across venues.
 

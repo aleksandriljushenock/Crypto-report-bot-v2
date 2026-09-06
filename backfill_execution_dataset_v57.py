@@ -114,6 +114,18 @@ def _candles_any(symbol,start,end,interval='5m',preferred=None,session=None):
         if rows:return rows,provider,attempts
     return [],None,attempts
 
+def _attempts_confirm_unsupported(attempts):
+    markers=('invalid symbol','symbol is invalid','unknown symbol','symbol not found','not found','unsupported symbol','does not exist','contract not found')
+    checked=0
+    for item in attempts or []:
+        err=str(item.get('error') or '').lower()
+        if not err:
+            return False
+        checked+=1
+        if not any(m in err for m in markers):
+            return False
+    return checked > 0
+
 def _funding_pct(side, start, end):
     if not start or not end: return 0.0
     hours=max(0.0,(end-start).total_seconds()/3600.0)
@@ -155,10 +167,10 @@ def _client():
     from cloud_client import get_supabase_client
     return get_supabase_client()
 
-def _paged(table,limit,order='created_at'):
-    out=[]; off=0; page=1000
+def _paged(table,limit,order='created_at', *, desc=False, columns='*', client=None):
+    out=[]; off=0; page=1000; client=client or _client()
     while len(out)<limit:
-        rows=(_client().table(table).select('*').order(order,desc=False).range(off,min(off+page-1,limit-1)).execute().data or [])
+        rows=(client.table(table).select(columns).order(order,desc=bool(desc)).range(off,min(off+page-1,limit-1)).execute().data or [])
         if not rows:break
         out.extend(rows)
         if len(rows)<page:break
@@ -169,32 +181,11 @@ def _paper_rows(limit):
     try:return _paged('paper_positions',limit,'created_at')
     except Exception:return []
 
-def _learning_payload_map(limit):
-    """Best-effort enrichment for legacy sparse shadow payloads by signal fingerprint."""
-    out={}
+def _learning_payload_maps(limit, client=None):
+    """Load legacy enrichment maps in one paged pass instead of reading the same table twice."""
+    by_fp={}; by_key={}; client=client or _client()
     try:
-        for r in _paged('learning_observations',limit,'signal_created_at'):
-            features=r.get('features') or {}; meta=r.get('metadata') or {}
-            if isinstance(features,str):
-                try:features=json.loads(features)
-                except Exception:features={}
-            if isinstance(meta,str):
-                try:meta=json.loads(meta)
-                except Exception:meta={}
-            fp=str((features or {}).get('fingerprint') or (meta or {}).get('fingerprint') or '')
-            if fp and isinstance(features,dict): out[fp]=features
-    except Exception:pass
-    return out
-
-def _legacy_match_key(row):
-    created=_dt(row.get('created_at') or row.get('signal_created_at'))
-    bucket=created.replace(second=0,microsecond=0).isoformat() if created else ''
-    return '|'.join([str(row.get('symbol') or '').upper(),bucket,_side(row.get('direction')),str(row.get('setup') or '').upper(),f"{_num(row.get('target_entry') or row.get('entry')):.8f}"])
-
-def _learning_payload_maps(limit):
-    by_fp=_learning_payload_map(limit); by_key={}
-    try:
-        for r in _paged('learning_observations',limit,'signal_created_at'):
+        for r in _paged('learning_observations',limit,'signal_created_at',client=client):
             features=r.get('features') or {}; meta=r.get('metadata') or {}
             if isinstance(features,str):
                 try: features=json.loads(features)
@@ -203,10 +194,17 @@ def _learning_payload_maps(limit):
                 try: meta=json.loads(meta)
                 except Exception: meta={}
             if not isinstance(features,dict): continue
+            fp=str(features.get('fingerprint') or (meta or {}).get('fingerprint') or '')
+            if fp: by_fp[fp]=features
             row={'symbol':r.get('symbol') or features.get('symbol'),'created_at':r.get('signal_created_at'),'direction':r.get('direction') or features.get('direction'),'setup':features.get('setup'),'target_entry':features.get('entryPrice') or features.get('entry')}
             by_key[_legacy_match_key(row)]=features
     except Exception: pass
     return by_fp,by_key
+
+def _legacy_match_key(row):
+    created=_dt(row.get('created_at') or row.get('signal_created_at'))
+    bucket=created.replace(second=0,microsecond=0).isoformat() if created else ''
+    return '|'.join([str(row.get('symbol') or '').upper(),bucket,_side(row.get('direction')),str(row.get('setup') or '').upper(),f"{_num(row.get('target_entry') or row.get('entry')):.8f}"])
 
 def _merge_payload(sparse, rich):
     if not isinstance(sparse,dict): sparse={}
@@ -248,34 +246,116 @@ def _paper_sample(r):
     sample_type='PAPER_EXECUTION' if filled and out not in {'UNRESOLVED','NO_FILL'} else ('PAPER_FILL' if filled else ('PAPER_NO_FILL' if terminal_no_fill else 'PAPER_PENDING'))
     return {'sample_id':'paper:'+str(r.get('id')),'source_id':str(r.get('id')),'sample_type':sample_type,'decision_at_signal':'ACCEPTED','fingerprint':r.get('fingerprint'),'symbol':r.get('symbol'),'direction':r.get('side'),'setup':payload.get('setup'),'source':r.get('source'),'signal_created_at':r.get('created_at') or r.get('opened_at'),'entry_status':entry_status,'target_entry':r.get('signal_entry_price') or r.get('entry_price'),'actual_entry':r.get('entry_price') if filled else None,'filled_at':r.get('opened_at') if filled else None,'exit_at':r.get('closed_at') if filled else None,'exit_reason':r.get('close_reason'),'outcome':out,'net_return_pct':net_ret,'r_multiple':rmult,'provider':r.get('execution_provider') if filled else None,'provider_attempts':[],'candle_interval':'paper','ambiguous_same_candle':False,'label_version':'paper_verified_v586_costs','sample_weight':float(os.getenv('EXECUTION_PAPER_SAMPLE_WEIGHT','4.0')),'feature_payload':payload,'updated_at':datetime.now(timezone.utc).isoformat()}
 
-def backfill(limit=10000,dry_run=False):
-    shadows=_paged('shadow_signals_v22',limit,'created_at'); sess=requests.Session(); done=unresolved=ambiguous=errors=0
-    client=_client(); rich_by_fp,rich_by_key=_learning_payload_maps(limit)
-    for row in shadows:
+CURRENT_SHADOW_LABEL='first_hit_v586_costs'
+CURRENT_PAPER_LABEL='paper_verified_v586_costs'
+
+def _iso_age_hours(value, now=None):
+    dt=_dt(value); now=now or datetime.now(timezone.utc)
+    return ((now-dt).total_seconds()/3600.0) if dt else 1e9
+
+def _existing_samples(limit, client):
+    """Return recent execution labels so autonomous backfill can be incremental."""
+    try:
+        rows=_paged('execution_training_dataset_v57',max(limit*2,5000),'signal_created_at',desc=True,columns='sample_id,label_version,entry_status,outcome,updated_at,exit_at',client=client)
+        return {str(r.get('sample_id')):r for r in rows if r.get('sample_id')}
+    except Exception:
+        return {}
+
+def _sample_is_fresh(existing, *, source_filled=False, source_terminal_no_fill=False, retry_hours=6.0):
+    if not existing: return False
+    status=str(existing.get('entry_status') or '').lower(); outcome=str(existing.get('outcome') or '').upper()
+    label=str(existing.get('label_version') or '')
+    if label not in {CURRENT_SHADOW_LABEL,CURRENT_PAPER_LABEL}: return False
+    if source_filled and status!='filled': return False
+    if source_terminal_no_fill and status!='no_fill': return False
+    if status=='filled' and outcome not in {'','UNRESOLVED','AMBIGUOUS'}: return True
+    if status=='no_fill': return True
+    return _iso_age_hours(existing.get('updated_at')) < retry_hours
+
+def _flush_upserts(client, buffer, dry_run=False):
+    if not buffer or dry_run: buffer.clear(); return
+    client.table('execution_training_dataset_v57').upsert(list(buffer),on_conflict='sample_id').execute()
+    buffer.clear()
+
+def _emit_progress(callback, stage, **payload):
+    if callback:
+        try: callback(stage, **payload)
+        except Exception: pass
+
+def backfill(limit=10000,dry_run=False, progress_callback=None, incremental=True):
+    """Incrementally refresh execution labels with bounded network/database work.
+
+    Stable terminal samples at the current label version are skipped. Unresolved
+    samples are retried after a configurable cooldown or immediately when the source
+    row has transitioned to filled/no-fill. Progress is emitted for watchdogs.
+    """
+    started=time.monotonic(); now=datetime.now(timezone.utc)
+    client=_client(); sess=requests.Session()
+    retry_hours=max(0.25,float(os.getenv('EXECUTION_BACKFILL_UNRESOLVED_RETRY_HOURS','6')))
+    batch_size=max(10,min(500,int(os.getenv('EXECUTION_BACKFILL_UPSERT_BATCH_SIZE','100'))))
+    source_desc=str(os.getenv('EXECUTION_BACKFILL_RECENT_FIRST','true')).lower() not in {'0','false','no'}
+    shadows=_paged('shadow_signals_v22',limit,'created_at',desc=source_desc,client=client)
+    existing=_existing_samples(limit,client) if incremental else {}
+    rich_by_fp,rich_by_key=_learning_payload_maps(limit,client=client)
+    done=unresolved=ambiguous=errors=skipped=0; buffer=[]
+    total=len(shadows)
+    _emit_progress(progress_callback,'backfill',phase='shadow',processed=0,total=total,written=0,skipped=0,errors=0)
+    last_emit=time.monotonic()
+    unavailable_symbols=set()
+    for i,row in enumerate(shadows,1):
         try:
-            created=_dt(row.get('created_at')); filled=_dt(row.get('filled_at')); status=str(row.get('status') or '').lower(); payload=row.get('payload') or {}; payload=json.loads(payload) if isinstance(payload,str) else (payload or {}); fp=str(payload.get('fingerprint') or ''); payload=_merge_payload(payload,rich_by_fp.get(fp) or rich_by_key.get(_legacy_match_key(row)))
-            base={'sample_id':'shadow:'+str(row['id']),'source_id':row['id'],'sample_type':'SHADOW_EXECUTION' if filled else 'SHADOW_NO_FILL','decision_at_signal':str(payload.get('decisionAtSignal') or 'REJECTED'),'fingerprint':payload.get('fingerprint'),'symbol':row.get('symbol'),'direction':row.get('direction'),'setup':row.get('setup'),'source':row.get('source'),'signal_created_at':row.get('created_at'),'target_entry':row.get('target_entry'),'actual_entry':row.get('actual_entry'),'filled_at':row.get('filled_at'),'feature_payload':payload,'label_version':'first_hit_v586_costs','sample_weight':1.0,'updated_at':datetime.now(timezone.utc).isoformat(),'ambiguous_same_candle':False}
-            if status=='expired' and not filled:base.update(entry_status='no_fill',outcome='NO_FILL',provider_attempts=[])
+            created=_dt(row.get('created_at')); filled=_dt(row.get('filled_at')); status=str(row.get('status') or '').lower()
+            sample_id='shadow:'+str(row['id']); terminal_no_fill=(status=='expired' and not filled)
+            if incremental and _sample_is_fresh(existing.get(sample_id),source_filled=bool(filled),source_terminal_no_fill=terminal_no_fill,retry_hours=retry_hours):
+                skipped+=1
+                continue
+            payload=row.get('payload') or {}; payload=json.loads(payload) if isinstance(payload,str) else (payload or {}); fp=str(payload.get('fingerprint') or '')
+            payload=_merge_payload(payload,rich_by_fp.get(fp) or rich_by_key.get(_legacy_match_key(row)))
+            symbol=str(row.get('symbol') or '').upper()
+            base={'sample_id':sample_id,'source_id':row['id'],'sample_type':'SHADOW_EXECUTION' if filled else 'SHADOW_NO_FILL','decision_at_signal':str(payload.get('decisionAtSignal') or 'REJECTED'),'fingerprint':payload.get('fingerprint'),'symbol':symbol,'direction':row.get('direction'),'setup':row.get('setup'),'source':row.get('source'),'signal_created_at':row.get('created_at'),'target_entry':row.get('target_entry'),'actual_entry':row.get('actual_entry'),'filled_at':row.get('filled_at'),'feature_payload':payload,'label_version':CURRENT_SHADOW_LABEL,'sample_weight':1.0,'updated_at':datetime.now(timezone.utc).isoformat(),'ambiguous_same_candle':False}
+            if terminal_no_fill:
+                base.update(entry_status='no_fill',outcome='NO_FILL',provider_attempts=[])
             elif filled:
-                end=min(filled+timedelta(hours=float(os.getenv('EXECUTION_BACKFILL_MAX_HOLD_HOURS','72'))),datetime.now(timezone.utc)); preferred=str(payload.get('executionProvider') or payload.get('marketProvider') or '').lower() or None
-                candles,provider,attempts=_candles_any(str(row.get('symbol')),filled,end,'5m',preferred,sess)
-                def mins(a,b):return _candles_any(str(row.get('symbol')),a,b,'1m',provider,sess)[0]
-                res=_resolve(row,candles,mins); base.update(entry_status='filled',provider=provider,provider_attempts=attempts,candle_interval='5m',**res)
-                if res.get('outcome')=='AMBIGUOUS':ambiguous+=1; unresolved+=1
-                elif res.get('outcome')=='UNRESOLVED':unresolved+=1
-            else:base.update(entry_status='unresolved',outcome='UNRESOLVED',provider_attempts=[]); unresolved+=1
+                if symbol in unavailable_symbols:
+                    base.update(entry_status='filled',outcome='UNRESOLVED',provider_attempts=[],market_unavailable=True); unresolved+=1
+                else:
+                    end=min(filled+timedelta(hours=float(os.getenv('EXECUTION_BACKFILL_MAX_HOLD_HOURS','72'))),datetime.now(timezone.utc)); preferred=str(payload.get('executionProvider') or payload.get('marketProvider') or '').lower() or None
+                    candles,provider,attempts=_candles_any(symbol,filled,end,'5m',preferred,sess)
+                    if not candles and _attempts_confirm_unsupported(attempts): unavailable_symbols.add(symbol)
+                    def mins(a,b):return _candles_any(symbol,a,b,'1m',provider,sess)[0]
+                    res=_resolve(row,candles,mins); base.update(entry_status='filled',provider=provider,provider_attempts=attempts,candle_interval='5m',**res)
+                    if res.get('outcome')=='AMBIGUOUS':ambiguous+=1; unresolved+=1
+                    elif res.get('outcome')=='UNRESOLVED':unresolved+=1
+            else:
+                base.update(entry_status='unresolved',outcome='UNRESOLVED',provider_attempts=[]); unresolved+=1
             if filled and created:base['fill_delay_minutes']=(filled-created).total_seconds()/60
-            if not dry_run:client.table('execution_training_dataset_v57').upsert(base,on_conflict='sample_id').execute()
-            done+=1
-        except Exception as exc:errors+=1; print('ERROR',row.get('symbol'),row.get('id'),type(exc).__name__,exc)
-    paper_written=0
-    for r in _paper_rows(limit):
+            buffer.append(base); done+=1
+            if len(buffer)>=batch_size: _flush_upserts(client,buffer,dry_run)
+        except Exception as exc:
+            errors+=1; print('ERROR',row.get('symbol'),row.get('id'),type(exc).__name__,exc,flush=True)
+        if i==total or time.monotonic()-last_emit>=5 or i%100==0:
+            _flush_upserts(client,buffer,dry_run)
+            _emit_progress(progress_callback,'backfill',phase='shadow',processed=i,total=total,written=done,skipped=skipped,unresolved=unresolved,errors=errors,elapsed_seconds=round(time.monotonic()-started,1),last_symbol=row.get('symbol'))
+            last_emit=time.monotonic()
+    _flush_upserts(client,buffer,dry_run)
+
+    paper_rows=_paper_rows(limit); paper_written=paper_skipped=0; paper_buffer=[]; ptotal=len(paper_rows)
+    _emit_progress(progress_callback,'backfill',phase='paper',processed=0,total=ptotal,written=0,skipped=0,errors=errors)
+    for i,r in enumerate(paper_rows,1):
         try:
-            sample=_paper_sample(r)
-            if not dry_run:client.table('execution_training_dataset_v57').upsert(sample,on_conflict='sample_id').execute()
-            paper_written+=1
-        except Exception as exc:errors+=1; print('PAPER_ERROR',r.get('id'),type(exc).__name__,exc)
-    return {'status':'ok','shadow_rows':len(shadows),'shadow_written':done,'paper_written':paper_written,'unresolved':unresolved,'ambiguous':ambiguous,'errors':errors,'dry_run':dry_run}
+            sample_id='paper:'+str(r.get('id')); status=str(r.get('status') or '').lower(); filled=_paper_fill_verified(r); terminal_no_fill=status in {'cancelled','expired','rejected','invalid'} and not filled
+            if incremental and _sample_is_fresh(existing.get(sample_id),source_filled=filled,source_terminal_no_fill=terminal_no_fill,retry_hours=retry_hours):
+                paper_skipped+=1; continue
+            sample=_paper_sample(r); paper_buffer.append(sample); paper_written+=1
+            if len(paper_buffer)>=batch_size:_flush_upserts(client,paper_buffer,dry_run)
+        except Exception as exc:
+            errors+=1; print('PAPER_ERROR',r.get('id'),type(exc).__name__,exc,flush=True)
+        if i==ptotal or time.monotonic()-last_emit>=5 or i%100==0:
+            _flush_upserts(client,paper_buffer,dry_run)
+            _emit_progress(progress_callback,'backfill',phase='paper',processed=i,total=ptotal,written=paper_written,skipped=paper_skipped,errors=errors,elapsed_seconds=round(time.monotonic()-started,1))
+            last_emit=time.monotonic()
+    _flush_upserts(client,paper_buffer,dry_run)
+    return {'status':'ok','shadow_rows':len(shadows),'shadow_written':done,'shadow_skipped':skipped,'paper_rows':ptotal,'paper_written':paper_written,'paper_skipped':paper_skipped,'unresolved':unresolved,'ambiguous':ambiguous,'unsupported_symbols':len(unavailable_symbols),'errors':errors,'dry_run':dry_run,'incremental':incremental,'duration_seconds':round(time.monotonic()-started,1)}
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--limit',type=int,default=int(os.getenv('EXECUTION_BACKFILL_MAX_ROWS','10000'))); p.add_argument('--dry-run',action='store_true'); a=p.parse_args(); print(json.dumps(backfill(a.limit,a.dry_run),ensure_ascii=False,indent=2))

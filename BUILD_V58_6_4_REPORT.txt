@@ -1,0 +1,7 @@
+v58.6.4 build report
+- stage watchdog added
+- progress-aware incremental backfill added
+- batch Supabase upsert added
+- distributed lease scope reduced
+- unsupported/delisted outcome handling fixed
+- dynamic-universe extra-symbol admission hardened
