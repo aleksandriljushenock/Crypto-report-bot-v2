@@ -23,7 +23,7 @@ def test_ood_cap_semantics(monkeypatch):
     assert p['threshold'] <= .75
 
 def test_version_586():
-    assert open('VERSION').read().strip()in {'58.6.2','58.6.3','58.6.4'},'58.6.3'
+    assert open('VERSION').read().strip()in {'58.6.2','58.6.3','58.6.4','58.7.0'},'58.6.3'
 
 def test_v5861_breakout_wf_runs_without_main_utility(monkeypatch):
     import execution_model_v57 as m

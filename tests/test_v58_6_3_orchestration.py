@@ -4,7 +4,7 @@ import time
 
 
 def test_version_5863():
-    assert Path('VERSION').read_text().strip() in {'58.6.3','58.6.4'}
+    assert Path('VERSION').read_text().strip() in {'58.6.3','58.6.4','58.7.0'}
 
 
 def test_heavy_queue_prefers_execution_when_slot_releases():
@@ -52,7 +52,7 @@ def test_invalid_symbol_errors_are_negative_cached():
 
 def test_release_builder_targets_new_release():
     text=Path('scripts/build_release.py').read_text()
-    assert 'Crypto-report-bot-v58.6.4-autonomous-watchdog.zip' in text
+    assert 'Crypto-report-bot-v58.7.0-agentic-maintenance.zip' in text
 
 def test_trade_symbol_canonicalization_for_legacy_base_symbols():
     import trade_market_client as t

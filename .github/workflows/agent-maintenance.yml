@@ -1,0 +1,37 @@
+name: Agent maintenance intake
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - id: audit
+        continue-on-error: true
+        run: |
+          python scripts/agent_audit.py --strict --json > agent-audit.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+      - id: compile
+        continue-on-error: true
+        run: python -m compileall -q .
+      - name: Create or update agent-ready issue
+        if: steps.audit.outcome == 'failure' || steps.compile.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.existsSync('agent-audit.json') ? fs.readFileSync('agent-audit.json','utf8').slice(0,50000) : 'audit unavailable';
+            for (const [name,color] of [['agent-ready','5319e7'],['bug','d73a4a']]) { try { await github.rest.issues.getLabel({owner:context.repo.owner,repo:context.repo.repo,name}); } catch(e) { if(e.status===404) await github.rest.issues.createLabel({owner:context.repo.owner,repo:context.repo.repo,name,color}); else throw e; } }
+            const title='[agent] Automated maintenance findings';
+            const body=`Automated repository audit found a failure.\n\nTreat AGENTS.md as the operating contract. Create a branch, fix root causes, add regression tests, and open a PR. Do not weaken profitability/safety gates.\n\n\`\`\`json\n${report}\n\`\`\``;
+            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,state:'open',labels:'agent-ready',per_page:100});
+            const existing=issues.find(i=>i.title===title);
+            if(existing) await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,body});
+            else await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,body,labels:['agent-ready','bug']});

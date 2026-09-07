@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_version_5864():
-    assert Path('VERSION').read_text().strip() == '58.6.4'
+    assert Path('VERSION').read_text().strip() in {'58.6.4','58.7.0'},'58.7.0'
 
 
 def test_incremental_backfill_fresh_terminal_skip():

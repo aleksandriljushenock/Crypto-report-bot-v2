@@ -1,0 +1,40 @@
+name: Deploy VPS
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref/tag to deploy
+        required: true
+        default: main
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy with rollback
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /opt/crypto-report-bot
+            OLD_SHA=$(git rev-parse HEAD)
+            TARGET='${{ github.event.release.tag_name || inputs.ref }}'
+            git fetch --tags --prune origin
+            git checkout "$TARGET"
+            docker compose -f docker-compose.vps.yml build
+            docker compose -f docker-compose.vps.yml up -d
+            if ! bash scripts/vps_post_deploy_check.sh; then
+              echo "Health check failed; rolling back to $OLD_SHA"
+              git checkout "$OLD_SHA"
+              docker compose -f docker-compose.vps.yml build
+              docker compose -f docker-compose.vps.yml up -d
+              exit 2
+            fi

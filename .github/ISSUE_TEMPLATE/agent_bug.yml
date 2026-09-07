@@ -1,0 +1,14 @@
+name: Agent-ready bug
+about: Structured bug report for autonomous repair
+labels: [bug, agent-ready]
+body:
+  - type: textarea
+    id: symptom
+    attributes: {label: Symptom}
+    validations: {required: true}
+  - type: textarea
+    id: evidence
+    attributes: {label: Logs / evidence}
+  - type: textarea
+    id: expected
+    attributes: {label: Expected behavior}

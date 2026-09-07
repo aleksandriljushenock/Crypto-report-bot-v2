@@ -1,0 +1,25 @@
+version: 1
+mode: guarded_autonomy
+branch_prefix: agent/
+auto_merge_label: agent-auto-merge
+agent_ready_label: agent-ready
+protected_paths:
+  - .github/workflows/
+  - docker-compose
+  - Dockerfile
+  - migrations/
+  - .sql
+  - execution_model_v57.py
+  - paper_trading.py
+  - cloud_model_store.py
+required_checks:
+  - tests
+  - agent-audit
+  - release-guard
+profitability_policy:
+  no_gate_weakening: true
+  chronological_oos_required: true
+  purge_embargo_required: true
+  live_promotion_requires_positive_ci: true
+  live_promotion_requires_positive_expectancy: true
+  live_promotion_requires_pf_above_one: true
